@@ -102,7 +102,7 @@ in a 1MB bundle without GC pauses.
 ```mermaid
 graph TD
     User[User config + data signal] --> Constructor[createLineChart]
-    Constructor --> Normalize[Normalize: data shorthand -> series[]]
+    Constructor --> Normalize["Normalize: data shorthand -> series[]"]
     Normalize --> Accessors[Build accessors x/y]
     Accessors --> InferType[Infer x-scale type]
     InferType --> StateAlloc[Allocate SeriesState slabs]
@@ -115,8 +115,8 @@ graph TD
     Scene --> SeriesNodes[path nodes / one per series]
     SeriesNodes --> DrawFn[makeLineDrawFn closure]
 
-    DrawFn --> PathSelect{n > 2*cols?}
-    PathSelect -->|yes| Decimate[decimateMinMax kernel<br/>lifted from lite-canvas-graph]
+    DrawFn --> PathSelect{"n > 2*cols?"}
+    PathSelect -->|yes| Decimate["decimateMinMax kernel<br/>lifted from lite-canvas-graph"]
     PathSelect -->|no| Polyline[Direct polyline / NaN-aware]
     Decimate --> Stroke[ctx.stroke]
     Polyline --> Stroke
