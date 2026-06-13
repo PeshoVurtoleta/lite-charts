@@ -107,7 +107,7 @@ graph TD
     Accessors --> InferType[Infer x-scale type]
     InferType --> StateAlloc[Allocate SeriesState slabs]
 
-    StateAlloc --> Mount[mount(container)]
+    StateAlloc --> Mount["mount(container)"]
     Mount --> Scene[createScene from lite-scene]
     Scene --> Effect1[Effect: width/height -> plotBounds]
     Scene --> Effect2[Effect: data -> SoA extract -> scale -> pixels]
@@ -118,12 +118,12 @@ graph TD
     DrawFn --> PathSelect{"n > 2*cols?"}
     PathSelect -->|yes| Decimate["decimateMinMax kernel<br/>lifted from lite-canvas-graph"]
     PathSelect -->|no| Polyline[Direct polyline / NaN-aware]
-    Decimate --> Stroke[ctx.stroke]
+    Decimate --> Stroke["ctx.stroke"]
     Polyline --> Stroke
 
     Signal[Any signal write] --> LiteSignal[lite-signal sync flush]
     LiteSignal --> EffectsRun[Effects re-run]
-    EffectsRun --> DirtyBridge[scaleVersion bump -> scene.markDirty]
+    EffectsRun --> DirtyBridge["scaleVersion bump -> scene.markDirty"]
     DirtyBridge --> SceneDraw[lite-scene drawAll / coalesced via _queued]
     SceneDraw --> DrawFn
 ```
