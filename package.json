@@ -1,0 +1,68 @@
+{
+  "name": "@zakkster/lite-charts",
+  "version": "1.1.0",
+  "description": "Reactive, zero-GC chart library. Signal-native data, scales, and dimensions; 60fps at 100k points; zero allocations in steady-state render. Built on @zakkster/lite-scene.",
+  "type": "module",
+  "main": "./Charts.js",
+  "module": "./Charts.js",
+  "types": "./Charts.d.ts",
+  "exports": {
+    ".": {
+      "node": "./Charts.js",
+      "types": "./Charts.d.ts",
+      "import": "./Charts.js",
+      "default": "./Charts.js"
+    }
+  },
+  "files": [
+    "Charts.js",
+    "Charts.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "llms.txt",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "@zakkster/lite-axis": "^1.0.1",
+    "@zakkster/lite-scene": "^1.0.0",
+    "@zakkster/lite-signal": "^1.1.5"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec test/*.test.js",
+    "test:gc": "node --expose-gc --test --test-reporter=spec test/*.test.js",
+    "bench": "node --expose-gc bench/line-100k.mjs",
+    "demo": "node demo/serve.js"
+  },
+  "keywords": [
+    "chart",
+    "charts",
+    "visualization",
+    "canvas",
+    "reactive",
+    "signal",
+    "zero-gc",
+    "performance",
+    "line-chart",
+    "telemetry",
+    "dashboard"
+  ],
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/PeshoVurtoleta/lite-charts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-charts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-charts/issues",
+    "email": "shinikchiev@yahoo.com"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  }
+}

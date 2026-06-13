@@ -1,0 +1,2041 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>@zakkster/lite-charts -- v1.1.0</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+/* =========================================================================
+ * Design tokens. Switching `data-theme` on <html> swaps every color.
+ * Library colors (--c-primary etc.) are also exposed so the chart code
+ * can read them via CSS-var tokens and refreshTheme() picks up changes.
+ * ========================================================================= */
+
+:root[data-theme="dark"] {
+    --bg-base:        #07090f;
+    --bg-elev:        #0d1119;
+    --bg-card:        #131826;
+    --bg-card-hover:  #161c2c;
+    --border:         #1f2740;
+    --border-bright:  #2d3654;
+    --grid-line:      rgba(180, 200, 240, 0.05);
+
+    --text-primary:   #e8ecf5;
+    --text-secondary: #94a3b8;
+    --text-muted:     #5b6478;
+    --text-faint:     #3a4258;
+
+    --c-primary:      #4ade80;        /* phosphor green -- the live signal */
+    --c-cyan:         #22d3ee;
+    --c-amber:        #f59e0b;
+    --c-pink:         #fb7185;
+    --c-violet:       #a78bfa;
+    --c-blue:         #60a5fa;
+
+    --tooltip-bg:     rgba(15, 21, 35, 0.96);
+    --tooltip-border: #2d3654;
+
+    --glow-primary:   0 0 24px rgba(74, 222, 128, 0.18);
+    --shadow-card:    0 1px 0 rgba(255,255,255,0.02), 0 8px 24px rgba(0,0,0,0.4);
+}
+
+:root[data-theme="light"] {
+    --bg-base:        #fafaf7;
+    --bg-elev:        #f5f5f1;
+    --bg-card:        #ffffff;
+    --bg-card-hover:  #fafaf7;
+    --border:         #e5e3dd;
+    --border-bright:  #d4d2cc;
+    --grid-line:      rgba(20, 30, 50, 0.07);
+
+    --text-primary:   #1c1c1a;
+    --text-secondary: #57534e;
+    --text-muted:     #8a8580;
+    --text-faint:     #b8b3ad;
+
+    --c-primary:      #16a34a;
+    --c-cyan:         #0891b2;
+    --c-amber:        #d97706;
+    --c-pink:         #e11d48;
+    --c-violet:       #7c3aed;
+    --c-blue:         #2563eb;
+
+    --tooltip-bg:     rgba(255, 255, 255, 0.98);
+    --tooltip-border: #d4d2cc;
+
+    --glow-primary:   0 0 24px rgba(22, 163, 74, 0.12);
+    --shadow-card:    0 1px 0 rgba(0,0,0,0.02), 0 4px 16px rgba(20,30,50,0.06);
+}
+
+/* =========================================================================
+ * Reset + base
+ * ========================================================================= */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font-family: 'Geist', system-ui, sans-serif;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+body { min-height: 100vh; }
+
+/* Block accidental horizontal page scroll. If a chart canvas or its
+ * legend ever measures wider than the viewport (e.g. a 100+ series
+ * legend that hasn't been virtualized yet), it stays inside its card
+ * instead of pushing the page wide. */
+html, body { overflow-x: hidden; max-width: 100vw; }
+
+/* Subtle ambient background pattern -- dot grid behind everything */
+body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+    background-size: 32px 32px;
+    background-position: -8px -8px;
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: 0;
+}
+
+main { position: relative; z-index: 1; }
+
+a { color: var(--c-cyan); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+}
+
+::selection { background: var(--c-primary); color: var(--bg-base); }
+
+/* =========================================================================
+ * Typography
+ * ========================================================================= */
+
+.mono { font-family: 'Geist Mono', ui-monospace, monospace; font-feature-settings: 'tnum' 1, 'ss01' 1; }
+
+h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.02em; line-height: 1.15; }
+h1 { font-size: clamp(1.75rem, 4vw, 2.5rem); font-weight: 600; }
+h2 { font-size: 1.5rem; }
+h3 { font-size: 1rem; font-weight: 500; letter-spacing: 0; }
+
+.eyebrow {
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--text-muted);
+}
+
+.eyebrow .accent { color: var(--c-primary); }
+
+/* =========================================================================
+ * Layout
+ * ========================================================================= */
+
+.container {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 0 32px;
+}
+
+header.site {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: color-mix(in srgb, var(--bg-base) 92%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 0;
+}
+
+header.site .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+}
+
+.brand {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+}
+
+.brand-logo {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    background: var(--c-primary);
+    border-radius: 2px;
+    box-shadow: var(--glow-primary);
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.5; }
+}
+
+.brand-name {
+    font-family: 'Geist Mono', monospace;
+    font-weight: 600;
+    font-size: 0.9375rem;
+    letter-spacing: -0.01em;
+}
+
+.brand-version {
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+}
+
+.theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    transition: all 0.2s;
+}
+
+.theme-toggle:hover {
+    border-color: var(--border-bright);
+    color: var(--text-primary);
+}
+
+.theme-toggle .indicator {
+    width: 6px;
+    height: 6px;
+    background: var(--c-primary);
+    border-radius: 50%;
+}
+
+section {
+    padding: 80px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+section:first-of-type {
+    padding-top: 64px;
+}
+
+.section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 32px;
+}
+
+.section-head .titles {
+    min-width: 0;
+}
+
+.section-head .titles .eyebrow {
+    margin-bottom: 12px;
+    display: block;
+}
+
+.section-head .titles p {
+    margin: 8px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    max-width: 56ch;
+}
+
+.hero-intro {
+    margin-bottom: 64px;
+}
+
+.hero-intro h1 {
+    margin-bottom: 16px;
+}
+
+.hero-intro p {
+    color: var(--text-secondary);
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    max-width: 60ch;
+    margin: 0;
+}
+
+.hero-intro p .num {
+    color: var(--c-primary);
+    font-family: 'Geist Mono', monospace;
+    font-weight: 600;
+}
+
+/* =========================================================================
+ * Cards
+ * ========================================================================= */
+
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    transition: border-color 0.2s, background-color 0.3s;
+    box-shadow: var(--shadow-card);
+}
+
+.card-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.card h3 {
+    margin: 0;
+}
+
+/* =========================================================================
+ * Hero -- Live Telemetry
+ * ========================================================================= */
+
+.hero-card {
+    display: grid;
+    grid-template-columns: 1fr 240px;
+    gap: 32px;
+    padding: 32px;
+}
+
+@media (max-width: 960px) {
+    .hero-card { grid-template-columns: 1fr; }
+}
+
+/* =========================================================================
+ * Mobile / narrow viewport adjustments
+ * =========================================================================
+ *
+ * Below ~720px the desktop padding (32px on .container + 32px on each
+ * .card + 32px on .dashboard-card) consumes ~128px horizontally per
+ * card edge, leaving < 200px of plot area on a 375px viewport. Compact
+ * the chrome so canvases get most of the width, and shrink chart-area
+ * heights so a card fits on one viewport without scrolling. Also pin
+ * chart-area to min-width: 0 so flex/grid children can shrink instead
+ * of overflowing the card.
+ */
+@media (max-width: 720px) {
+    .container { padding: 0 16px; }
+    .card { padding: 18px; }
+    .dashboard-card { padding: 18px; }
+    .density-card { padding: 18px; }
+    .hero-card { padding: 18px; gap: 18px; }
+    .dashboard-card .chart-area { height: 280px; }
+    .density-card .chart-area { height: 320px; }
+    .hero-chart { min-height: 260px; }
+    .section-head { margin-bottom: 16px; }
+    h1 { letter-spacing: -0.01em; }
+    h2 { font-size: 1.25rem; }
+    .chart-area, .hero-chart { min-width: 0; }
+    /* Pie + donut sit in a flex row of two charts; on mobile stack them
+     * and let each child shrink past its inline min-width: 320px. */
+    .dashboard-card > .chart-area[style*="flex"] {
+        flex-direction: column;
+        min-height: 0 !important;
+        height: auto !important;
+    }
+    .dashboard-card > .chart-area[style*="flex"] > div {
+        min-width: 0 !important;
+        width: 100%;
+        height: 280px;
+    }
+}
+
+@media (max-width: 480px) {
+    .container { padding: 0 12px; }
+    .card { padding: 14px; }
+    .dashboard-card { padding: 14px; }
+    .density-card { padding: 14px; }
+    .dashboard-card .chart-area { height: 240px; }
+    .density-card .chart-area { height: 280px; }
+}
+
+.hero-chart {
+    min-height: 360px;
+    position: relative;
+}
+
+.hero-side {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.metric {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    background: var(--bg-elev);
+}
+
+.metric .lbl {
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.metric .val {
+    font-family: 'Geist Mono', monospace;
+    font-size: 1.375rem;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    font-feature-settings: 'tnum' 1;
+}
+
+.metric .val .unit {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+
+.controls {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+}
+
+.btn {
+    padding: 8px 14px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    transition: all 0.15s;
+}
+
+.btn:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-bright);
+}
+
+.btn:active {
+    transform: translateY(1px);
+}
+
+.btn.primary {
+    background: var(--c-primary);
+    border-color: var(--c-primary);
+    color: var(--bg-base);
+    font-weight: 600;
+}
+
+.btn.primary:hover {
+    filter: brightness(1.1);
+}
+
+/* =========================================================================
+ * Interpolation gallery
+ * ========================================================================= */
+
+.gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+}
+
+.gallery .cell {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    transition: all 0.2s;
+}
+
+.gallery .cell:hover {
+    border-color: var(--c-primary);
+    box-shadow: var(--glow-primary);
+}
+
+.gallery .cell .label {
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.gallery .cell .chart {
+    height: 140px;
+}
+
+/* =========================================================================
+ * Multi-series
+ * ========================================================================= */
+
+.dashboard-card {
+    padding: 32px;
+}
+
+.dashboard-card .chart-area {
+    height: 380px;
+    margin-bottom: 8px;
+}
+
+.lite-charts-legend button:hover {
+    background: var(--bg-card-hover) !important;
+}
+
+/* =========================================================================
+ * High density
+ * ========================================================================= */
+
+.density-card {
+    padding: 32px;
+}
+
+.density-card .chart-area {
+    height: 420px;
+}
+
+.density-meta {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.density-meta .item .lbl {
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-muted);
+}
+
+.density-meta .item .val {
+    font-family: 'Geist Mono', monospace;
+    font-weight: 500;
+    color: var(--c-primary);
+    font-size: 0.875rem;
+}
+
+/* =========================================================================
+ * Footer
+ * ========================================================================= */
+
+footer.site {
+    padding: 32px 0 48px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.75rem;
+    text-align: center;
+}
+
+footer.site .deps {
+    margin-top: 8px;
+    font-size: 0.6875rem;
+    color: var(--text-faint);
+}
+
+/* =========================================================================
+ * Status pill
+ * ========================================================================= */
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-family: 'Geist Mono', monospace;
+    font-size: 0.6875rem;
+    color: var(--text-secondary);
+}
+
+.pill .dot {
+    width: 6px;
+    height: 6px;
+    background: var(--c-primary);
+    border-radius: 50%;
+    box-shadow: 0 0 6px var(--c-primary);
+    animation: pulse 1.4s ease-in-out infinite;
+}
+
+.pill.paused .dot {
+    background: var(--c-amber);
+    box-shadow: 0 0 6px var(--c-amber);
+    animation: none;
+}
+
+/* Animation entrance: stagger reveal on load */
+section { animation: rise 0.6s ease-out both; }
+section:nth-of-type(1) { animation-delay: 0.05s; }
+section:nth-of-type(2) { animation-delay: 0.15s; }
+section:nth-of-type(3) { animation-delay: 0.25s; }
+section:nth-of-type(4) { animation-delay: 0.35s; }
+section:nth-of-type(5) { animation-delay: 0.45s; }
+
+@keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+</style>
+
+<script type="importmap">
+{
+    "imports": {
+        "@zakkster/lite-signal": "https://cdn.jsdelivr.net/npm/@zakkster/lite-signal@1.1.5/Signal.js",
+        "@zakkster/lite-scene":  "https://cdn.jsdelivr.net/npm/@zakkster/lite-scene@1.0.0/Scene.js",
+        "@zakkster/lite-axis":   "https://cdn.jsdelivr.net/npm/@zakkster/lite-axis@1.0.1/Axis.js",
+        "@zakkster/lite-charts": "../Charts.js"
+    }
+}
+</script>
+</head>
+<body>
+
+<header class="site">
+    <div class="container row">
+        <div class="brand">
+            <span class="brand-logo"></span>
+            <span class="brand-name">@zakkster/lite-charts</span>
+            <span class="brand-version">v1.1.0</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle">
+            <span class="indicator"></span>
+            <span class="label">night</span>
+        </button>
+    </div>
+</header>
+
+<main class="container">
+
+    <!-- =================================================================
+         HERO -- Live Telemetry
+         ================================================================= -->
+    <section>
+        <div class="hero-intro">
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.1.0</span>
+            <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
+            <p>
+                Single-file ESM. Three peer deps. Signal-native data, dimensions, theme,
+                and series visibility. The hot path is allocation-free; per-frame work is
+                two O(n) scans plus a min/max decimation kernel. The live chart below
+                streams at <span class="num">30 Hz</span> with crosshair + tooltip --
+                hover it.
+            </p>
+        </div>
+
+        <div class="card hero-card">
+            <div class="hero-chart" id="hero-chart"></div>
+            <div class="hero-side">
+                <div class="metric">
+                    <div class="lbl">Throughput</div>
+                    <div class="val"><span id="m-rate">--</span><span class="unit">pt/s</span></div>
+                </div>
+                <div class="metric">
+                    <div class="lbl">Buffer</div>
+                    <div class="val"><span id="m-total">--</span><span class="unit">pts</span></div>
+                </div>
+                <div class="metric">
+                    <div class="lbl">Frame budget p95</div>
+                    <div class="val"><span id="m-fps">--</span><span class="unit">ms</span></div>
+                </div>
+                <div class="controls">
+                    <button class="btn primary" id="hero-pause">Pause</button>
+                    <button class="btn" id="hero-spike">Spike</button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Interpolation gallery
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// interpolation</span>
+                <h2>Seven ways to draw a line.</h2>
+                <p>
+                    Same 16 samples, seven path-interpolation modes. Linear is honest about
+                    data resolution; step variants suit discrete events; monotone smooths
+                    without overshooting; catmull-rom is for aesthetics. Hover any cell --
+                    every crosshair syncs.
+                </p>
+            </div>
+        </div>
+        <div class="gallery" id="gallery"></div>
+    </section>
+
+    <!-- =================================================================
+         Multi-series dashboard
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// multi-series</span>
+                <h2>Click any legend item.</h2>
+                <p>
+                    Four series with markers, click-to-toggle visibility, and auto y-axis
+                    rescaling. Each row is keyboard-accessible (Tab + Space). When a high
+                    series is hidden, the y-domain collapses to fit the remaining data --
+                    the polish lift that surfaces detail when you need it.
+                </p>
+            </div>
+            <span class="pill" id="series-status"><span class="dot"></span><span id="visible-count">4</span> visible</span>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="dashboard-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Bar chart -- v1.1.0 first cut
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// bar chart -- new in v1.1</span>
+                <h2>Categorical data. Grouped layout.</h2>
+                <p>
+                    Band scale primitive with d3-style <span class="mono">paddingInner</span>
+                    / <span class="mono">paddingOuter</span>. Multi-series renders grouped
+                    side-by-side; each bar takes a slice of the band centered on its
+                    series index. Hit detection is O(1) via <span class="mono">Math.floor</span>
+                    over the band step -- no bisection needed because the discriminator
+                    is discrete. Click the legend to toggle a series; the y-domain
+                    snaps to fit what's visible.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="bar-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Stacked bar (v1.1.0)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// stacked bar -- new in v1.1</span>
+                <h2>Composition over time.</h2>
+                <p>
+                    Same kernel as the grouped bar, with
+                    <span class="mono">stack: true</span> flipping the layout. Each
+                    series gets per-category <span class="mono">stackBottoms</span> /
+                    <span class="mono">stackTops</span> in DATA space, computed by a
+                    <span class="mono">postExtract</span> hook the kernel runs after
+                    every series is extracted. The y-domain rolls up automatically
+                    to the cumulative total; hiding a series via the legend rebuilds
+                    the stack without that contribution and the surviving segments
+                    snap down to fill. Rounded corners apply to the top of each
+                    bar; the topmost segment in the stack is the only one whose
+                    rounding is visible (lower segments get visually capped by
+                    the segment above).
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="stacked-bar-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Pie + Donut
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// pie + donut -- new in v1.2</span>
+                <h2>Parts of a whole.</h2>
+                <p>
+                    A separate kernel from line/area/bar:
+                    <span class="mono">createBasePolarChart</span> over slice geometry
+                    (no axes, no scales). Angles are stored as Float64 cumulative
+                    sums; hit detection is O(n) atan2 inside the ring. Click any
+                    legend entry to hide a slice -- the others grow to fill the
+                    gap. Pie and donut share the renderer; only the
+                    <span class="mono">innerRadius</span> default differs (0 vs
+                    0.5; user-overridable). Pie bundle alone is
+                    <span class="mono">~13 KB</span> minified -- importing it
+                    pulls in no axis-chart code.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" style="display: flex; gap: 24px; flex-wrap: wrap; height: auto; min-height: 440px;">
+                <div id="pie-chart" style="flex: 1; min-width: 320px;"></div>
+                <div id="donut-chart" style="flex: 1; min-width: 320px;"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Bubble
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// bubble -- new in v1.2</span>
+                <h2>Three dimensions in one glance.</h2>
+                <p>
+                    A new <span class="mono">BUBBLE_RENDERER</span> on the axis kernel.
+                    x and y are linear scales as usual; a third dimension drives the
+                    bubble's <em>area</em> via a sqrt scale (Tukey convention: equal
+                    pixel-area per equal data magnitude). Pixel radii are computed
+                    at extract time from
+                    <span class="mono">r = sqrt(rMin&sup2; + t &middot; (rMax&sup2; - rMin&sup2;))</span>.
+                    Hit detection is O(n) distance-from-center inside each bubble,
+                    smallest-on-top so overlaps surface the visually-front circle.
+                    Bubble bundle is <span class="mono">~22 KB</span> minified --
+                    importing it pulls in zero polar code.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="bubble-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Dense bubble + spatial index (v1.2.0-alpha.0)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// dense bubble -- new in v1.2-alpha</span>
+                <h2>2000 bubbles, O(log n) hit-test.</h2>
+                <p>
+                    Past about a thousand points the linear-scan hit-test
+                    starts to feel slow. v1.2.0-alpha.0 lands a pluggable
+                    spatial-index layer: pass any function matching
+                    <span class="mono">SpatialIndexFactory</span> as the
+                    <span class="mono">spatialIndex</span> config option,
+                    and lite-charts builds an index lazily on the first
+                    hit-test, caches it across queries, disposes on data
+                    change. <span class="mono">@zakkster/lite-delaunay</span>
+                    is the intended default (Voronoi-dual nearest-neighbor
+                    walk); k-d tree, uniform-grid, or any custom index works
+                    too. This demo ships a tiny reference implementation
+                    inline so the integration runs without an extra
+                    dependency. Below the threshold (default 1000 points)
+                    the chart stays on the linear-scan path -- on small
+                    clouds, the build cost would dwarf the query savings.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="dense-bubble-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Scatter (v1.2.0-alpha.1)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// scatter -- new in v1.2-alpha</span>
+                <h2>Just points. Lots of them.</h2>
+                <p>
+                    Bubble's simpler sibling: no size dimension, every marker
+                    the same pixel radius. Same axis kernel; the spatial-
+                    index foundation from alpha.0 works here too, but with
+                    <span class="mono">k = 1</span> in
+                    <span class="mono">findNearest</span> since scatter has
+                    no overlap concerns. This plot has 800 points in two
+                    visible clusters -- the hit-test still snaps to the
+                    nearest within a configurable
+                    <span class="mono">hitTolerance</span> disc.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="scatter-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Multi-series bubble (v1.2.0-alpha.2)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// multi-series bubble -- new in v1.2-alpha</span>
+                <h2>Three series, one size domain.</h2>
+                <p>
+                    Multiple bubble series rendered on the same axes. The
+                    renderer's <span class="mono">postExtract</span> hook
+                    computes a GLOBAL size domain across visible series, so
+                    a value of 30 renders at the same pixel radius in
+                    series A as in series B. Toggle any series via the
+                    legend -- the global domain recomputes from the
+                    surviving series and the bubbles resize accordingly.
+                    Hit-test iterates all visible series and reports which
+                    series the cursor landed on via the new
+                    <span class="mono">snapSeriesIdx</span> field.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="multi-bubble-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Per-point color bubble (v1.2.0-alpha.2)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// per-point color -- new in v1.2-alpha</span>
+                <h2>Every point its own color.</h2>
+                <p>
+                    Set <span class="mono">colorKey</span> and each row
+                    carries its fill color in the data. CSS-var values
+                    (<span class="mono">'--c-emerald'</span>) resolve once
+                    at extract time so the per-frame draw still uses a
+                    single string assignment per bubble -- no parsing on
+                    the hot path. Use this to encode a categorical
+                    dimension orthogonal to x / y / size.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="color-bubble-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Heatmap (v1.2.0-alpha.3) -- fourth kernel
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// heatmap -- new in v1.2-alpha</span>
+                <h2>A fourth, independent kernel.</h2>
+                <p>
+                    <span class="mono">createHeatmap</span> rides a brand-new
+                    <span class="mono">createBaseGridChart</span> kernel
+                    -- no axes, no scales, no interpolation, no markers.
+                    Just two band scales (x + y), a flat
+                    <span class="mono">Float32Array</span> for cell values,
+                    a <span class="mono">Uint8Array</span> presentMask for
+                    sparse data, and a precomputed string array for cell
+                    colors so the draw loop stays allocation-free. ~10.5 KB
+                    minified -- the smallest of the nine chart bundles.
+                    Default color ramp is linear RGB interp between two
+                    endpoint hex colors; pass <span class="mono">colorFn</span>
+                    for OKLCH, quantile, or diverging schemes. Hit-test is
+                    O(1) -- one <span class="mono">xBand.invert</span> + one
+                    <span class="mono">yBand.invert</span> + a presence-mask
+                    check.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="heatmap-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Radar
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// radar -- new in v1.2</span>
+                <h2>Compare across dimensions.</h2>
+                <p>
+                    A separate kernel from line/area/bar/bubble AND from
+                    pie/donut. Radar is polar geometrically (concentric grid,
+                    angle-driven layout) but each series is a polygon connecting
+                    one value-per-axis vertex, not a slice. Cos/sin per axis
+                    is precomputed once into Float64 tables; polygons, grid
+                    rings, and spokes all share them. Hit detection is
+                    nearest-vertex within 12&nbsp;px across visible series.
+                    Bundle is <span class="mono">~13 KB</span> minified --
+                    same weight as pie/donut, zero axis-chart code.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="radar-chart" style="height: 480px;"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         High-density
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// density</span>
+                <h2>100,000 points. One frame.</h2>
+                <p>
+                    When sample count exceeds <span class="mono">2 &times; plotWidth</span>,
+                    the decimation kernel kicks in -- a per-column min/max envelope lifted
+                    from <span class="mono">@zakkster/lite-canvas-graph</span>. Spikes are
+                    preserved; the line stays interactive. Hit "regenerate" to see the
+                    reactive rescale on a new dataset.
+                </p>
+            </div>
+        </div>
+        <div class="card density-card">
+            <div class="density-meta">
+                <div class="item">
+                    <div class="lbl">Samples</div>
+                    <div class="val"><span id="d-samples">100,000</span></div>
+                </div>
+                <div class="item">
+                    <div class="lbl">Render mode</div>
+                    <div class="val"><span id="d-mode">decimated</span></div>
+                </div>
+                <div class="item">
+                    <div class="lbl">Last regen</div>
+                    <div class="val"><span id="d-time">--</span> ms</div>
+                </div>
+            </div>
+            <div class="chart-area" id="density-chart"></div>
+            <div class="controls" style="margin-top:16px">
+                <button class="btn primary" id="d-regen">Regenerate</button>
+                <button class="btn" id="d-noise-up">More noise</button>
+                <button class="btn" id="d-noise-down">Less noise</button>
+            </div>
+        </div>
+    </section>
+
+</main>
+
+<footer class="site">
+    <div class="container">
+        <div>built on <a href="https://www.npmjs.com/package/@zakkster/lite-signal">lite-signal</a>
+            &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-scene">lite-scene</a>
+            &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-axis">lite-axis</a></div>
+        <div class="deps">MIT &copy; 2026 Zahary Shinikchiev &middot; sub-frame at 100k pts &middot; 326 B/cycle p50 heap</div>
+    </div>
+</footer>
+
+<!-- =====================================================================
+     Demo logic. All bare specifiers are resolved by the import-map above.
+     ===================================================================== -->
+<script type="module">
+import { signal, effect, createRegistry, setDefaultRegistry } from '@zakkster/lite-signal';
+
+// lite-signal's default node-arena capacity is 1024, comfortable for a few
+// charts but easy to exhaust on a page like this with ~15 simultaneous
+// charts (each consumes ~45-60 nodes between signals, effects, and scene-
+// node-backing effects -- the per-axis tick pool alone is ~24 nodes per
+// axis at max tick count). Bumping to 32k is cheap (a few tens of KB of
+// arena memory) and gives plenty of headroom. Must run BEFORE any chart
+// is constructed, since charts pick up whichever registry is current at
+// the moment they're created.
+setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
+import {
+    createLineChart,
+    createAreaChart,
+    createBarChart,
+    createPieChart,
+    createDonutChart,
+    createBubbleChart,
+    createRadarChart,
+    createScatterChart,
+    createHeatmap,
+} from '@zakkster/lite-charts';
+
+// ---------------------------------------------------------------------
+// Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
+// declared as CSS-var tokens ('--c-primary' etc.) re-resolve against the
+// new theme's computed style.
+// ---------------------------------------------------------------------
+
+const themeToggle = document.getElementById('theme-toggle');
+const themeLabel  = themeToggle.querySelector('.label');
+const ALL_CHARTS = [];
+
+// Responsive sizing helper. Wraps a container's clientWidth in a signal
+// that updates on ResizeObserver callbacks, so charts re-render their
+// scales/geometry when the viewport changes size. Without this, a chart
+// rendered at 1200px wide would keep its plot bounds when the viewport
+// drops to 800px, and lines would draw beyond the visible canvas edge.
+//
+// Following the pattern from the user-supplied snippet -- only ONE place
+// applies DPR (lite-scene handles it via the dpr config in createScene),
+// so this helper deliberately reports CSS pixels.
+const responsiveWidth = (containerId, fallback) => {
+    const sig = signal(fallback);
+    const update = () => {
+        const el = document.getElementById(containerId);
+        const w = (el && el.clientWidth) || fallback;
+        if (sig.peek() !== w) sig.set(w);
+    };
+    // First update after layout settles so initial value isn't 0.
+    requestAnimationFrame(update);
+    let scheduled = false;
+    const ro = new ResizeObserver(() => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => { scheduled = false; update(); });
+    });
+    const el = document.getElementById(containerId);
+    if (el) ro.observe(el.parentElement || el);
+    return sig;
+};
+
+const setTheme = (mode) => {
+    document.documentElement.setAttribute('data-theme', mode);
+    themeLabel.textContent = mode === 'dark' ? 'night' : 'day';
+    // Let the CSS transition settle one frame before re-resolving so the
+    // computed values are the new ones.
+    requestAnimationFrame(() => {
+        for (const c of ALL_CHARTS) c.refreshTheme();
+    });
+};
+
+themeToggle.addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme');
+    setTheme(cur === 'dark' ? 'light' : 'dark');
+});
+
+// ---------------------------------------------------------------------
+// Common chart options for visual consistency across the demo
+// ---------------------------------------------------------------------
+
+const sharedOpts = () => ({
+    axisColor:  '--text-faint',
+    labelColor: '--text-muted',
+    font: '11px "Geist Mono", monospace',
+    grid: { color: '--grid-line' },
+});
+
+// ---------------------------------------------------------------------
+// HERO: live streaming time-series, 30 Hz
+// ---------------------------------------------------------------------
+
+const HERO_BUFFER = 600;        // rolling window
+const heroXs = new Float32Array(HERO_BUFFER);
+const heroYs1 = new Float32Array(HERO_BUFFER);
+const heroYs2 = new Float32Array(HERO_BUFFER);
+let heroN = 0;
+let heroT = 0;
+// Stable SoA wrappers, allocated once. The chart's data accessor closes
+// over heroVersion + these wrappers; the streaming loop mutates the
+// Float32Arrays in place and bumps heroVersion (a primitive number, no
+// allocation) to trigger re-extract. Previously this allocated two new
+// {xs, ys} objects per 30Hz tick (60 obj/sec) just to defeat lite-signal's
+// identity comparison; the version-signal pattern is allocation-free.
+const heroData1Wrapper = { xs: heroXs, ys: heroYs1 };
+const heroData2Wrapper = { xs: heroXs, ys: heroYs2 };
+const heroVersion = signal(0);
+
+const heroChart = createLineChart({
+    series: [
+        { name: 'requests/s',  data: () => (heroVersion(), heroData1Wrapper), color: '--c-primary', lineWidth: 1.75 },
+        { name: 'latency p95', data: () => (heroVersion(), heroData2Wrapper), color: '--c-cyan',    lineWidth: 1.75 },
+    ],
+    width: responsiveWidth('hero-chart', 800),
+    height: 360,
+    ...sharedOpts(),
+    yScale: { nice: true },
+    crosshair: { color: '--text-secondary', dash: [4, 4] },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+heroChart.mount(document.getElementById('hero-chart'));
+ALL_CHARTS.push(heroChart);
+
+// Streaming loop -- writes into the rolling Float32Arrays in place.
+let heroRunning = true;
+// Ring-buffer for frame-time samples. The naive push+shift pattern allocates
+// every iteration once full (Array.shift is O(n) and reshapes the internal
+// storage); a fixed-cap typed-array ring writes one slot per iter, zero
+// allocations forever. Same for the 4Hz percentile snapshot: a reusable
+// Float64Array scratchpad avoids the per-tick .slice().sort() alloc.
+const FRAME_CAP = 60;
+let frameSamples = new Float64Array(FRAME_CAP);
+let frameSamplesLen = 0;       // grows from 0 up to FRAME_CAP, then stays
+let frameSamplesHead = 0;      // write index; wraps mod FRAME_CAP once full
+const frameSortScratch = new Float64Array(FRAME_CAP);
+let lastTick = performance.now();
+
+const pushHero = (spike = false) => {
+    if (heroN < HERO_BUFFER) {
+        heroXs[heroN] = heroT;
+        heroYs1[heroN] = 40 + 30 * Math.sin(heroT * 0.04) + 8 * Math.random();
+        heroYs2[heroN] = 60 + 15 * Math.cos(heroT * 0.07) + 5 * Math.random();
+        if (spike) heroYs1[heroN] += 50;
+        heroN++;
+    } else {
+        // Roll the window.
+        for (let i = 0; i < HERO_BUFFER - 1; i++) {
+            heroXs[i] = heroXs[i + 1];
+            heroYs1[i] = heroYs1[i + 1];
+            heroYs2[i] = heroYs2[i + 1];
+        }
+        heroXs[HERO_BUFFER - 1] = heroT;
+        heroYs1[HERO_BUFFER - 1] = 40 + 30 * Math.sin(heroT * 0.04) + 8 * Math.random();
+        heroYs2[HERO_BUFFER - 1] = 60 + 15 * Math.cos(heroT * 0.07) + 5 * Math.random();
+        if (spike) heroYs1[HERO_BUFFER - 1] += 50;
+    }
+    heroT++;
+    // Zero-alloc trigger: bump a primitive-number signal. The chart's data
+    // accessors close over heroVersion + the stable wrappers, so this fires
+    // the data effect without producing any garbage. Previously we allocated
+    // two {xs, ys} objects per tick (~60 obj/sec) just to defeat lite-
+    // signal's identity comparison.
+    heroVersion.update((v) => (v + 1) | 0);
+};
+
+const heroLoop = () => {
+    if (heroRunning) {
+        const t0 = performance.now();
+        pushHero();
+        const dt = performance.now() - t0;
+        // Ring write: O(1), zero alloc.
+        frameSamples[frameSamplesHead] = dt;
+        frameSamplesHead = (frameSamplesHead + 1) % FRAME_CAP;
+        if (frameSamplesLen < FRAME_CAP) frameSamplesLen++;
+    }
+    setTimeout(heroLoop, 33);     // ~30 Hz; deliberately not rAF so the
+                                  //  rate doesn't dance with the display
+};
+heroLoop();
+
+// Stats refresh, decoupled from the data loop. DOM refs hoisted out of the
+// interval body -- getElementById inside a 4Hz interval is cheap but
+// pointless work (it traverses the live DOM index every tick). Same for
+// the visible-count effect and the density samples display below.
+const metricRateEl  = document.getElementById('m-rate');
+const metricTotalEl = document.getElementById('m-total');
+const metricFpsEl   = document.getElementById('m-fps');
+metricRateEl.textContent = '30';  // static after first paint
+setInterval(() => {
+    metricTotalEl.textContent = heroN.toLocaleString();
+    if (frameSamplesLen > 5) {
+        // Copy into the scratchpad subarray-style, sort in place. No alloc.
+        for (let i = 0; i < frameSamplesLen; i++) frameSortScratch[i] = frameSamples[i];
+        // Float64Array.sort is in-place; default numeric order (no comparator
+        // function = no closure allocation per call).
+        const view = frameSortScratch.subarray(0, frameSamplesLen);
+        view.sort();
+        const p95 = view[Math.floor(frameSamplesLen * 0.95)];
+        metricFpsEl.textContent = p95.toFixed(2);
+    }
+}, 250);
+
+document.getElementById('hero-pause').addEventListener('click', (e) => {
+    heroRunning = !heroRunning;
+    e.target.textContent = heroRunning ? 'Pause' : 'Resume';
+});
+
+document.getElementById('hero-spike').addEventListener('click', () => {
+    pushHero(true);
+});
+
+// ---------------------------------------------------------------------
+// INTERPOLATION GALLERY -- 7 cells, same data, synced crosshairs
+// ---------------------------------------------------------------------
+
+const galEl = document.getElementById('gallery');
+const galModes = [
+    { id: 'linear',       label: 'linear',       color: '--c-primary' },
+    { id: 'step-after',   label: 'step-after',   color: '--c-cyan' },
+    { id: 'step-before',  label: 'step-before',  color: '--c-amber' },
+    { id: 'step-mid',     label: 'step-mid',     color: '--c-pink' },
+    { id: 'monotone',     label: 'monotone',     color: '--c-violet' },
+    { id: 'catmull-rom',  label: 'catmull-rom',  color: '--c-blue' },
+];
+
+// Synthetic but interesting data: low-frequency wobble + a couple of edges
+const galN = 18;
+const galData = [];
+for (let i = 0; i < galN; i++) {
+    galData.push({
+        x: i,
+        y: 50 + 25 * Math.sin(i * 0.6) + (i === 7 ? -15 : 0) + (i === 12 ? 18 : 0),
+    });
+}
+
+const galCharts = [];
+for (const m of galModes) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.innerHTML = `<div class="label">${m.label}</div><div class="chart" data-mode="${m.id}"></div>`;
+    galEl.appendChild(cell);
+    // Cache the gallery index natively on the DOM node. galHover is
+    // mousemove-rate (125-1000Hz on gaming mice); Array.from(galEl.children)
+    // would allocate a fresh JS array AND walk the live HTMLCollection on
+    // every event. Reading dataset and parseInt is O(1), zero-alloc.
+    cell.dataset.idx = String(galCharts.length);
+
+    const chartEl = cell.querySelector('.chart');
+    const chart = createLineChart({
+        data: galData,
+        interpolation: m.id,
+        color: m.color,
+        lineWidth: 2,
+        width: () => chartEl.clientWidth || 250,
+        height: 140,
+        margin: { top: 12, right: 12, bottom: 22, left: 32 },
+        ...sharedOpts(),
+        markers: { size: 4, fill: m.color, stroke: '--bg-card', strokeWidth: 1.5 },
+        crosshair: { color: '--text-secondary', dash: [2, 4] },
+        tooltip: false,
+        legend: false,
+    });
+    chart.mount(chartEl);
+    ALL_CHARTS.push(chart);
+    galCharts.push(chart);
+}
+
+// Synced crosshair across the gallery cells. Each cell can be a different
+// width (responsive grid), so we can't just pass the source chart's local
+// pixel to every chart -- we project through the domain x instead.
+const galHover = (ev) => {
+    const cell = ev.target.closest('.cell');
+    if (!cell) return;
+    // Zero-alloc index lookup via the cached dataset.idx. Was previously
+    // Array.from(galEl.children).indexOf(cell), which allocated a new
+    // array and walked the live HTMLCollection on every mousemove event
+    // (60+ allocations/sec on a regular mouse, 1000+/sec on gaming mice).
+    const idx = +cell.dataset.idx | 0;
+    if (idx < 0 || idx >= galCharts.length) return;
+    const source = galCharts[idx];
+
+    // CSS pixels relative to the source canvas. The chart's logical coord
+    // system IS CSS pixels (lite-scene's per-draw setTransform(dpr) handles
+    // backing) -- no canvas.width/rect.width DPR scaling needed.
+    const canvas = source.canvas;
+    const rect = canvas.getBoundingClientRect();
+    const localX = ev.clientX - rect.left;
+    const localY = ev.clientY - rect.top;
+    source.moveCrosshair(localX, localY);
+
+    const state = source.crosshair.peek();
+    if (!state.visible) {
+        for (const c of galCharts) c.hideCrosshair();
+        return;
+    }
+
+    // Project source.snapDomainX to each peer's pixel space.
+    const dX = state.snapDomainX;
+    for (const c of galCharts) {
+        if (c === source) continue;
+        const peerPx = c.xScale.map(dX);
+        // y here is irrelevant for sync -- moveCrosshair only uses it for the
+        // dedup check on vertical mouse motion. Use the canvas-height midpoint
+        // in CSS pixels; canvas.height is in device px so divide by DPR.
+        c.moveCrosshair(peerPx, 70);
+    }
+};
+const galLeave = () => {
+    for (const c of galCharts) c.hideCrosshair();
+};
+galEl.addEventListener('mousemove', galHover);
+galEl.addEventListener('mouseleave', galLeave);
+
+// ---------------------------------------------------------------------
+// DASHBOARD -- 4 series, click-toggle, auto-rescale
+// ---------------------------------------------------------------------
+
+const dashN = 80;
+const dashSeries = [
+    { name: 'CPU %',     color: '--c-primary', range: [10, 75],  freq: 0.12 },
+    { name: 'Memory %',  color: '--c-cyan',    range: [45, 65],  freq: 0.18 },
+    { name: 'Disk I/O',  color: '--c-amber',   range: [0,  35],  freq: 0.25 },
+    { name: 'Network',   color: '--c-pink',    range: [20, 90],  freq: 0.09 },
+];
+
+const dashData = dashSeries.map((s, idx) => {
+    const arr = [];
+    for (let i = 0; i < dashN; i++) {
+        const t = i / (dashN - 1);
+        const phase = idx * Math.PI * 0.5;
+        const mid = (s.range[0] + s.range[1]) / 2;
+        const amp = (s.range[1] - s.range[0]) / 2;
+        arr.push({
+            x: i,
+            y: mid + amp * 0.7 * Math.sin(i * s.freq + phase) + (Math.random() - 0.5) * amp * 0.3,
+        });
+    }
+    return arr;
+});
+
+const dashChart = createLineChart({
+    series: dashSeries.map((s, i) => ({
+        name: s.name,
+        data: dashData[i],
+        color: s.color,
+        lineWidth: 1.75,
+    })),
+    width: responsiveWidth('dashboard-chart', 800),
+    height: 380,
+    ...sharedOpts(),
+    markers: { size: 4, stroke: '--bg-card', strokeWidth: 1 },
+    interpolation: 'monotone',
+    crosshair: { color: '--text-secondary', dash: [3, 4] },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+dashChart.mount(document.getElementById('dashboard-chart'));
+ALL_CHARTS.push(dashChart);
+
+// Live visible count display. DOM ref hoisted out of the effect so toggling
+// legend items doesn't traverse the document index on every click.
+const visibleCountEl = document.getElementById('visible-count');
+effect(() => {
+    let count = 0;
+    for (const sig of dashChart.seriesVisibility) if (sig()) count++;
+    visibleCountEl.textContent = count;
+});
+
+// ---------------------------------------------------------------------
+// BAR CHART -- v1.1.0 (grouped multi-series)
+// ---------------------------------------------------------------------
+
+const barCategories = ['Q1', 'Q2', 'Q3', 'Q4'];
+const barSeriesDefs = [
+    { name: 'Revenue',  color: '--c-primary' },
+    { name: 'Expenses', color: '--c-amber' },
+    { name: 'Profit',   color: '--c-cyan' },
+];
+
+// Synthetic quarterly numbers; revenue trends up, expenses flat-ish, profit
+// is revenue - expenses with a small fluctuation.
+const barData = [
+    [42, 58, 65, 78],   // Revenue
+    [30, 35, 38, 45],   // Expenses
+    [12, 23, 27, 33],   // Profit
+];
+
+const barChart = createBarChart({
+    series: barSeriesDefs.map((s, i) => ({
+        name: s.name,
+        color: s.color,
+        data: barCategories.map((cat, j) => ({ x: cat, y: barData[i][j] })),
+    })),
+    width: responsiveWidth('bar-chart', 800),
+    height: 380,
+    ...sharedOpts(),
+    paddingInner: 0.15,
+    paddingOuter: 0.1,
+    // v1.1.0: rounded top corners + subtle hover-tint overlay. Both
+    // optional; setting cornerRadius: 0 or hoverTint: false opts out.
+    cornerRadius: 4,
+    hoverTint: 'rgba(255,255,255,0.18)',
+    crosshair: { color: '--text-secondary', dash: [3, 4] },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+barChart.mount(document.getElementById('bar-chart'));
+ALL_CHARTS.push(barChart);
+
+// ---------------------------------------------------------------------
+// STACKED BAR -- v1.1.0 (same kernel, stack: true)
+// ---------------------------------------------------------------------
+//
+// Synthetic "user acquisition by channel, weekly". Three channels stack
+// per week to show the total + composition. The renderer's postExtract
+// hook fills per-series stackBottoms/stackTops in data space; each series
+// then draws its segment using the same makeBarDrawFn path, picking up
+// stacking automatically from the state buffers.
+
+const stackedSeriesDefs = [
+    { name: 'Organic',  color: '--c-primary' },
+    { name: 'Referral', color: '--c-emerald' },
+    { name: 'Paid',     color: '--c-amber' },
+];
+const stackedCategories = ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8'];
+const stackedData = [
+    [120, 150, 180, 200, 240, 280, 320, 380],   // Organic
+    [60,  80,  100, 110, 130, 150, 170, 190],   // Referral
+    [40,  50,  55,  60,  70,  85,  100, 120],   // Paid
+];
+
+const stackedBarChart = createBarChart({
+    series: stackedSeriesDefs.map((s, i) => ({
+        name: s.name,
+        color: s.color,
+        data: stackedCategories.map((cat, j) => ({ x: cat, y: stackedData[i][j] })),
+    })),
+    stack: true,
+    width: responsiveWidth('stacked-bar-chart', 800),
+    height: 380,
+    ...sharedOpts(),
+    paddingInner: 0.2,
+    paddingOuter: 0.1,
+    cornerRadius: 6,
+    hoverTint: 'rgba(255,255,255,0.22)',
+    crosshair: { color: '--text-secondary', dash: [3, 4] },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+stackedBarChart.mount(document.getElementById('stacked-bar-chart'));
+ALL_CHARTS.push(stackedBarChart);
+
+// ---------------------------------------------------------------------
+// PIE + DONUT -- separate kernel (createBasePolarChart), no axes
+// ---------------------------------------------------------------------
+
+const pieData = signal([
+    { label: 'Search',      value: 4200, color: '--c-primary' },
+    { label: 'Direct',      value: 2800, color: '--c-emerald' },
+    { label: 'Social',      value: 1400, color: '--c-amber' },
+    { label: 'Referral',    value:  900, color: '--c-rose'   },
+    { label: 'Email',       value:  500, color: '--c-violet' },
+]);
+
+const pieChart = createPieChart({
+    data: pieData,
+    width: responsiveWidth('pie-chart', 360),
+    height: 360,
+    sliceStroke: '--bg-card',
+    sliceStrokeWidth: 2,
+    labelColor: '--text-secondary',
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+pieChart.mount(document.getElementById('pie-chart'));
+ALL_CHARTS.push(pieChart);
+
+const donutChart = createDonutChart({
+    data: pieData,                          // shares the same signal -- both update together
+    width: responsiveWidth('donut-chart', 360),
+    height: 360,
+    innerRadius: 0.55,
+    sliceStroke: '--bg-card',
+    sliceStrokeWidth: 2,
+    labelColor: '--text-secondary',
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+donutChart.mount(document.getElementById('donut-chart'));
+ALL_CHARTS.push(donutChart);
+
+// ---------------------------------------------------------------------
+// BUBBLE -- axis kernel with size dimension; one circle per data point
+// ---------------------------------------------------------------------
+//
+// Synthetic "20 random products" -- x = launch year, y = retention score,
+// size = monthly revenue. Reactive: a regenerate button shuffles the
+// dataset, and the chart re-extracts + re-projects pixel radii without
+// any allocation outside the resize-aware Float32 buffers.
+
+// Synthetic "20 random products" -- x = launch year, y = retention score,
+// size = monthly revenue. Reactive: a regenerate button shuffles the
+// dataset, and the chart re-extracts + re-projects pixel radii without
+// any allocation outside the resize-aware Float32 buffers.
+//
+// (Per-point color encoding is a v1.3 feature -- BUBBLE_RENDERER currently
+// uses one fill colour per series. For this single-series demo the points
+// share a colour with varying opacity.)
+
+const makeBubbleDataset = () => {
+    const out = [];
+    for (let i = 0; i < 24; i++) {
+        out.push({
+            x: 2015 + Math.random() * 10,                 // launch year
+            y: 40 + Math.random() * 55,                   // retention score 40..95
+            value: 50 + Math.pow(Math.random(), 2) * 950, // skewed revenue, 50..1000
+            label: 'Product ' + (i + 1),
+        });
+    }
+    return out;
+};
+
+const bubbleData = signal(makeBubbleDataset());
+
+const bubbleChart = createBubbleChart({
+    data: bubbleData,
+    size: 'value',
+    minRadius: 6,
+    maxRadius: 36,
+    sizeScale: 'sqrt',
+    // Bubble fills are the chart's top-level `color`. Per-point colour
+    // encoding lands in v1.3 alongside multi-series bubble.
+    color: '--c-primary',
+    fillOpacity: 0.55,
+    stroke: '--bg-card',
+    strokeWidth: 1.5,
+    width: responsiveWidth('bubble-chart', 800),
+    height: 400,
+    ...sharedOpts(),
+    grid: { y: true, x: false },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+        format: (info) => ({
+            // info.snapDomainX is the bubble's x value; rows[0].value is its y.
+            // Show year, retention, and revenue all on the header for compact
+            // single-bubble tooltips.
+            header: 'year ' + info.snapDomainX.toFixed(1),
+        }),
+    },
+    legend: false, // single-series; nothing to toggle
+});
+bubbleChart.mount(document.getElementById('bubble-chart'));
+ALL_CHARTS.push(bubbleChart);
+
+// ---------------------------------------------------------------------
+// DENSE BUBBLE -- spatial-index integration (v1.2.0-alpha.0)
+// ---------------------------------------------------------------------
+//
+// 2000 bubbles. Above the default threshold of 1000, lite-charts switches
+// from O(n) linear-scan hit-test to O(log n) via a pluggable spatial
+// index. The integration is interface-driven: lite-charts defines the
+// `SpatialIndex` / `SpatialIndexFactory` contract, the consumer supplies
+// the implementation. In production you'd pass `@zakkster/lite-delaunay`
+// (Voronoi-dual nearest-neighbor walk); the demo below ships a small
+// reference linear-scan implementation just to prove the integration
+// wiring without adding a build dependency.
+//
+// Key design points:
+//   - findNearest writes into CALLER-OWNED Int32Array / Float32Array
+//     output buffers -- zero allocation per query
+//   - k > 1 candidates returned so the renderer can post-filter for
+//     disc containment + smallest-r tie-break (preserving v1.0.0
+//     "visually-topmost wins on overlap" semantics)
+//   - Index built lazily on the first hit-test after extract, cached
+//     until the next data/scale change invalidates it
+//   - dispose() called on data change AND chart unmount
+
+// Reference SpatialIndex implementation. NOT a real Delaunay -- it's a
+// linear scan that satisfies the interface so the demo can run without
+// pulling in @zakkster/lite-delaunay. Production users plug in the real
+// thing; lite-charts doesn't care which.
+const makeReferenceSpatialIndex = (pxs, pys, n) => {
+    // Snapshot so callers can mutate pxs/pys without affecting the index.
+    const snapPxs = new Float32Array(n);
+    const snapPys = new Float32Array(n);
+    for (let i = 0; i < n; i++) { snapPxs[i] = pxs[i]; snapPys[i] = pys[i]; }
+    const snapN = n;
+    return {
+        findNearest(qx, qy, k, maxDistSq, outIndices, outDistSq) {
+            let count = 0;
+            for (let i = 0; i < snapN; i++) {
+                const dx = qx - snapPxs[i];
+                const dy = qy - snapPys[i];
+                const d = dx * dx + dy * dy;
+                if (d > maxDistSq) continue;
+                // Insertion sort into the bounded k-sized output buffer.
+                let at = count;
+                while (at > 0 && outDistSq[at - 1] > d) at--;
+                if (at < k) {
+                    const limit = count < k ? count : k - 1;
+                    for (let s = limit; s > at; s--) {
+                        outIndices[s] = outIndices[s - 1];
+                        outDistSq[s] = outDistSq[s - 1];
+                    }
+                    outIndices[at] = i;
+                    outDistSq[at] = d;
+                    if (count < k) count++;
+                }
+            }
+            return count;
+        },
+        dispose() { /* nothing to free in this reference impl */ },
+    };
+};
+
+// 2000-point dataset: imagine "session events" plotted by time-of-day vs
+// session-length, sized by interaction count.
+const DENSE_N = 2000;
+const denseBubbleData = (() => {
+    const out = [];
+    for (let i = 0; i < DENSE_N; i++) {
+        const tod = (i * 7919) % 24;          // hour 0..23 (pseudo-random spread)
+        const dur = 1 + (((i * 1481) % 100) * 0.6);
+        const interactions = 1 + ((i * 17) % 50);
+        out.push({ x: tod, y: dur, value: interactions });
+    }
+    return out;
+})();
+
+const denseBubbleChart = createBubbleChart({
+    data: denseBubbleData,
+    size: 'value',
+    minRadius: 2,
+    maxRadius: 8,
+    color: '--c-cyan',
+    fillOpacity: 0.45,
+    stroke: '--bg-card',
+    strokeWidth: 0.75,
+    spatialIndex: makeReferenceSpatialIndex,
+    spatialIndexThreshold: 500,    // demo: lower so we hit the indexed path
+    width: responsiveWidth('dense-bubble-chart', 800),
+    height: 380,
+    ...sharedOpts(),
+    grid: { y: true, x: false },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+        format: (info) => ({
+            header: 'hour ' + info.snapDomainX.toFixed(0) + ':00',
+        }),
+    },
+    legend: false,
+});
+denseBubbleChart.mount(document.getElementById('dense-bubble-chart'));
+ALL_CHARTS.push(denseBubbleChart);
+
+// ---------------------------------------------------------------------
+// SCATTER -- v1.2.0-alpha.1
+// ---------------------------------------------------------------------
+//
+// Bubble's simpler sibling: no size dimension, every marker the same pixel
+// radius. Same axis kernel; the spatial-index foundation from alpha.0
+// works here too (with k = 1 since scatter has no overlap concerns).
+// This demo plots a synthetic "two clusters" dataset to show that the
+// hit-test correctly picks the nearest point even at high density.
+
+const scatterData = (() => {
+    const out = [];
+    // Cluster A around (3, 7), cluster B around (8, 3).
+    for (let i = 0; i < 400; i++) {
+        const ax = 3 + (Math.random() - 0.5) * 2;
+        const ay = 7 + (Math.random() - 0.5) * 2;
+        out.push({ x: ax, y: ay, cluster: 'A' });
+    }
+    for (let i = 0; i < 400; i++) {
+        const bx = 8 + (Math.random() - 0.5) * 2;
+        const by = 3 + (Math.random() - 0.5) * 2;
+        out.push({ x: bx, y: by, cluster: 'B' });
+    }
+    return out;
+})();
+
+const scatterChart = createScatterChart({
+    data: scatterData,
+    markerSize: 3,
+    hitTolerance: 6,
+    color: '--c-primary',
+    fillOpacity: 0.55,
+    stroke: null,
+    strokeWidth: 0,
+    spatialIndex: makeReferenceSpatialIndex,   // reuse from dense-bubble
+    spatialIndexThreshold: 200,
+    width: responsiveWidth('scatter-chart', 800),
+    height: 380,
+    ...sharedOpts(),
+    grid: { x: true, y: true },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+        format: (info) => ({
+            header: 'point ' + info.snapIdx,
+        }),
+    },
+    legend: false,
+});
+scatterChart.mount(document.getElementById('scatter-chart'));
+ALL_CHARTS.push(scatterChart);
+
+// ---------------------------------------------------------------------
+// MULTI-SERIES BUBBLE -- v1.2.0-alpha.2 (global size domain)
+// ---------------------------------------------------------------------
+//
+// Three product lines, each plotted as its own bubble cloud. The size
+// dimension uses a GLOBAL domain across visible series (computed by the
+// bubble renderer's postExtract hook), so equal raw values render at
+// equal pixel radii regardless of which series they belong to. Toggle
+// any series via the legend -- the global domain recomputes from the
+// surviving series and the bubbles resize accordingly.
+
+const multiBubbleSeries = [
+    { name: 'Q1', color: '--c-primary', data: [
+        { x: 5, y: 22, value: 18 }, { x: 7, y: 38, value: 30 },
+        { x: 9, y: 55, value: 24 }, { x: 11, y: 41, value: 12 },
+        { x: 13, y: 28, value: 8 },  { x: 15, y: 19, value: 4 },
+    ]},
+    { name: 'Q2', color: '--c-emerald', data: [
+        { x: 4, y: 48, value: 28 }, { x: 6, y: 62, value: 40 },
+        { x: 8, y: 71, value: 35 }, { x: 10, y: 58, value: 20 },
+        { x: 12, y: 44, value: 14 }, { x: 14, y: 31, value: 9 },
+    ]},
+    { name: 'Q3', color: '--c-amber', data: [
+        { x: 5, y: 70, value: 38 }, { x: 7, y: 85, value: 50 },
+        { x: 9, y: 92, value: 44 }, { x: 11, y: 78, value: 26 },
+        { x: 13, y: 60, value: 18 }, { x: 15, y: 42, value: 11 },
+    ]},
+];
+
+const multiBubbleChart = createBubbleChart({
+    series: multiBubbleSeries,
+    minRadius: 4,
+    maxRadius: 28,
+    fillOpacity: 0.55,
+    stroke: '--bg-card',
+    strokeWidth: 1.5,
+    width: responsiveWidth('multi-bubble-chart', 800),
+    height: 400,
+    ...sharedOpts(),
+    grid: { y: true, x: false },
+    crosshair: { color: '--text-secondary', dash: [3, 4] },
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+multiBubbleChart.mount(document.getElementById('multi-bubble-chart'));
+ALL_CHARTS.push(multiBubbleChart);
+
+// ---------------------------------------------------------------------
+// PER-POINT COLOR BUBBLE -- v1.2.0-alpha.2 (colorKey)
+// ---------------------------------------------------------------------
+//
+// Same bubble renderer, but each row carries its own color via the
+// `colorKey` config. CSS-var values (`'--c-emerald'`) work alongside
+// raw colors -- the extract step resolves them to concrete CSS strings
+// once, so the per-frame draw stays fast.
+
+const colorBubbleData = [];
+{
+    const palette = ['--c-primary', '--c-emerald', '--c-amber', '--c-cyan', '#ef4444', '#a855f7'];
+    for (let i = 0; i < 60; i++) {
+        colorBubbleData.push({
+            x: Math.random() * 100,
+            y: Math.random() * 100,
+            value: 5 + Math.random() * 25,
+            tone: palette[i % palette.length],
+        });
+    }
+}
+
+const colorBubbleChart = createBubbleChart({
+    data: colorBubbleData,
+    size: 'value',
+    colorKey: 'tone',
+    minRadius: 4,
+    maxRadius: 22,
+    fillOpacity: 0.7,
+    stroke: '--bg-card',
+    strokeWidth: 1,
+    width: responsiveWidth('color-bubble-chart', 800),
+    height: 360,
+    ...sharedOpts(),
+    grid: { y: true, x: false },
+    tooltip: false,
+    legend: false,
+});
+colorBubbleChart.mount(document.getElementById('color-bubble-chart'));
+ALL_CHARTS.push(colorBubbleChart);
+
+// ---------------------------------------------------------------------
+// HEATMAP -- v1.2.0-alpha.3 (fourth kernel)
+// ---------------------------------------------------------------------
+//
+// "Active sessions by day-of-week and hour-of-day". 7 x 12 = 84 cells.
+// The grid kernel is brand-new: no axes / scales / interpolation /
+// decimation / markers / multi-series. Just two band scales, a flat
+// Float32Array for cell values, a Uint8 presentMask for sparse rows,
+// and a precomputed string array for cell colors so the draw loop
+// stays allocation-free. ~10.5 KB minified -- the smallest of the
+// nine chart bundles.
+
+const heatmapData = (() => {
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const hours = ['0', '2', '4', '6', '8', '10', '12', '14', '16', '18', '20', '22'];
+    const out = [];
+    for (let d = 0; d < days.length; d++) {
+        for (let h = 0; h < hours.length; h++) {
+            // Synthetic load curve: peaks at noon and 8pm; weekends shifted later.
+            const isWeekend = d >= 5;
+            const t = +hours[h];
+            const morning = Math.exp(-Math.pow((t - 12) / 4, 2)) * 60;
+            const evening = Math.exp(-Math.pow((t - 20) / 3, 2)) * 80;
+            const shift = isWeekend ? 1.5 : 0;
+            const v = Math.max(0, morning + evening + shift * 10 + (Math.random() - 0.5) * 8);
+            out.push({ day: days[d], hour: hours[h], sessions: Math.round(v) });
+        }
+    }
+    return out;
+})();
+
+const heatmapChart = createHeatmap({
+    data: heatmapData,
+    x: 'hour',
+    y: 'day',
+    value: 'sessions',
+    colors: ['#f1f5f9', '#1e40af'],  // slate-100 -> blue-800
+    showValues: false,
+    cellGap: 0.06,
+    highlightStroke: '--text-primary',
+    highlightStrokeWidth: 2,
+    width: responsiveWidth('heatmap-chart', 800),
+    height: 360,
+    margin: { top: 24, right: 32, bottom: 48, left: 64 },
+    labelColor: '--text-secondary',
+    labelFont: '12px ui-sans-serif, system-ui, sans-serif',
+    tooltipFormat: (info) => info.yLabel + ' ' + info.xLabel + ':00 -- ' + info.value + ' sessions',
+});
+heatmapChart.mount(document.getElementById('heatmap-chart'));
+ALL_CHARTS.push(heatmapChart);
+
+// ---------------------------------------------------------------------
+// RADAR -- multi-axis polygon layout, separate kernel
+// ---------------------------------------------------------------------
+//
+// Three "model" comparison across six attributes. The shared [0, 100]
+// domain is typical for "scored" radar charts; each axis ranges
+// independently when domain is omitted (auto-fit).
+
+const radarSeries = signal([
+    { name: 'Model A', color: '--c-primary', values: [88, 72, 90, 65, 80, 75] },
+    { name: 'Model B', color: '--c-emerald', values: [70, 95, 65, 88, 92, 80] },
+    { name: 'Model C', color: '--c-amber',   values: [82, 60, 78, 95, 70, 92] },
+]);
+
+const radarChart = createRadarChart({
+    axes: ['Speed', 'Power', 'Range', 'Charging', 'Safety', 'Comfort'],
+    series: radarSeries,
+    domain: [0, 100],
+    gridTicks: 4,
+    fillOpacity: 0.18,
+    strokeWidth: 2,
+    axisColor: '--axis-color',
+    gridColor: '--grid-color',
+    labelColor: '--text-secondary',
+    font: '11px sans-serif',
+    width: responsiveWidth('radar-chart', 800),
+    height: 440,
+    tooltip: {
+        background: '--tooltip-bg',
+        border: '--tooltip-border',
+    },
+    legend: 'bottom',
+});
+radarChart.mount(document.getElementById('radar-chart'));
+ALL_CHARTS.push(radarChart);
+
+// ---------------------------------------------------------------------
+// HIGH DENSITY -- 100k points, decimation kicks in
+// ---------------------------------------------------------------------
+
+let DENSITY_N = 100_000;
+let DENSITY_NOISE = 0.6;
+const densityXs = new Float32Array(DENSITY_N);
+const densityYs = new Float32Array(DENSITY_N);
+const densityData = signal({ xs: densityXs, ys: densityYs });
+
+const fillDensity = () => {
+    const seed = Math.random() * 1000;
+    for (let i = 0; i < DENSITY_N; i++) {
+        densityXs[i] = i;
+        densityYs[i] =
+            50 * Math.sin(i * 0.00005 + seed)
+            + 25 * Math.sin(i * 0.0007)
+            + DENSITY_NOISE * 20 * (Math.random() - 0.5);
+    }
+};
+
+fillDensity();
+
+const densityChart = createLineChart({
+    data: densityData,
+    color: '--c-primary',
+    lineWidth: 1,
+    width: responsiveWidth('density-chart', 1000),
+    height: 420,
+    ...sharedOpts(),
+    yScale: { nice: true },
+    crosshair: { color: '--text-secondary', dash: [3, 4] },
+    tooltip: false,
+    legend: false,
+});
+densityChart.mount(document.getElementById('density-chart'));
+ALL_CHARTS.push(densityChart);
+
+// Density-card DOM refs hoisted: regenerate() runs once per click but
+// the buttons fire multiple lookups (d-time, d-samples) per invocation.
+// Same hoist pattern for the click handlers themselves.
+const densityTimeEl    = document.getElementById('d-time');
+const densitySamplesEl = document.getElementById('d-samples');
+const densityRegenBtn  = document.getElementById('d-regen');
+const densityNoiseUp   = document.getElementById('d-noise-up');
+const densityNoiseDown = document.getElementById('d-noise-down');
+
+const regenerate = () => {
+    const t0 = performance.now();
+    fillDensity();
+    densityData.set({ xs: densityXs, ys: densityYs });
+    const dt = performance.now() - t0;
+    densityTimeEl.textContent = dt.toFixed(1);
+    densitySamplesEl.textContent = DENSITY_N.toLocaleString();
+};
+
+densityRegenBtn.addEventListener('click', regenerate);
+densityNoiseUp.addEventListener('click', () => {
+    DENSITY_NOISE = Math.min(3, DENSITY_NOISE + 0.3);
+    regenerate();
+});
+densityNoiseDown.addEventListener('click', () => {
+    DENSITY_NOISE = Math.max(0, DENSITY_NOISE - 0.3);
+    regenerate();
+});
+
+// Trigger one initial regenerate so the metrics populate
+setTimeout(regenerate, 100);
+
+</script>
+
+</body>
+</html>

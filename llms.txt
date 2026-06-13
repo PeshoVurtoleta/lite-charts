@@ -1,0 +1,622 @@
+# @zakkster/lite-charts
+
+> Reactive, zero-GC chart library built on @zakkster/lite-scene. Signals
+> for data, dimensions, theme, series visibility. v1.1.0 ships NINE
+> chart types on FOUR independent kernels: line/area/bar/bubble/scatter
+> on the axis kernel, pie/donut on the polar slice kernel, radar on its
+> own kernel, and heatmap on its own grid kernel. Kernel boundaries are
+> strict and verified with esbuild tree-shaking: line bundle = 23 KB
+> minified, bar = 25 KB (stacked + rounded + hover), bubble = 25 KB
+> (spatial-index + multi-series + per-point color), scatter = 22 KB,
+> pie = 13 KB, radar = 13 KB, **heatmap = 10.5 KB (the smallest)**.
+> all-nine total: ~70 KB. Kernel-side auto-resize: omit width / height
+> from config and the chart observes its mount container via
+> ResizeObserver.
+> Heatmap: createHeatmap rides createBaseGridChart -- a kernel that
+> knows nothing about axis / polar / radar code. Two band scales (x +
+> y) reuse makeBandScale math; the y band scale uses the same +y-down
+> convention so yBand.leftEdge(0) is the topmost cell. Cell storage:
+> flat Float32Array indexed yIdx*nx + xIdx; Uint8Array presentMask
+> for sparse data (missing cells render as empty space, hit-test
+> returns null for them). Per-cell colors precomputed at extract into
+> state.cellColors: string[] so the draw loop is just
+> fillStyle = cellColors[i]; fillRect(...) -- zero alloc per cell.
+> Default ramp is linear RGB interpolation between two endpoint hex
+> colors via _parseHexColor + _lerpRGBString. The colorFn(v, vMin,
+> vMax) -> css config overrides entirely for OKLCH ramps, quantile
+> binning, diverging schemes. Hit-test is O(1) -- one xBand.invert +
+> one yBand.invert + a presence-mask check. chart.hover is a
+> signal-style reactive accessor with .peek() escape hatch. Mouse
+> events on canvas drive moveHover / hideHover automatically.
+> Bar polish (this release): postExtract hook for stacked layout,
+> native ctx.roundRect with arcTo fallback for rounded corners,
+> per-bar hover tint via reusable cached tinted-color strings.
+> Multi-series bubble: per-point color via colorKey, global size
+> domain across visible series so equal sizes render at equal radii
+> regardless of which series owns the point.
+> Pluggable spatial index: SpatialIndex / SpatialIndexFactory
+> contract auto-engages at ~1000 points for bubble + scatter
+> hit-test; @zakkster/lite-delaunay is the intended default but
+> optional. 231/231 tests pass.
+> ESM-only. Single-file ~6.2k lines. Four peer deps (lite-signal,
+> lite-scene, lite-axis required; lite-delaunay optional), zero
+> runtime deps. MIT.
+> See ROADMAP.md for forward plan: v1.2 heatmap polish (per-row /
+> per-column highlight, quantile binning), v1.3 SVG export, v1.4 log
+> scale + pan/zoom, v1.5 time-series + annotations.
+
+## Why use this library
+
+- You need a chart that re-renders automatically when a signal changes
+  (data, width, theme, etc.) without manual `.update()` calls.
+- You're streaming live data (100-100k points/sec) and Chart.js drops frames.
+- You're in a Twitch Extension or game HUD with a 1 MB / 60 fps budget that
+  rules out Chart.js (~78 KB) or D3 (~70+ KB plus selection allocation).
+- You want a Vega-Lite middle ground: sensible defaults + escape hatches.
+
+## When NOT to use
+
+- You need SVG output -- coming v1.3. Today only `exportPNG`.
+- You need server-side rendering -- the renderer is Canvas2D-bound.
+- You need `<200` points across one chart and don't care about GC --
+  Chart.js is simpler and the bundle-size argument is weaker at that
+  scale.
+- You need built-in heatmap, scatter, or polar-area charts today -- on
+  the roadmap (v1.2.0 +) but not yet shipped.
+
+## Module shape
+
+ESM-only. Named exports from the single `Charts.js` entry:
+
+```ts
+function createLineChart(config: LineChartConfig): Chart;
+function createAreaChart(config: AreaChartConfig): Chart;
+function createBarChart(config: BarChartConfig): Chart;
+function createBubbleChart(config: BubbleChartConfig): Chart;
+function createScatterChart(config: ScatterChartConfig): Chart;
+function createPieChart(config: PieChartConfig): Chart;
+function createDonutChart(config: DonutChartConfig): Chart;
+function createRadarChart(config: RadarChartConfig): Chart;
+function createHeatmap(config: HeatmapConfig): Chart;
+
+// Public interface for the spatial-index integration (v1.2.0-alpha.0+).
+interface SpatialIndex {
+    findNearest(qx, qy, k, maxDistSq, outIndices, outDistSq): number;
+    dispose(): void;
+}
+type SpatialIndexFactory = (pxs, pys, n) => SpatialIndex;
+```
+
+Nine chart types across four strictly-independent kernels.
+
+`AreaChartConfig extends LineChartConfig` with three additional fields:
+
+```ts
+interface AreaChartConfig extends LineChartConfig {
+    baseline?: number | 'bottom';   // default 0; 'bottom' = bottom of plot rect
+    stroke?: boolean;               // default true; whether to stroke upper boundary
+    fillOpacity?: number;           // default 0.3; multiplied into globalAlpha for fill
+}
+```
+
+`BarChartConfig` is line config minus interpolation/markers (don't apply
+to bars), plus bar-specific layout:
+
+```ts
+interface BarChartConfig extends Omit<LineChartConfig, 'interpolation' | 'markers' | 'xScale'> {
+    baseline?: number;        // default 0; where bars anchor on the y-axis
+    paddingInner?: number;    // default 0.15; gap between bands as fraction of step
+    paddingOuter?: number;    // default 0.1;  padding at each end of the range
+    groupInnerPad?: number;   // default 0.08; gap between bars within a grouped slot
+    xScale?: { domain?: string[] };   // explicit categories if needed
+}
+```
+
+Bar charts treat x as a categorical key. Data shape: `[{x: 'Q1', y: 42}, ...]`.
+String, number, or any value that survives `String(x)` round-trip works.
+Multi-series renders **grouped** side-by-side; each bar occupies a slice of
+the band centered on its series index. The y-domain always includes the
+`baseline` (default 0) so bars don't visually float.
+
+Hit detection is discrete and O(1): `Math.floor((px - origin) / step)`.
+No bisection -- the discriminator is categorical. The crosshair snaps to
+the nearest band; per-series markers are skipped (bars highlight
+themselves).
+
+## Core types
+
+```ts
+interface LineChartConfig {
+    // Data shape: either `data` (single series shorthand) or `series`.
+    data?: Row[] | (() => Row[]) | { xs: Float32Array; ys: Float32Array };
+    series?: SeriesConfig[];
+
+    // Accessors. String key, integer index, or function. Default 'x' / 'y'.
+    x?: string | number | ((row: any, i: number) => number);
+    y?: string | number | ((row: any, i: number) => number);
+
+    // Static-or-signal dimensions.
+    width?: number | (() => number);
+    height?: number | (() => number);
+
+    margin?: { top?: number; right?: number; bottom?: number; left?: number };
+
+    // Style. CSS color strings (hex/rgb/oklch/named) or "--css-var" tokens
+    // resolved against the container via getComputedStyle at mount time.
+    color?: string;
+    lineWidth?: number;
+    background?: string | null;
+    axisColor?: string;
+    labelColor?: string;
+    font?: string;
+
+    // Device pixel ratio override. Default: globalThis.devicePixelRatio.
+    dpr?: number;
+
+    // Scale overrides. Without these, x-type is inferred from the first
+    // data row (Date probe -> time; numeric -> linear) and y-domain is
+    // computed from union of all series with 5% nice padding.
+    xScale?: { type?: 'linear' | 'time'; domain?: [number, number] };
+    yScale?: { domain?: [number, number]; zero?: boolean; nice?: boolean };
+
+    // Crosshair: vertical line + per-series marker dots at the snapped x.
+    // Default true. `crosshair: false` disables the line + markers but keeps
+    // the tooltip if it's also enabled.
+    crosshair?: boolean | { color?: string; dash?: number[] };
+
+    // Tooltip: canvas-drawn box at the snapped x. Default true. `format`
+    // receives `{snapIdx, snapDomainX, xScaleType, rows}` and may return a
+    // string (header-only, suppresses rows) or `{header?, rows?}`.
+    tooltip?: boolean | {
+        background?: string;
+        border?: string;
+        format?: (ctx: {
+            snapIdx: number;
+            snapDomainX: number;
+            xScaleType: 'linear' | 'time';
+            rows: Array<{ color: string; label: string; value: string }>;
+        }) => string | { header?: string; rows?: any[] };
+    };
+
+    // Legend: DOM-rendered with click-to-toggle visibility. Default 'bottom'.
+    // Auto-wraps the canvas in a flex container; pass `legend.container` to
+    // append into an existing element instead.
+    legend?: boolean | 'top' | 'bottom' | 'left' | 'right' | {
+        position?: 'top' | 'bottom' | 'left' | 'right';
+        container?: HTMLElement;
+    };
+
+    // Path interpolation (v1.0.0). Default 'linear'. Per-series override
+    // via SeriesConfig.interpolation. Decimated branch ignores this.
+    interpolation?: 'linear' | 'step' | 'step-after' | 'step-before'
+                  | 'step-mid' | 'monotone' | 'catmull-rom';
+
+    // Marker dots at each sample point (v1.0.0). `true` for circle defaults.
+    // `everyN` thins markers for dense series. Suppressed in decimated mode.
+    markers?: boolean | {
+        shape?: 'circle' | 'square' | 'triangle' | 'diamond';
+        size?: number;          // default 5
+        fill?: string;          // defaults to series color
+        stroke?: string;        // default '#ffffff'
+        strokeWidth?: number;   // default 1
+        everyN?: number;        // default 1
+    };
+
+    // Frame scheduler. Default rAF in browser, synchronous in Node (for
+    // headless tests). Pass `queueMicrotask` for coalesced headless benches.
+    schedule?: (fn: () => void) => void;
+}
+
+interface SeriesConfig {
+    name?: string;
+    data: Row[] | (() => Row[]) | { xs: Float32Array; ys: Float32Array };
+    color?: string;
+    lineWidth?: number;
+    interpolation?: InterpolationMode;       // per-series override
+    markers?: boolean | MarkerConfig;         // per-series override
+}
+
+interface Chart {
+    mount(target: HTMLElement | HTMLCanvasElement): Chart;
+    unmount(): void;
+    exportPNG(opts?: { mimeType?: string; quality?: number }): string;
+    redraw(): void;
+
+    // v1.0.0-alpha.1: crosshair / tooltip control.
+    moveCrosshair(canvasX: number, canvasY: number): void;
+    hideCrosshair(): void;
+
+    // v1.0.0-alpha.3: series visibility control.
+    setSeriesVisible(idx: number, visible: boolean): void;
+
+    // v1.0.0-beta.0: theme reactivity.
+    refreshTheme(): void;                    // re-resolve CSS-var colors + redraw
+
+    readonly scene: Scene | null;          // lite-scene instance
+    readonly canvas: HTMLCanvasElement | null;
+    readonly xScale: Scale;
+    readonly yScale: Scale;
+    readonly xScaleType: 'linear' | 'time';
+    plotBounds: Signal<number>;            // version counter; read to subscribe
+    crosshair: Signal<{                     // live crosshair state; subscribe for sync small-multiples
+        visible: boolean;
+        snapIdx: number;                    // -1 if hidden
+        snapDomainX: number;
+        snapPixelX: number;
+        mousePixelY: number;
+    }>;
+    seriesVisibility: Signal<boolean>[];   // one per series; write to toggle
+    legend: HTMLElement | null;             // null if legend disabled or bare-canvas mount
+}
+
+interface Scale {
+    type: 'linear' | 'time';
+    dMin: number; dMax: number;
+    rMin: number; rMax: number;
+    map(value: number): number;            // domain -> pixel
+    invert(pixel: number): number;         // pixel -> domain
+}
+```
+
+## Static-or-signal acceptance
+
+Every config value that could plausibly be reactive accepts both forms.
+Internally lite-charts wraps statics in constant accessors via a `asAccessor`
+helper, so the engine only ever calls functions. Zero overhead for static
+config; full reactivity for signal config:
+
+```js
+const w = signal(800);
+const chart = createLineChart({ data, width: w, height: 400 });  // mixed
+w.set(1200);  // triggers resize + rescale + redraw automatically
+```
+
+## Data shape conventions
+
+Two accepted forms:
+
+1. **AoS (most ergonomic)**: array of row objects.
+   ```js
+   data: [{ x: 0, y: 1 }, { x: 1, y: 4 }, ...]
+   ```
+   Internally extracted to SoA `Float32Array` slabs once per data update.
+
+2. **SoA (zero-copy fast path)**: `{ xs: Float32Array, ys: Float32Array }`.
+   ```js
+   const xs = new Float32Array(N), ys = new Float32Array(N);
+   // ... fill ...
+   data: { xs, ys }
+   ```
+   The chart references the buffers directly. Use this when you're already
+   producing typed-array data (audio, telemetry, sensor streams, WebGL
+   pipelines, etc.).
+
+Multiple series can mix forms.
+
+## Architecture invariants
+
+- **One scene per chart.** `mount` creates a `lite-scene` over the canvas.
+  All axes, lines, ticks, labels are scene nodes.
+- **Series state is pre-allocated and grown on demand.** Each series has a
+  pair of `Float32Array` slabs (`xs`, `ys`, `pxs`, `pys`) plus decimation
+  working buffers. Slabs grow by power-of-two doubling; never shrink.
+- **The decimation kernel was lifted from `@zakkster/lite-canvas-graph`.**
+  Per-column min/max envelope for `n > 2 * plotWidth`. Preserves spike
+  visibility. Allocation-free; writes into caller-owned buffers.
+- **Two render paths, selected per-draw**: direct polyline for sparse data
+  (`n <= 2 * plotWidth`), decimated envelope for dense data. NaN samples
+  break the polyline in direct mode and are skipped in decimated mode.
+- **Three effects per chart, set up at `mount` time**:
+  1. Size/plot-bounds effect (tracks `widthAcc`, `heightAcc`)
+  2. Data/scale effect (tracks each series' `dataAccessor` + `plotBoundsSignal`)
+  3. Dirty-bridge effect (tracks `scaleVersion` + `plotBoundsSignal`, calls
+     `scene.markDirty`)
+- **Plus two axis effects** (X and Y), tracking `scaleVersion` and rebuilding
+  tick positions from the live scale via `lite-axis.linearTicks` /
+  `timeTicks` and `thinLabels`.
+- **The line series itself is a `path` node** with a raw draw function. The
+  draw closure reads `state.pxs/pys` and color/lineWidth refs directly;
+  zero allocation per frame.
+
+## Performance characteristics
+
+Measured at N=100,000 points, canvas 1600x800, Node 22 (CPU only -- mock
+canvas):
+
+- Full update cycle (data.set -> draw): **p50 1.39 ms, p95 4.66 ms**
+- Decimation kernel alone: **p50 0.52 ms, p95 0.56 ms**
+- Draw alone (cached): **p50 0.48 ms, p95 0.58 ms**
+- Steady-state heap delta: **~270 bytes/cycle** (target <100; gap is
+  niceYDomain tuple + axis label strings + queueMicrotask Promise; v1.0.1
+  closes)
+
+Both 60fps (16.67 ms) and 120fps (8.33 ms) budgets fit on the CPU side.
+Real GPU paint is additional; browser bench comes in v1.0.1.
+
+## Testing
+
+```
+npm test     # 43 deterministic tests via node:test, --expose-gc
+npm run bench  # 100k-point latency + allocation report
+```
+
+Tests use a recording mock canvas context (`test/harness.js`) that captures
+every method call and property assignment into a flat `calls` array. Tests
+assert on the call sequence (what was drawn, with what state) so no real
+canvas is needed. Bench mode supports `ctx.recordingEnabled = false` to
+avoid heap blowup over many frames.
+
+## Common patterns
+
+### Live streaming with a ring buffer
+
+```js
+const xs = new Float32Array(1024), ys = new Float32Array(1024);
+const data = signal({ xs, ys });
+const chart = createLineChart({ data, width: 800, height: 200 });
+chart.mount(el);
+
+// In the data source -- writes mutate xs/ys in place; signal.set on the
+// same object reference re-extracts and re-projects.
+const newDataTick = (newY) => {
+    // ... shift the ring, write newY at the head ...
+    data.set({ xs, ys });  // forces effect re-fire
+};
+```
+
+### Multi-series with mixed forms
+
+```js
+createLineChart({
+    series: [
+        { name: 'cpu', data: cpuRows, x: 't', y: 'pct', color: 'red' },
+        { name: 'mem', data: { xs: memXs, ys: memYs }, color: 'blue' },
+    ],
+});
+```
+
+### Locked x-domain (for synchronized small multiples)
+
+```js
+const sharedX = signal([Date.now() - 3600_000, Date.now()]);
+createLineChart({
+    data: series1,
+    xScale: { type: 'time', domain: untrack(sharedX) },
+    // Pass a computed for live sync:
+    // xScale: { type: 'time', domain: sharedX() },
+});
+```
+
+## Gotchas
+
+- **`data: { xs, ys }` is reference-tracked.** The signal compares by
+  identity. Mutating the buffers in place and calling `signal.set(sameRef)`
+  works -- lite-signal's default `equals` is `Object.is`, which is false
+  for `set(x)` vs prior `x` only if you... wait, `Object.is(x, x)` is
+  true. So passing the same reference will NOT trigger. Either swap to a
+  new wrapper object `signal.set({xs, ys})` (one alloc) or use
+  `signal.update(() => ({xs, ys}))`. Future v1.1: add an opt-in
+  "rebroadcast" flag to skip the equality check.
+- **`exportPNG` requires a real HTMLCanvasElement.** Throws on mock canvases.
+- **Mount target may be either an element (canvas created inside) or a
+  canvas itself.** Test mocks duck-type via `getContext`.
+- **In Node, the default schedule is synchronous.** This is correct for
+  tests but causes lite-scene to skip draw coalescing -- if you're driving
+  many `node.set()` calls per signal write, use
+  `schedule: (fn) => queueMicrotask(fn)`. The bench documents this clearly.
+
+## Release history (shipped)
+
+- v1.0.0-beta.0 - beta.3: line + area polish (interp, markers, theme,
+  gridlines, zero-alloc crosshair, DPR fix)
+- v1.0.0 alpha.0: architectural refactor.
+  `_createChartImpl(config, renderKind)` extracted into
+  `createBaseAxisChart(config, renderer)` + per-chart renderer objects
+  (LINE_RENDERER, AREA_RENDERER, BAR_RENDERER). 22 renderKind branches
+  eliminated. Polymorphic dispatch via renderer interface:
+  buildXAccessor, createXScale, extractData, updateXScale, buildXAxis,
+  makeDrawFn, hitTest, lookupRow, formatTooltipHeader. `rendererCtx`
+  singleton (xScale, yScale, opts, categoriesRef) mutated in place --
+  preserves zero-alloc on hot path.
+- v1.0.0 alpha.1: pie + donut chart family. New `createBasePolarChart`
+  kernel -- completely independent from `createBaseAxisChart`. Polar
+  state struct: parallel arrays for values (Float32), labels (string[]),
+  colors, visibility (Uint8), startAngles (Float64 -- Float32 widens
+  PI/2 enough that exact-boundary hits land in wrong slice), arcAngles
+  (Float64). `extractSliceData` normalizes array-of-objects, parallel-
+  arrays, or plain number arrays. `computeSliceGeometry` centers in
+  plot rect with configurable inner radius. `sliceHitTest` is O(n)
+  atan2 + linear scan inside ring (n typically 3-12). `makeSliceDrawFn`
+  renders wedge (pie) or arc-ring (donut) per slice; hovered slice
+  expands 4 px. Pie and donut share SLICE_RENDERER; only innerRadius
+  default differs (0 vs 0.5).
+- v1.0.0 alpha.2: slice colour resolution bug fix (raw CSS-var leaked
+  into canvas fillStyle); demo gets ResizeObserver-backed responsive
+  sizing.
+- v1.0.0 alpha.3: createBubbleChart on the axis kernel. New
+  BUBBLE_RENDERER. Each point becomes a circle with AREA proportional
+  to a third dimension via sqrt scale (default; linear available).
+  Pixel radii computed at extract time:
+  r = sqrt(rMin^2 + t*(rMax^2 - rMin^2)). New seriesState fields `rs`
+  (raw sizes) and `prs` (pixel radii) -- both null on non-bubble
+  series, zero extra memory. Hit-test signature on the axis kernel
+  extended from (canvasX, primary, xScale, ctx) to (canvasX, canvasY,
+  primary, xScale, ctx) -- line/area/bar tests ignore canvasY; bubble
+  uses both for circle-containment with smallest-on-top tie-breaking
+  on overlap.
+- v1.0.0 alpha.4: createRadarChart on a third independent kernel.
+  Multi-axis polygon layout: N axes (min 3, typical 5-8) spoked from a
+  shared center; each series is a polygon connecting one value-per-axis
+  vertex. `computeRadarGeometry` precomputes cos/sin per axis into
+  Float64 tables -- polygons, grid rings, and spokes all share them,
+  zero per-frame trig. `radarHitTest` is nearest-vertex within 12 px
+  across visible series. Spoke labels auto-align based on angular
+  position. Three drawing layers (grid -> polygons -> spokes+labels) as
+  separate scene nodes for natural z-ordering.
+- v1.0.0: kernel-side auto-resize. `_wireAutoSize` shared helper; omit
+  width / height from config and the chart observes its container via
+  ResizeObserver. Three modes per dimension: explicit static, explicit
+  reactive (signal/fn), or implicit (auto-observe). Synchronous
+  initial read avoids size pop; rAF-throttled updates coalesce burst
+  events. Falls back gracefully (keeps default size) when
+  ResizeObserver is absent. 182 tests, full tree-shake verification.
+- **v1.1.0: bar layout polish.** Stacked bars via new
+  `postExtract(states, ctx)` renderer hook -- the kernel calls it
+  after the per-series extract loop, bar's hook fills per-series
+  `state.stackBottoms` / `state.stackTops` (Float32Arrays, lazy-
+  allocated via ensureFloat32) with a visibility-aware cumulative
+  accumulator in declaration order; the kernel then re-aggregates
+  y-domain to pick up the total stack height. Hidden series excluded
+  from the stack; surviving segments snap down on legend toggle.
+  Negative values clamp to 0 (diverging stacks deferred to a future
+  cut). Rounded corners on the end opposite the baseline (top for
+  positive bars, bottom for negative) via native `ctx.roundRect`
+  where available + hand-traced `arcTo` fallback for older Safari;
+  radii capped at min(w,h)/2. Per-bar hover tint as a CSS-color
+  overlay keyed on the chart's `crosshairDataRef.snapIdx`; default
+  low-alpha white works against any series color without color
+  parsing, opt out with `hoverTint: false`. All three opt-in;
+  defaults match v1.0.0 exactly. Bar bundle 25 KB (+1.6 KB);
+  line/area/bubble bundles +~300 bytes for the kernel's null-check
+  on postExtract; pie/donut/radar unchanged. Three kernels still
+  strictly independent -- verified. 196 tests.
+- **v1.2.0-alpha.0: spatial-index foundation.** Pluggable
+  nearest-neighbor index for O(log n) hit-test on dense point clouds
+  (bubble first; scatter + heatmap will ride the same interface in
+  alpha.1+). Public contract on `Charts.d.ts`:
+  `SpatialIndexFactory = (pxs, pys, n) -> SpatialIndex` where the
+  index exposes `findNearest(qx, qy, k, maxDistSq, outIndices,
+  outDistSq) -> count` (caller-owned output buffers; zero alloc per
+  query) and `dispose()`. `@zakkster/lite-delaunay` is the intended
+  default (sweepline Delaunay -> half-edge mesh -> Voronoi-dual walk
+  for the cursor's cell) but optional -- k-d tree, uniform-grid, or
+  any custom impl works equally well. lite-charts adds it as an
+  optional peer dep via `peerDependenciesMeta.optional`. New
+  `BUBBLE_RENDERER` config: `spatialIndex: factory` and
+  `spatialIndexThreshold` (default 1000). Below threshold the v1.0.0
+  linear scan stays the path. Index is lazy-built on the first hit-
+  test after extract, cached across queries, disposed on data /
+  scale change (extract calls `_disposeSpatialIndex`) AND on chart
+  unmount (via new `renderer.cleanup(states)` hook on the axis
+  kernel, symmetric with v1.1.0's `postExtract`). `k > 1` matters
+  for bubble: overlapping discs mean the nearest CENTER may not be
+  the one whose disc contains the cursor; the renderer asks for
+  `K = 8` candidates and post-filters by disc containment +
+  smallest-r tie-break, preserving v1.0.0 "visually-topmost wins on
+  overlap" semantics. Cached `state.prMaxSq` (max pixel-radius
+  squared) gives the index a tight maxDistSq upper bound.
+  `state._hitIndices` (Int32Array(8)) and `state._hitDistSq`
+  (Float32Array(8)) are stable refs that the index writes into.
+  Bubble bundle ~22 KB -> ~23 KB. Line / area / bar / pie / donut /
+  radar unchanged. 8 new tests. 204 total.
+- **v1.2.0-alpha.1: createScatterChart.** New `SCATTER_RENDERER` on
+  the axis kernel. Eighth chart type ships. Bubble's simpler sibling:
+  no size dimension, every marker the same pixel radius
+  (`markerSize`, default 4), hit-test snaps to nearest point within
+  `hitTolerance` disc (default `markerSize + 4`). Reuses the
+  spatial-index foundation from alpha.0 with `k = 1` (no overlap
+  concerns). `_extractScatterData` disposes any existing spatial
+  index per-extract so the index rebuilds lazily on data / scale
+  change. `_scatterCleanup` symmetric with bubble's: disposes
+  indices on unmount. Scatter bundle ~24 KB. Adds nothing to other
+  bundles (verified). 6 new tests. 210 total.
+- **v1.2.0-alpha.2: multi-series bubble + per-point color +
+  global size domain.** `BUBBLE_RENDERER` gains a `postExtract` hook
+  (`_bubblePostExtract`) that computes a GLOBAL size domain across
+  visible series and re-runs `computeBubbleRadii` on every state.
+  Single-series charts short-circuit -- the v1.0.0 fast path stays
+  in effect when only one series is visible. Per-series state gets
+  `state._stateIdx = i` at construction so the bubble's `lookupRow`
+  can tell which series got hit and scope the tooltip to that
+  series. Crosshair state gains `snapSeriesIdx` (default -1 --
+  non-bubble charts never set it). `_bubbleHitTest` iterates
+  `ctx.seriesStates` rather than checking only `primary`. Each
+  visible series' bubbles get tested (linear scan or spatial index,
+  per its threshold). Returns `snapSeriesIdx` along with `snapIdx`.
+  `_initBubbleOpts` gains `colorKey` (string / number / fn). The
+  accessor uses `buildRawAccessor` (not `buildAccessor`) so color
+  strings like `'#ff0000'` are not `+v`-coerced to NaN.
+  `extractBubbleData` extracts per-point colors into `state.cs`
+  (plain string Array, lazy-allocated). Colors resolve once via
+  `resolveColor` at extract time -- CSS-var values like
+  `'--c-emerald'` become concrete strings the draw fn writes to
+  `ctx.fillStyle` directly. Bubble draw fn picks `state.cs[i]` per
+  row when set, falling back to the series fill otherwise. Zero
+  hot-path cost when `colorKey` is unset. Bubble bundle ~23 KB ->
+  ~24 KB. Test infra bumped lite-signal default registry to
+  `maxNodes: 32768` for 200+ chart-creations across the suite. 9
+  new tests. 219 total.
+- **v1.2.0-alpha.3 (current): createHeatmap + fourth kernel.**
+  New `createBaseGridChart(config, renderer)` kernel. Strictly
+  independent from axis / polar / radar kernels -- no cross-kernel
+  imports either direction. Heatmap bundle is 10.5 KB minified --
+  the smallest of the nine -- because the grid kernel has none of
+  the axes / interpolation / decimation / markers / scale-math /
+  multi-series weight of the axis kernel. Two band scales (x + y)
+  reuse `makeBandScale` math; the y band scale uses the same
+  +y-down convention so `yBand.leftEdge(0)` is the topmost cell.
+  Cell storage: flat `Float32Array` indexed `yIdx * nx + xIdx`;
+  `Uint8Array` `presentMask` for sparse data (missing cells render
+  empty, hit-test returns null for them). Per-cell colors
+  precomputed at extract into `state.cellColors: string[]` so the
+  draw loop is `fillStyle = cellColors[i]; fillRect(...)` --
+  zero alloc per cell. Default ramp is linear RGB interpolation
+  between two endpoint hex colors via `_parseHexColor` +
+  `_lerpRGBString`. The `colorFn(v, vMin, vMax) -> css` config
+  overrides entirely for OKLCH ramps, quantile binning, diverging
+  schemes. Hit-test is O(1) -- one `xBand.invert` + one
+  `yBand.invert` + a presence-mask check. `chart.hover` is a
+  signal-style reactive accessor with `.peek()` escape hatch.
+  Mouse events on canvas drive `moveHover` / `hideHover`
+  automatically; tests drive them manually too. Axis labels
+  render inline (no lite-axis dep for the grid kernel since
+  categories are arbitrary strings). 12 new tests covering
+  category extraction, vMin/vMax, cell render counts (full +
+  sparse), default ramp endpoint correctness, custom colorFn,
+  hit-test (correct cell + missing + outside plot), data signal
+  reactivity, value labels, lifecycle. 231 total.
+
+## Capacity (lite-signal arena)
+
+lite-signal's default node-arena capacity is **1024 nodes**. Each
+axis-kernel chart uses ~45-60 active nodes (the dominant cost is
+the per-axis tick pool: each tick = `lineNode` + `textNode` = 2
+scene-node effects, at max 12 ticks per axis = ~24 effects per axis
+x 2 axes = ~48). Heatmap uses ~5 nodes (grid kernel renders cells
+through a single pathNode per layer). Pie / donut use ~25.
+
+**Default 1024 fits ~15-20 axis-kernel charts.** Dashboards or demos
+with more must bump the registry BEFORE constructing any chart:
+
+```js
+import { createRegistry, setDefaultRegistry } from '@zakkster/lite-signal';
+setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
+```
+
+The lite-charts demo (`demo/index.html`) and the test suite both
+bump to 32768 for this reason. Bumping after charts are already
+constructed doesn't help those charts -- they read the current
+default registry at construction time.
+
+Each mount/unmount cycle leaves ~4 nodes of residue from
+construction-time signals (`widthAutoSig`, `plotBoundsSignal`,
+`scaleVersion`, etc.) that survive unmount so the chart can be
+remounted. For long-running apps that create and destroy many charts
+dynamically, this accumulates until the chart reference is dropped.
+A terminal-teardown `chart.destroy()` is on the roadmap for v1.3.
+
+## Forward plan
+
+- v1.2.0: heatmap polish -- per-row / per-column highlight on hover,
+  quantile binning, value-label auto-color (white-on-dark, dark-on-
+  light). Final v1.2.0 cut after the polish lands.
+- v1.3.0: SVG export across all nine charts. Mirrors every draw fn
+  through SVG path commands; reuses every projection function so
+  output is pixel-identical to canvas.
+- v1.4.0: log scale; pan + zoom; brushing primitives.
+- v1.5.0: time-series specialized variants; legend virtualization via
+  `@zakkster/lite-virtual`; annotation layer.
+
+## License
+
+MIT (c) Zahary Shinikchiev
