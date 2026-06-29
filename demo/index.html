@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>@zakkster/lite-charts -- v1.1.0</title>
+<title>@zakkster/lite-charts -- v1.3.0</title>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -636,7 +636,7 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
         <div class="brand">
             <span class="brand-logo"></span>
             <span class="brand-name">@zakkster/lite-charts</span>
-            <span class="brand-version">v1.1.0</span>
+            <span class="brand-version">v1.0.0</span>
         </div>
         <button class="theme-toggle" id="theme-toggle">
             <span class="indicator"></span>
@@ -652,7 +652,7 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
          ================================================================= -->
     <section>
         <div class="hero-intro">
-            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.1.0</span>
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.0.0</span>
             <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
             <p>
                 Single-file ESM. Three peer deps. Signal-native data, dimensions, theme,
@@ -947,29 +947,30 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
     </section>
 
     <!-- =================================================================
-         Heatmap (v1.2.0-alpha.3) -- fourth kernel
+         Heatmap (v1.2.0) -- fourth kernel
          ================================================================= -->
     <section>
         <div class="section-head">
             <div class="titles">
-                <span class="eyebrow">// heatmap -- new in v1.2-alpha</span>
+                <span class="eyebrow">// heatmap -- v1.2.0</span>
                 <h2>A fourth, independent kernel.</h2>
                 <p>
-                    <span class="mono">createHeatmap</span> rides a brand-new
+                    <span class="mono">createHeatmap</span> rides a
                     <span class="mono">createBaseGridChart</span> kernel
                     -- no axes, no scales, no interpolation, no markers.
-                    Just two band scales (x + y), a flat
+                    Two band scales (x + y), a flat
                     <span class="mono">Float32Array</span> for cell values,
                     a <span class="mono">Uint8Array</span> presentMask for
                     sparse data, and a precomputed string array for cell
-                    colors so the draw loop stays allocation-free. ~10.5 KB
+                    colors so the draw loop stays allocation-free. ~11 KB
                     minified -- the smallest of the nine chart bundles.
-                    Default color ramp is linear RGB interp between two
-                    endpoint hex colors; pass <span class="mono">colorFn</span>
-                    for OKLCH, quantile, or diverging schemes. Hit-test is
-                    O(1) -- one <span class="mono">xBand.invert</span> + one
-                    <span class="mono">yBand.invert</span> + a presence-mask
-                    check.
+                    v1.2.0 polish on display: <span class="mono">showValues</span>
+                    with <span class="mono">valueLabelColor: 'auto'</span>
+                    picks black or white per cell from NTSC luminance so
+                    labels stay readable across the whole ramp; hovering
+                    fills row + column highlight stripes (both default on,
+                    individually disable-able) before the cell stroke.
+                    Hit-test is O(1).
                 </p>
             </div>
         </div>
@@ -977,6 +978,111 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
             <div class="chart-area" id="heatmap-chart"></div>
         </div>
     </section>
+
+    <!-- =================================================================
+         Heatmap (quantile binning) -- v1.2.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// heatmap, quantile -- v1.2.0</span>
+                <h2>When outliers wash out the rest.</h2>
+                <p>
+                    Same data, same ramp, but with
+                    <span class="mono">colorScale: 'quantile'</span> and
+                    <span class="mono">colorBins: 6</span>. Quantile binning
+                    splits cells into N bins by RANK so each bin has
+                    roughly the same number of cells. Hot spots no longer
+                    pull the mid-range cells toward the bottom of the
+                    ramp; you can compare relative ordering across the
+                    whole grid instead of just spotting the extremes.
+                    Bin colors are pre-computed from the same two-stop
+                    ramp at extract time -- the draw loop stays just
+                    <span class="mono">fillStyle = cellColors[i]; fillRect(...)</span>.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="heatmap-quantile-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         SVG export -- v1.3.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// svg export -- v1.3.0</span>
+                <h2>Every chart, also a static SVG.</h2>
+                <p>
+                    <span class="mono">chart.exportSVG(opts?)</span> returns
+                    a complete <span class="mono">&lt;svg&gt;...&lt;/svg&gt;</span>
+                    string with <span class="mono">xmlns</span>,
+                    <span class="mono">viewBox</span>,
+                    <span class="mono">width</span>, and
+                    <span class="mono">height</span> -- droppable into HTML
+                    pages, PDFs, image-converter pipelines, or diffable
+                    test fixtures. Implementation is a Canvas2D-shaped
+                    shim that walks the live scene tree the same way
+                    lite-scene's <span class="mono">drawNode</span> does,
+                    so the chart's draw callbacks don't know they're
+                    rendering to SVG -- pixel-identical to canvas paint
+                    (minus DPR scaling; SVG is resolution-independent).
+                </p>
+                <p>
+                    Click a button below to download or preview the
+                    exported SVG for the corresponding chart on this
+                    page.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card" style="padding: 24px;">
+            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px;">
+                <button id="svg-export-line" class="svg-export-btn">
+                    Download line.svg
+                </button>
+                <button id="svg-export-bar" class="svg-export-btn">
+                    Download bar.svg
+                </button>
+                <button id="svg-export-pie" class="svg-export-btn">
+                    Download pie.svg
+                </button>
+                <button id="svg-export-radar" class="svg-export-btn">
+                    Download radar.svg
+                </button>
+                <button id="svg-export-heatmap" class="svg-export-btn">
+                    Download heatmap.svg
+                </button>
+                <button id="svg-preview-toggle" class="svg-export-btn">
+                    Preview heatmap inline
+                </button>
+            </div>
+            <div id="svg-preview-area"
+                 style="display: none; border: 1px solid var(--surface-line, #2a2a2a); border-radius: 8px; padding: 16px; background: #fff;">
+            </div>
+            <pre id="svg-source-area"
+                 style="display: none; max-height: 240px; overflow: auto; background: var(--surface-2, #1a1a1a); padding: 12px; border-radius: 8px; font-size: 11px; line-height: 1.4; margin-top: 12px;"></pre>
+        </div>
+    </section>
+
+    <style>
+        .svg-export-btn {
+            background: var(--surface-2, #1a1a1a);
+            color: var(--text-primary, #e8e8e8);
+            border: 1px solid var(--surface-line, #2a2a2a);
+            border-radius: 6px;
+            padding: 8px 14px;
+            font: inherit;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .svg-export-btn:hover {
+            background: var(--surface-3, #232323);
+            border-color: var(--text-secondary, #555);
+        }
+    </style>
 
     <!-- =================================================================
          Radar
@@ -1189,16 +1295,7 @@ ALL_CHARTS.push(heroChart);
 
 // Streaming loop -- writes into the rolling Float32Arrays in place.
 let heroRunning = true;
-// Ring-buffer for frame-time samples. The naive push+shift pattern allocates
-// every iteration once full (Array.shift is O(n) and reshapes the internal
-// storage); a fixed-cap typed-array ring writes one slot per iter, zero
-// allocations forever. Same for the 4Hz percentile snapshot: a reusable
-// Float64Array scratchpad avoids the per-tick .slice().sort() alloc.
-const FRAME_CAP = 60;
-let frameSamples = new Float64Array(FRAME_CAP);
-let frameSamplesLen = 0;       // grows from 0 up to FRAME_CAP, then stays
-let frameSamplesHead = 0;      // write index; wraps mod FRAME_CAP once full
-const frameSortScratch = new Float64Array(FRAME_CAP);
+let frameSamples = [];
 let lastTick = performance.now();
 
 const pushHero = (spike = false) => {
@@ -1234,10 +1331,8 @@ const heroLoop = () => {
         const t0 = performance.now();
         pushHero();
         const dt = performance.now() - t0;
-        // Ring write: O(1), zero alloc.
-        frameSamples[frameSamplesHead] = dt;
-        frameSamplesHead = (frameSamplesHead + 1) % FRAME_CAP;
-        if (frameSamplesLen < FRAME_CAP) frameSamplesLen++;
+        frameSamples.push(dt);
+        if (frameSamples.length > 60) frameSamples.shift();
     }
     setTimeout(heroLoop, 33);     // ~30 Hz; deliberately not rAF so the
                                   //  rate doesn't dance with the display
@@ -1254,14 +1349,9 @@ const metricFpsEl   = document.getElementById('m-fps');
 metricRateEl.textContent = '30';  // static after first paint
 setInterval(() => {
     metricTotalEl.textContent = heroN.toLocaleString();
-    if (frameSamplesLen > 5) {
-        // Copy into the scratchpad subarray-style, sort in place. No alloc.
-        for (let i = 0; i < frameSamplesLen; i++) frameSortScratch[i] = frameSamples[i];
-        // Float64Array.sort is in-place; default numeric order (no comparator
-        // function = no closure allocation per call).
-        const view = frameSortScratch.subarray(0, frameSamplesLen);
-        view.sort();
-        const p95 = view[Math.floor(frameSamplesLen * 0.95)];
+    if (frameSamples.length > 5) {
+        const sorted = frameSamples.slice().sort((a, b) => a - b);
+        const p95 = sorted[Math.floor(sorted.length * 0.95)];
         metricFpsEl.textContent = p95.toFixed(2);
     }
 }, 250);
@@ -1880,7 +1970,7 @@ colorBubbleChart.mount(document.getElementById('color-bubble-chart'));
 ALL_CHARTS.push(colorBubbleChart);
 
 // ---------------------------------------------------------------------
-// HEATMAP -- v1.2.0-alpha.3 (fourth kernel)
+// HEATMAP -- v1.2.0 (fourth kernel)
 // ---------------------------------------------------------------------
 //
 // "Active sessions by day-of-week and hour-of-day". 7 x 12 = 84 cells.
@@ -1888,8 +1978,15 @@ ALL_CHARTS.push(colorBubbleChart);
 // decimation / markers / multi-series. Just two band scales, a flat
 // Float32Array for cell values, a Uint8 presentMask for sparse rows,
 // and a precomputed string array for cell colors so the draw loop
-// stays allocation-free. ~10.5 KB minified -- the smallest of the
-// nine chart bundles.
+// stays allocation-free. ~11 KB minified -- the smallest of the nine
+// chart bundles.
+//
+// v1.2.0 polish on display here:
+//   - showValues: true with valueLabelColor: 'auto' (default)
+//     -> per-cell NTSC luminance picks #000 / #fff so labels stay
+//        readable across the whole ramp.
+//   - row + column highlight stripes on hover (defaults on)
+//   - tooltipFormat customizes the readout to "Mon 8:00 -- 42 sessions"
 
 const heatmapData = (() => {
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -1916,8 +2013,15 @@ const heatmapChart = createHeatmap({
     y: 'day',
     value: 'sessions',
     colors: ['#f1f5f9', '#1e40af'],  // slate-100 -> blue-800
-    showValues: false,
+    // v1.2.0: showValues + auto label contrast. Cells across the full
+    // ramp get readable text without any per-cell config.
+    showValues: true,
+    valueFormat: (v) => v > 0 ? String(v) : '',  // hide labels on near-zero cells
+    valueLabelFont: '10px ui-sans-serif, system-ui, sans-serif',
     cellGap: 0.06,
+    // v1.2.0: row + column highlight stripes (defaults on; tinted to
+    // the theme's row/column highlight color).
+    rowColumnHighlightFill: 'rgba(15,23,42,0.12)',
     highlightStroke: '--text-primary',
     highlightStrokeWidth: 2,
     width: responsiveWidth('heatmap-chart', 800),
@@ -1929,6 +2033,38 @@ const heatmapChart = createHeatmap({
 });
 heatmapChart.mount(document.getElementById('heatmap-chart'));
 ALL_CHARTS.push(heatmapChart);
+
+// ---------------------------------------------------------------------
+// HEATMAP (QUANTILE) -- v1.2.0
+// ---------------------------------------------------------------------
+//
+// A second heatmap on the same dataset but with `colorScale: 'quantile'`.
+// Side-by-side this makes the binning behavior visible: the linear ramp
+// above lets a few hot spots dominate; this one splits cells by RANK
+// into N bins so each bin has the same number of cells. Useful when a
+// few outliers would otherwise wash out everything else.
+
+const heatmapQuantileChart = createHeatmap({
+    data: heatmapData,
+    x: 'hour',
+    y: 'day',
+    value: 'sessions',
+    colors: ['#f1f5f9', '#1e40af'],
+    colorScale: 'quantile',
+    colorBins: 6,
+    showValues: false,
+    cellGap: 0.06,
+    highlightStroke: '--text-primary',
+    highlightStrokeWidth: 2,
+    width: responsiveWidth('heatmap-quantile-chart', 800),
+    height: 360,
+    margin: { top: 24, right: 32, bottom: 48, left: 64 },
+    labelColor: '--text-secondary',
+    labelFont: '12px ui-sans-serif, system-ui, sans-serif',
+    tooltipFormat: (info) => info.yLabel + ' ' + info.xLabel + ':00 -- ' + info.value + ' sessions (bin)',
+});
+heatmapQuantileChart.mount(document.getElementById('heatmap-quantile-chart'));
+ALL_CHARTS.push(heatmapQuantileChart);
 
 // ---------------------------------------------------------------------
 // RADAR -- multi-axis polygon layout, separate kernel
@@ -2034,6 +2170,64 @@ densityNoiseDown.addEventListener('click', () => {
 
 // Trigger one initial regenerate so the metrics populate
 setTimeout(regenerate, 100);
+
+// ---------------------------------------------------------------------
+// SVG EXPORT WIRING -- v1.3.0
+// ---------------------------------------------------------------------
+//
+// Each Download button calls `chart.exportSVG()` on the matching chart
+// and triggers a browser download via an object URL. The inline preview
+// button shows the SVG markup AND the rendered SVG side-by-side so you
+// can verify the output is well-formed.
+
+const downloadSVG = (svgString, filename) => {
+    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Defer revoke so Safari/Firefox have a chance to start the download
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+document.getElementById('svg-export-line').addEventListener('click', () => {
+    downloadSVG(heroChart.exportSVG(), 'lite-charts-line.svg');
+});
+document.getElementById('svg-export-bar').addEventListener('click', () => {
+    downloadSVG(barChart.exportSVG(), 'lite-charts-bar.svg');
+});
+document.getElementById('svg-export-pie').addEventListener('click', () => {
+    downloadSVG(pieChart.exportSVG(), 'lite-charts-pie.svg');
+});
+document.getElementById('svg-export-radar').addEventListener('click', () => {
+    downloadSVG(radarChart.exportSVG(), 'lite-charts-radar.svg');
+});
+document.getElementById('svg-export-heatmap').addEventListener('click', () => {
+    downloadSVG(heatmapChart.exportSVG(), 'lite-charts-heatmap.svg');
+});
+
+const previewArea = document.getElementById('svg-preview-area');
+const sourceArea = document.getElementById('svg-source-area');
+const previewBtn = document.getElementById('svg-preview-toggle');
+let previewShown = false;
+previewBtn.addEventListener('click', () => {
+    previewShown = !previewShown;
+    if (previewShown) {
+        const svg = heatmapChart.exportSVG({ background: '#ffffff' });
+        previewArea.innerHTML = svg;
+        previewArea.style.display = 'block';
+        sourceArea.textContent = svg;
+        sourceArea.style.display = 'block';
+        previewBtn.textContent = 'Hide preview';
+    } else {
+        previewArea.style.display = 'none';
+        sourceArea.style.display = 'none';
+        previewBtn.textContent = 'Preview heatmap inline';
+    }
+});
 
 </script>
 

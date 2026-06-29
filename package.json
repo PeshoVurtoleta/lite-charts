@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-charts",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Reactive, zero-GC chart library. Signal-native data, scales, and dimensions; 60fps at 100k points; zero allocations in steady-state render. Built on @zakkster/lite-scene.",
   "type": "module",
   "main": "./Charts.js",
@@ -8,31 +8,36 @@
   "types": "./Charts.d.ts",
   "exports": {
     ".": {
-      "node": "./Charts.js",
       "types": "./Charts.d.ts",
+      "node": "./Charts.js",
       "import": "./Charts.js",
       "default": "./Charts.js"
     }
   },
   "files": [
     "Charts.js",
+    "CHANGELOG.md",
     "Charts.d.ts",
     "README.md",
-    "CHANGELOG.md",
+    "ROADMAP.md",
     "llms.txt",
     "LICENSE"
   ],
   "sideEffects": false,
   "peerDependencies": {
     "@zakkster/lite-axis": "^1.0.1",
+    "@zakkster/lite-delaunay": "^1.0.0",
     "@zakkster/lite-scene": "^1.0.0",
-    "@zakkster/lite-signal": "^1.1.5"
+    "@zakkster/lite-signal": "^1.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@zakkster/lite-delaunay": {
+      "optional": true
+    }
   },
   "scripts": {
-    "test": "node --test --test-reporter=spec test/*.test.js",
-    "test:gc": "node --expose-gc --test --test-reporter=spec test/*.test.js",
-    "bench": "node --expose-gc bench/line-100k.mjs",
-    "demo": "node demo/serve.js"
+    "test": "node --expose-gc --test --test-reporter=spec",
+    "bench": "node --expose-gc bench/line-100k.mjs"
   },
   "keywords": [
     "chart",

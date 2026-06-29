@@ -1,49 +1,50 @@
 # @zakkster/lite-charts
 
 > Reactive, zero-GC chart library built on @zakkster/lite-scene. Signals
-> for data, dimensions, theme, series visibility. v1.1.0 ships NINE
+> for data, dimensions, theme, series visibility. v1.3.0 ships NINE
 > chart types on FOUR independent kernels: line/area/bar/bubble/scatter
-> on the axis kernel, pie/donut on the polar slice kernel, radar on its
-> own kernel, and heatmap on its own grid kernel. Kernel boundaries are
-> strict and verified with esbuild tree-shaking: line bundle = 23 KB
-> minified, bar = 25 KB (stacked + rounded + hover), bubble = 25 KB
-> (spatial-index + multi-series + per-point color), scatter = 22 KB,
-> pie = 13 KB, radar = 13 KB, **heatmap = 10.5 KB (the smallest)**.
-> all-nine total: ~70 KB. Kernel-side auto-resize: omit width / height
-> from config and the chart observes its mount container via
+> on the axis kernel, pie/donut on the polar slice kernel, radar on
+> its own kernel, and heatmap on its own grid kernel. Kernel
+> boundaries are strict and verified with esbuild tree-shaking. line
+> bundle ~32 KB minified, bar ~34 KB (stack/rounded/hover from v1.1.0
+> + SVG export), bubble ~34 KB (spatial-index from alpha.0 + multi-
+> series + per-point color from alpha.2), scatter ~31 KB (alpha.1),
+> pie ~22 KB, radar ~22 KB, heatmap ~22 KB (still the smallest of the
+> nine). all-nine total: ~82 KB. Kernel-side auto-resize: omit width
+> / height from config and the chart observes its mount container via
 > ResizeObserver.
-> Heatmap: createHeatmap rides createBaseGridChart -- a kernel that
-> knows nothing about axis / polar / radar code. Two band scales (x +
-> y) reuse makeBandScale math; the y band scale uses the same +y-down
-> convention so yBand.leftEdge(0) is the topmost cell. Cell storage:
-> flat Float32Array indexed yIdx*nx + xIdx; Uint8Array presentMask
-> for sparse data (missing cells render as empty space, hit-test
-> returns null for them). Per-cell colors precomputed at extract into
-> state.cellColors: string[] so the draw loop is just
-> fillStyle = cellColors[i]; fillRect(...) -- zero alloc per cell.
-> Default ramp is linear RGB interpolation between two endpoint hex
-> colors via _parseHexColor + _lerpRGBString. The colorFn(v, vMin,
-> vMax) -> css config overrides entirely for OKLCH ramps, quantile
-> binning, diverging schemes. Hit-test is O(1) -- one xBand.invert +
-> one yBand.invert + a presence-mask check. chart.hover is a
-> signal-style reactive accessor with .peek() escape hatch. Mouse
-> events on canvas drive moveHover / hideHover automatically.
-> Bar polish (this release): postExtract hook for stacked layout,
-> native ctx.roundRect with arcTo fallback for rounded corners,
-> per-bar hover tint via reusable cached tinted-color strings.
-> Multi-series bubble: per-point color via colorKey, global size
-> domain across visible series so equal sizes render at equal radii
-> regardless of which series owns the point.
-> Pluggable spatial index: SpatialIndex / SpatialIndexFactory
-> contract auto-engages at ~1000 points for bubble + scatter
-> hit-test; @zakkster/lite-delaunay is the intended default but
-> optional. 231/231 tests pass.
-> ESM-only. Single-file ~6.2k lines. Four peer deps (lite-signal,
+> v1.3.0 (current): chart.exportSVG() across all four kernels. NEW
+> chart.exportSVG(opts?) returns a complete <svg>...</svg> string
+> with xmlns, viewBox, width, height -- droppable into HTML pages,
+> PDFs, image-converter pipelines, or diffable test fixtures.
+> Implementation: a Canvas2D-shaped shim (_SVGRenderingContext2D,
+> ~270 LOC) accumulates SVG markup instead of issuing pixel ops; the
+> _drawNodeToSVG walker recursively traverses scene.root through it,
+> structurally mirroring lite-scene's drawNode/drawSelf so every node
+> kind (rect, circle, line, text, path, group with clip) is covered.
+> The chart's draw callbacks don't know they're rendering to SVG --
+> they call the canvas API as always. Geometric output is identical
+> to canvas paint (minus DPR scaling -- SVG is resolution-
+> independent). SVGExportOptions: { background?: string | null } --
+> defaults to the chart's construction-time background. The chart
+> must be mounted; mock canvases work (SVG export doesn't read pixel
+> data). Text-width estimation is approximate (~0.55 em per char).
+> Bar category-label centering bug fixed: pre-existing typo
+> (anchor: 'center' instead of align: 'center') at Charts.js line
+> 1329 had been silently offsetting multi-character labels right by
+> half a glyph width. Both canvas and SVG benefit.
+> v1.2.0: chart.destroy() across all four kernels + heatmap polish
+> (row+column highlights, quantile color binning, auto-contrast value
+> labels). v1.2.0-alpha.3: createHeatmap on the new grid kernel.
+> v1.2.0-alpha.2: multi-series bubble + per-point color + global
+> size domain. v1.2.0-alpha.1: createScatterChart. v1.2.0-alpha.0:
+> spatial-index foundation. v1.1.0: bar layout polish. 259/259
+> tests pass.
+> ESM-only. Single-file ~6.9k lines. Four peer deps (lite-signal,
 > lite-scene, lite-axis required; lite-delaunay optional), zero
 > runtime deps. MIT.
-> See ROADMAP.md for forward plan: v1.2 heatmap polish (per-row /
-> per-column highlight, quantile binning), v1.3 SVG export, v1.4 log
-> scale + pan/zoom, v1.5 time-series + annotations.
+> See ROADMAP.md for forward plan: v1.4 log scale + pan/zoom +
+> brushing, v1.5 time-series specialized variants + annotations.
 
 ## Why use this library
 
@@ -546,7 +547,7 @@ createLineChart({
   ~24 KB. Test infra bumped lite-signal default registry to
   `maxNodes: 32768` for 200+ chart-creations across the suite. 9
   new tests. 219 total.
-- **v1.2.0-alpha.3 (current): createHeatmap + fourth kernel.**
+- **v1.2.0-alpha.3: createHeatmap + fourth kernel.**
   New `createBaseGridChart(config, renderer)` kernel. Strictly
   independent from axis / polar / radar kernels -- no cross-kernel
   imports either direction. Heatmap bundle is 10.5 KB minified --
@@ -561,20 +562,102 @@ createLineChart({
   precomputed at extract into `state.cellColors: string[]` so the
   draw loop is `fillStyle = cellColors[i]; fillRect(...)` --
   zero alloc per cell. Default ramp is linear RGB interpolation
-  between two endpoint hex colors via `_parseHexColor` +
-  `_lerpRGBString`. The `colorFn(v, vMin, vMax) -> css` config
-  overrides entirely for OKLCH ramps, quantile binning, diverging
-  schemes. Hit-test is O(1) -- one `xBand.invert` + one
+  between two endpoint hex colors. The `colorFn(v, vMin, vMax) ->
+  css` config overrides entirely for OKLCH ramps, quantile binning,
+  diverging schemes. Hit-test is O(1) -- one `xBand.invert` + one
   `yBand.invert` + a presence-mask check. `chart.hover` is a
   signal-style reactive accessor with `.peek()` escape hatch.
   Mouse events on canvas drive `moveHover` / `hideHover`
-  automatically; tests drive them manually too. Axis labels
-  render inline (no lite-axis dep for the grid kernel since
-  categories are arbitrary strings). 12 new tests covering
-  category extraction, vMin/vMax, cell render counts (full +
-  sparse), default ramp endpoint correctness, custom colorFn,
-  hit-test (correct cell + missing + outside plot), data signal
-  reactivity, value labels, lifecycle. 231 total.
+  automatically. Axis labels render inline (no lite-axis dep for
+  the grid kernel since categories are arbitrary strings). 12 new
+  tests. 231 total.
+- **v1.2.0: destroy() + heatmap polish.**
+  **chart.destroy() on all four kernels.** Each kernel tracks every
+  signal it creates at construction time in a per-instance
+  `_ownedSignals` array via a small `_own(s)` helper; `destroy()`
+  calls `unmount()` first if mounted, then iterates the array and
+  calls lite-signal's `dispose()` on each. The visibility-growth
+  paths in polar (`ensureVisibilitySignals`) and radar
+  (`ensureSeriesSlots`) push new signals through `_own` too so the
+  array stays in sync as series counts change. Verified zero
+  residue across 30 mount+destroy cycles on every kernel.
+  Idempotent. Works before `mount()` too (signals exist before
+  mount, so they need cleanup even if the chart was never
+  displayed). **Heatmap quantile binning** (`colorScale: 'quantile'`,
+  `colorBins` default 5, clamp [2, 20]): collect present values,
+  sort, place N-1 boundaries at the i/N percentiles, pre-compute
+  one color per bin from the same lo/hi ramp; per-cell assignment
+  is a linear scan through the boundaries (zero alloc on the
+  per-cell path). Outliers no longer dominate the ramp.
+  **Heatmap row + column highlights**: fill stripes the full plot
+  width (row) and full plot height (column) at the band width of
+  the hovered cell, drawn before the cell stroke. Both default on,
+  independently disable-able via `rowHighlight: false` /
+  `columnHighlight: false`. Stripe color
+  (`rowColumnHighlightFill`, default `rgba(0,0,0,0.10)`) resolved
+  at mount so CSS-vars work. **Auto-contrast value labels**:
+  `valueLabelColor` defaults to `'auto'` for `showValues: true`.
+  Per-cell NTSC luminance (`0.299R + 0.587G + 0.114B`) picks
+  `#000000` / `#ffffff`. Computed at extract time alongside the
+  cell color into `state.cellLabelColors` (no extra pass).
+  `_parseRGBLike` handles `rgb(...)` and hex; named / oklch / rgba
+  fall through to `#ffffff`. Explicit `valueLabelColor` skips the
+  per-cell allocation entirely. Helpers added:
+  `_pickContrastColor`, `_parseRGBLike`. Helper removed:
+  `_lerpRGBString` (linear / quantile paths now inline the lerp
+  to keep R/G/B integers in scope for luminance). 14 new tests.
+  245 total.
+- **v1.3.0 (current): chart.exportSVG() across all four kernels.**
+  Every chart now returns a static SVG of its current frame via
+  `chart.exportSVG(opts?)`. Implementation: a Canvas2D-shaped shim
+  (`_SVGRenderingContext2D`, ~270 LOC in Charts.js) accumulates SVG
+  markup instead of issuing pixel ops. State stack snapshots CTM,
+  fillStyle, strokeStyle, lineWidth, lineCap, lineJoin, lineDash,
+  globalAlpha, font, textAlign, textBaseline, clipPathId. Method
+  coverage: save/restore; translate/rotate/scale/setTransform/
+  resetTransform; beginPath/closePath/moveTo/lineTo/bezierCurveTo/
+  quadraticCurveTo/rect/arc/arcTo/roundRect; stroke/fill (emit
+  `<path d>`); fillRect/strokeRect (emit `<rect>` via _axisAligned
+  check, falls through to path for rotated cases); fillText/
+  strokeText (emit `<text>` with text-anchor + dominant-baseline
+  derived from canvas textAlign + textBaseline); setLineDash/
+  getLineDash; clip() emits `<clipPath>` def + url() refs.
+  Unsupported (drawImage, gradients, shadows) are silent no-ops --
+  none of the v1.3.0 chart code uses them.
+  **_drawNodeToSVG / _drawSelfToSVG** walker mirrors lite-scene's
+  drawNode/drawSelf structurally, walking `scene.root` recursively
+  through the shim. Handles every node kind: rect (radius +
+  roundRect), circle, line, text, path (delegates to the node's
+  custom _draw callback), group with optional _clip function.
+  **_exportSceneToSVG(scene, width, height, background)** is the
+  shared entry point each kernel's `chart.exportSVG()` calls with
+  its current width/height signals and resolved background.
+  **SVGExportOptions**: `{ background?: string | null }` --
+  defaults to construction-time `config.background`. Chart must
+  be mounted; mock canvases work too (SVG export doesn't read
+  pixel data). Text-width estimation is approximate (~0.55 em
+  per char). **Bug fix**: pre-existing typo at Charts.js line
+  1329 -- band-axis builder passed `anchor: 'center'` to a
+  lite-scene textNode that expects `align:`. The wrong key was
+  silently dropped, leaving `_align` at its default `'left'`.
+  Single-character labels masked it; multi-character names were
+  offset right by half a glyph width. Fix is one-key; both canvas
+  and SVG output benefit. **Tests**: 14 new under `chart.exportSVG()`
+  -- valid envelope per chart type, rounded-corner arcs on bars,
+  fixed text-anchor=middle on bar labels (regression guard for
+  the band-axis fix), XML escaping of label text, `background`
+  option emits a background rect, throws when unmounted, throws
+  after destroy. 259 total.
+  **Types**: `SVGExportOptions` declared; `Chart.exportSVG`,
+  `RadarChart.exportSVG`, `PolarChart.exportSVG` all added.
+  `RadarChart` and `PolarChart` also picked up the v1.2.0
+  `destroy()` that was missing from their specialized interfaces.
+  **Bundle deltas**: every chart picks up ~8.9 KB of SVG
+  infrastructure. All-nine went from 72.8 KB to ~82.4 KB (only
+  ~9.6 KB delta because the SVG helpers are shared module-level
+  functions deduplicated by the bundler). Cross-
+  kernel isolation verified clean (the SVG helpers are shared
+  module-level functions, not kernel-specific).
 
 ## Capacity (lite-signal arena)
 
@@ -598,24 +681,27 @@ bump to 32768 for this reason. Bumping after charts are already
 constructed doesn't help those charts -- they read the current
 default registry at construction time.
 
-Each mount/unmount cycle leaves ~4 nodes of residue from
-construction-time signals (`widthAutoSig`, `plotBoundsSignal`,
-`scaleVersion`, etc.) that survive unmount so the chart can be
-remounted. For long-running apps that create and destroy many charts
-dynamically, this accumulates until the chart reference is dropped.
-A terminal-teardown `chart.destroy()` is on the roadmap for v1.3.
+**mount / unmount / destroy** (v1.2.0): `unmount()` disposes the
+scene and all draw effects but keeps construction-time signals
+(`widthAutoSig`, `plotBoundsSignal`, etc.) alive so the chart can
+be remounted -- which leaves ~4 nodes residue per cycle.
+`chart.destroy()` is the terminal counterpart: calls `unmount()`
+first if mounted, then disposes every owned signal. After
+`destroy()` the chart cannot be remounted; subsequent `destroy()`
+calls are no-ops. Use it for apps that create and destroy many
+charts dynamically.
 
 ## Forward plan
 
-- v1.2.0: heatmap polish -- per-row / per-column highlight on hover,
-  quantile binning, value-label auto-color (white-on-dark, dark-on-
-  light). Final v1.2.0 cut after the polish lands.
-- v1.3.0: SVG export across all nine charts. Mirrors every draw fn
-  through SVG path commands; reuses every projection function so
-  output is pixel-identical to canvas.
-- v1.4.0: log scale; pan + zoom; brushing primitives.
-- v1.5.0: time-series specialized variants; legend virtualization via
-  `@zakkster/lite-virtual`; annotation layer.
+- v1.4.0: log scale (`yScaleType: 'log'`); pan + zoom (modifier-key
+  drag pans the plot, wheel zooms; bounded by configurable extent);
+  brushing primitives (drag-rectangle selection that emits a signal
+  with the selected x-range / y-range / data-ids).
+- v1.5.0: time-series specialized variants (auto-formatted time
+  axes, hour/day/week binning helpers); legend virtualization via
+  `@zakkster/lite-virtual` (for charts with hundreds of series);
+  annotation layer (text + arrow + region annotations bound to
+  data-space coordinates).
 
 ## License
 

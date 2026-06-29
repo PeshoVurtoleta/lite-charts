@@ -33,6 +33,23 @@ export interface PNGExportOptions {
     quality?: number;
 }
 
+/**
+ * v1.3.0: options for `chart.exportSVG()`.
+ *
+ * The chart's canvas-time `background` config is used by default; passing
+ * `background` here overrides it (use `null` to disable the background
+ * rect explicitly even when the chart was constructed with one).
+ */
+export interface SVGExportOptions {
+    /**
+     * SVG background color. If set, an opaque `<rect>` covering the full
+     * viewBox is emitted before the chart contents. Default is the
+     * `background` value the chart was constructed with (typically null,
+     * which produces a transparent SVG).
+     */
+    background?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Line chart
 // ---------------------------------------------------------------------------
@@ -227,10 +244,35 @@ export interface SeriesConfigPublic extends SeriesConfig {}
 export interface Chart {
     /** Mount into a DOM element (creates canvas inside) or directly into a canvas. */
     mount(target: HTMLElement | HTMLCanvasElement): Chart;
-    /** Dispose effects and remove the owned canvas. Idempotent. */
+    /**
+     * Dispose effects and remove the owned canvas. Construction-time signals
+     * (auto-size, plot bounds, crosshair version, series visibility) survive
+     * so the chart can be remounted. Idempotent.
+     */
     unmount(): void;
+    /**
+     * Terminal teardown (v1.2.0). Calls `unmount()` first if mounted, then
+     * disposes every signal lite-charts created at construction time so
+     * their `lite-signal` arena slots are freed. Use this for apps that
+     * create and destroy many charts dynamically (dashboard tabs, design
+     * builders) where the ~4-node residue from `unmount()` alone would
+     * accumulate. Subsequent `mount()` calls will fail; subsequent
+     * `destroy()` calls are no-ops.
+     */
+    destroy(): void;
     /** Returns a data URL via canvas.toDataURL. Requires a real HTMLCanvasElement. */
     exportPNG(opts?: PNGExportOptions): string;
+    /**
+     * v1.3.0: returns a standalone SVG string of the chart's current
+     * frame. Works against the live scene tree -- the chart must be
+     * mounted, but the canvas does NOT need to be a real
+     * HTMLCanvasElement (mock canvases work too, since SVG export
+     * doesn't read pixel data). The output is a complete `<svg>...
+     * </svg>` document with `xmlns`, `viewBox`, `width`, `height`
+     * attributes -- droppable into any HTML page, PDF, or static
+     * asset pipeline.
+     */
+    exportSVG(opts?: SVGExportOptions): string;
     /** Force a redraw without changing data. */
     redraw(): void;
 
@@ -574,7 +616,9 @@ export interface RadarChartConfig {
 export interface RadarChart {
     mount(target: HTMLElement | HTMLCanvasElement): RadarChart;
     unmount(): void;
+    destroy(): void;
     exportPNG(opts?: { mimeType?: string; quality?: number }): string;
+    exportSVG(opts?: SVGExportOptions): string;
     redraw(): void;
     moveCrosshair(canvasX: number, canvasY: number): void;
     hideCrosshair(): void;
@@ -655,7 +699,9 @@ export type DonutChartConfig = PieChartConfig;
 export interface PolarChart {
     mount(target: HTMLElement | HTMLCanvasElement): PolarChart;
     unmount(): void;
+    destroy(): void;
     exportPNG(opts?: { mimeType?: string; quality?: number }): string;
+    exportSVG(opts?: SVGExportOptions): string;
     redraw(): void;
     moveCrosshair(canvasX: number, canvasY: number): void;
     hideCrosshair(): void;
@@ -780,9 +826,27 @@ export interface HeatmapConfig {
     colors?: [string, string];
 
     /**
+     * v1.2.0: how `colors` is sampled.
+     * - `'linear'` (default): continuous interpolation between low and high.
+     * - `'quantile'`: split present values into `colorBins` equally-sized
+     *   bins by rank; each bin gets one discrete color. Use this when a
+     *   few outliers would otherwise wash the rest of the chart toward
+     *   the low end of the ramp.
+     */
+    colorScale?: 'linear' | 'quantile';
+
+    /**
+     * v1.2.0: bin count for `colorScale: 'quantile'`. Default 5; clamped
+     * to [2, 20]. Ignored when `colorScale` is `'linear'` or when
+     * `colorFn` is set.
+     */
+    colorBins?: number;
+
+    /**
      * Custom color function. Receives `(value, vMin, vMax)`; returns a CSS
-     * color string. Overrides `colors` entirely. Use this for OKLCH ramps,
-     * quantile binning, diverging schemes, etc.
+     * color string. Overrides BOTH the linear and quantile defaults
+     * entirely. Use this for OKLCH ramps, custom binning, diverging
+     * schemes, etc.
      */
     colorFn?: (value: number, vMin: number, vMax: number) => string;
 
@@ -792,8 +856,13 @@ export interface HeatmapConfig {
     valueFormat?: (value: number, xi: number, yi: number) => string;
     /** Font for in-cell value labels. */
     valueLabelFont?: string;
-    /** Color for in-cell value labels. */
-    valueLabelColor?: string;
+    /**
+     * Color for in-cell value labels. Default `'auto'` (v1.2.0) which
+     * picks `'#000000'` or `'#ffffff'` per cell from the cell's
+     * background luminance so labels stay readable across the ramp.
+     * Any explicit CSS color disables the auto pick chart-wide.
+     */
+    valueLabelColor?: string | 'auto';
 
     /**
      * Fraction of band-width used as the gap between adjacent cells.
@@ -805,6 +874,22 @@ export interface HeatmapConfig {
     highlightStroke?: string;
     /** Stroke width for the hovered cell highlight in pixels. Default 2. */
     highlightStrokeWidth?: number;
+
+    /**
+     * v1.2.0: highlight the hovered cell's full row with a translucent
+     * stripe. Default true.
+     */
+    rowHighlight?: boolean;
+    /**
+     * v1.2.0: highlight the hovered cell's full column with a translucent
+     * stripe. Default true.
+     */
+    columnHighlight?: boolean;
+    /**
+     * v1.2.0: fill color for the row + column highlight stripes.
+     * Default `'rgba(0,0,0,0.10)'`. CSS-vars are resolved at mount.
+     */
+    rowColumnHighlightFill?: string;
 
     /** Custom tooltip text formatter. */
     tooltipFormat?: (info: { xi: number; yi: number; xLabel: string; yLabel: string; value: number }) => string;

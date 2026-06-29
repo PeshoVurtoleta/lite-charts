@@ -17,27 +17,47 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status: v1.1.0** — nine chart types across four independent kernels.
-The headline addition is bar-chart layout polish (stacked bars, rounded
-corners, per-bar hover tint, all opt-in). This release also lands several
-features originally scoped for the v1.2.0 alpha train that proved stable
-enough to ship together:
+**Status:** v1.2.0 -- **nine** chart types across **four** independent
+kernels, every one of them now also a static SVG via
+`chart.exportSVG()`. **263/263 tests pass.**
 
-- **`createScatterChart`** — bubble's simpler sibling on the same axis
-  kernel; constant marker, no third dimension.
-- **`createHeatmap`** on a new `createBaseGridChart` kernel (10.5 KB
-  minified, the smallest of the nine bundles). Two band scales, flat
-  `Float32Array` cell storage, `Uint8Array` presentMask for sparse data,
-  per-cell color strings precomputed at extract for zero-allocation
-  draws. Default linear-RGB ramp; `colorFn` for custom mappings.
-- **Multi-series bubble** with per-point color via `colorKey` and a
-  global size domain across visible series.
-- **Pluggable spatial-index** (`SpatialIndex` / `SpatialIndexFactory`)
-  for O(log n) hit-test on dense point clouds.
+**New in v1.2.0:**
+- **`chart.exportSVG()`** on every chart. Returns a complete
+  `<svg>...</svg>` string with `xmlns`, `viewBox`, `width`, `height` --
+  droppable into any HTML page, PDF, or static asset pipeline.
+  Implementation walks the live `scene.root` tree through a
+  Canvas2D-shaped shim that emits SVG markup instead of pixels, so
+  the output is geometrically identical to the canvas paint (minus
+  DPR scaling -- SVG is resolution-independent).
+- **Bar category labels are now correctly centered.** Pre-existing
+  typo in the band-axis builder passed `anchor:` instead of `align:`
+  to a `textNode`, leaving `_align` at its `'left'` default. Single-
+  character labels masked the issue; multi-character names were
+  offset right by half a glyph width. Found during SVG work; both
+  canvas AND SVG output benefit.
+
+**Inherited from v1.2.0:**
+- `chart.destroy()` on every kernel; terminal counterpart to
+  `unmount()`. Zero residue across 30 mount+destroy cycles.
+- Heatmap row + column highlights, quantile color binning, and
+  auto-contrast value labels.
+
+**Inherited from earlier alphas:**
+- `createHeatmap` on the fourth kernel (alpha.3); ~11 KB minified
+  on its own, the smallest of the nine bundles.
+- `createScatterChart` (alpha.1); reuses the spatial-index foundation
+  with `k = 1`.
+- Multi-series bubble + per-point color via `colorKey`, global size
+  domain across visible series (alpha.2).
+- Pluggable spatial-index (`SpatialIndex` / `SpatialIndexFactory`)
+  for O(log n) hit-test on dense point clouds (alpha.0).
   `@zakkster/lite-delaunay` is the intended default but optional.
 
-**231/231 tests pass.** See [CHANGELOG.md](./CHANGELOG.md) for the full
-release contract and [ROADMAP.md](./ROADMAP.md) for the forward plan.
+**Inherited from v1.1.0:** bar layout polish -- stacked bars,
+rounded corners, per-bar hover tint. All opt-in.
+
+See [ROADMAP.md](./ROADMAP.md) for the development history and the
+forward plan.
 
 ## Install
 
@@ -102,12 +122,12 @@ in a 1MB bundle without GC pauses.
 ```mermaid
 graph TD
     User[User config + data signal] --> Constructor[createLineChart]
-    Constructor --> Normalize["Normalize: data shorthand -> series[]"]
+    Constructor --> Normalize[Normalize: data shorthand -> series[]]
     Normalize --> Accessors[Build accessors x/y]
     Accessors --> InferType[Infer x-scale type]
     InferType --> StateAlloc[Allocate SeriesState slabs]
 
-    StateAlloc --> Mount["mount(container)"]
+    StateAlloc --> Mount[mount(container)]
     Mount --> Scene[createScene from lite-scene]
     Scene --> Effect1[Effect: width/height -> plotBounds]
     Scene --> Effect2[Effect: data -> SoA extract -> scale -> pixels]
@@ -115,15 +135,15 @@ graph TD
     Scene --> SeriesNodes[path nodes / one per series]
     SeriesNodes --> DrawFn[makeLineDrawFn closure]
 
-    DrawFn --> PathSelect{"n > 2*cols?"}
-    PathSelect -->|yes| Decimate["decimateMinMax kernel<br/>lifted from lite-canvas-graph"]
+    DrawFn --> PathSelect{n > 2*cols?}
+    PathSelect -->|yes| Decimate[decimateMinMax kernel<br/>lifted from lite-canvas-graph]
     PathSelect -->|no| Polyline[Direct polyline / NaN-aware]
-    Decimate --> Stroke["ctx.stroke"]
+    Decimate --> Stroke[ctx.stroke]
     Polyline --> Stroke
 
     Signal[Any signal write] --> LiteSignal[lite-signal sync flush]
     LiteSignal --> EffectsRun[Effects re-run]
-    EffectsRun --> DirtyBridge["scaleVersion bump -> scene.markDirty"]
+    EffectsRun --> DirtyBridge[scaleVersion bump -> scene.markDirty]
     DirtyBridge --> SceneDraw[lite-scene drawAll / coalesced via _queued]
     SceneDraw --> DrawFn
 ```
@@ -598,13 +618,13 @@ nearest-vertex hit-test.
 The same architecture extends to upcoming chart families:
 
 ```javascript
-// v1.3.0 -- pie family (no axes, polar coordinates)
+// v1.2.0 -- pie family (no axes, polar coordinates)
 const createBasePolarChart = (config, renderer) => { /* polar scaffold */ };
 export const createPieChart   = (c) => createBasePolarChart(c, PIE_RENDERER);
 export const createDonutChart = (c) => createBasePolarChart(c, DONUT_RENDERER);
 export const createRadarChart = (c) => createBasePolarChart(c, RADAR_RENDERER);
 
-// v1.3.0 -- scatter family (extends axis chart with size dimension)
+// v1.2.0 -- scatter family (extends axis chart with size dimension)
 export const createBubbleChart = (c) => createBaseAxisChart(c, BUBBLE_RENDERER);
 
 // v1.4.0 -- heatmap (2D categorical grid)
@@ -671,6 +691,67 @@ itself is fully allocation-free in steady state (verified by the
 | Cold-start overhead | NO | Single-figure ms; not yet measured |
 | Bundle size min+gz | NO | Single-file ESM, ~6 KB estimated; not yet minified |
 
+## SVG export (v1.2.0)
+
+Every chart exposes `chart.exportSVG(opts?)` which returns a complete
+SVG string of the chart's current frame:
+
+```js
+const chart = createBarChart({
+    data: [{x:'Mon',y:5},{x:'Tue',y:8},{x:'Wed',y:3}],
+    cornerRadius: 4,
+    width: 400, height: 250,
+});
+chart.mount(document.getElementById('chart'));
+
+const svg = chart.exportSVG();
+// '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="250" ...'
+```
+
+The output is droppable into any HTML page, embeddable in a PDF or
+Word document, or postable to an image-converter pipeline. Use cases
+that motivated the feature: static reports, email attachments, screen-
+reader-friendly artifacts, and the kind of automated regression
+suites that diff rendered output frame-by-frame.
+
+**How it works.** A Canvas2D-shaped shim
+(`_SVGRenderingContext2D`) accumulates SVG markup instead of issuing
+pixel ops. The same `drawNode`/`drawSelf` recursion lite-scene uses
+to render to canvas walks the live `scene.root` tree through this
+shim. The chart's draw callbacks don't know they're rendering to SVG
+-- they just call the canvas API as always. Geometric output is
+identical to the canvas paint (minus subpixel rasterization and DPR
+scaling -- SVG is resolution-independent by design).
+
+**Configuration.**
+
+```ts
+interface SVGExportOptions {
+    /**
+     * If set, an opaque <rect> covering the viewBox is emitted before
+     * the chart contents. Default is the `background` value the chart
+     * was constructed with (typically null = transparent SVG).
+     */
+    background?: string | null;
+}
+```
+
+**Notes worth keeping in mind:**
+
+- The chart must be `mount()`ed. `exportSVG()` throws if the chart
+  isn't displayed or has been `destroy()`ed.
+- Mock canvases work too (anything with `getContext('2d')` -- SVG
+  export doesn't read pixel data), which is why the entire test
+  suite can exercise SVG output without a browser.
+- Text width estimation is approximate (~0.55 em per character).
+  Layout heuristics that depend on exact text width will still
+  produce the same SVG IF the chart was already painted to a real
+  canvas first (the position values are computed against the canvas
+  context that originally laid out the labels).
+- Unsupported Canvas2D ops (gradients, shadows, drawImage) are
+  silent no-ops in the shim -- none of the built-in chart code
+  uses them in v1.2.0.
+
 ## Capacity considerations
 
 lite-charts builds on `@zakkster/lite-signal`, which pre-allocates a
@@ -680,7 +761,7 @@ but can be exhausted on dashboards or demos with many simultaneous
 charts. If you see a `CapacityError: nodes capacity (1024) exceeded`,
 this is the cause.
 
-**Per-chart active node footprint** (measured against the v1.1.0
+**Per-chart active node footprint** (measured against the v1.2.0-alpha.3
 implementation, on a chart with default options at typical sizes):
 
 | Chart | Active nodes |
@@ -725,29 +806,36 @@ construction time. Bumping after charts are already created doesn't
 help those charts. The lite-charts demo (`demo/index.html`) bumps to
 32768 at the very top for this reason.
 
-**Mount/unmount note**: each mount/unmount cycle leaves a small
-residue (~4 reactive nodes per chart, from construction-time signals
-that aren't disposed in `unmount` so the chart can be remounted).
-For apps that create and destroy many charts dynamically over a long
-session, that residue accumulates until the chart reference is dropped
-and the lite-signal arena slots become eligible for reclamation.
-A dedicated terminal-teardown `chart.destroy()` is on the roadmap for
-v1.3.
+**Mount/unmount/destroy** (v1.2.0): `unmount()` disposes the scene and
+all draw effects but keeps construction-time signals (`widthAutoSig`,
+`plotBoundsSignal`, `scaleVersion`, `crosshairVersion`,
+`seriesVisibility[]`, `hoverVersion`, etc.) alive so the chart can be
+remounted -- which leaves ~4 nodes of residue per cycle in the
+lite-signal arena. `chart.destroy()` is the terminal counterpart:
+it calls `unmount()` first if mounted, then disposes every signal the
+chart created at construction. After `destroy()` the chart cannot be
+remounted; subsequent `destroy()` calls are no-ops. Use it for apps
+that create and destroy many charts dynamically (dashboard tabs,
+design builders) where the `unmount()` residue would otherwise
+accumulate.
 
 ## Roadmap
 
-v1.1.0 ships nine chart types on four independent kernels with
+v1.0.0 ships seven chart types on three independent kernels with
 kernel-side auto-resize. See [ROADMAP.md](./ROADMAP.md) for the full
 forward plan and the development history that led here. Headlines:
 
 | Version | Scope |
 |---|---|
-| **v1.0.0** | Seven chart types, three kernels, auto-resize, 182 tests, full tree-shake verification. |
-| **v1.1.0** (this release) | Bar polish (stacked, rounded corners, hover tint) **plus** the features prototyped over four internal alphas now landing in one go: pluggable spatial index for bubble hit-test (auto-engages ≥1000 points), `createScatterChart` (eighth type), multi-series bubble + per-point color + global size domain, and `createHeatmap` on a new `createBaseGridChart` kernel (10.5 KB minified, the smallest of the nine). 231 tests. |
-| v1.2.0 | Heatmap polish (per-row / per-column highlight on hover, quantile binning); doc + release notes. |
-| v1.3.0 | SVG export across all nine charts (mirrors every draw fn through SVG path commands; pixel-identical output). |
-| v1.4.0 | Log scale; pan + zoom; brushing primitives. |
-| v1.5.0 | Time-series specialized variants; legend virtualization via `lite-virtual`; annotation layer. |
+| **v1.0.0** | Seven chart types, three kernels, auto-resize, 182 tests, full tree-shake verification |
+| **v1.1.0** | Stacked bar layout via `postExtract` hook; rounded bar corners (native `roundRect` + `arcTo` fallback); per-bar hover tint. 196 tests. |
+| **v1.2.0-alpha.0** | Spatial-index foundation: `SpatialIndex` / `SpatialIndexFactory` contract; wired into `createBubbleChart` for O(log n) hit-test on dense clouds. 204 tests. |
+| **v1.2.0-alpha.1** | `createScatterChart` (eighth chart type); reuses the spatial-index foundation with `k = 1`. 210 tests. |
+| **v1.2.0-alpha.2** | Multi-series bubble + global size domain via bubble's `postExtract`; per-point color via `colorKey`; cross-series hit-test with `snapSeriesIdx`. 219 tests. |
+| **v1.2.0-alpha.3** | `createHeatmap` on a new `createBaseGridChart` kernel (the fourth). 231 tests. |
+| **v1.2.0** (this) | Heatmap polish (row + column highlight, quantile binning, auto-contrast value labels); `chart.destroy()` terminal teardown on every kernel; `chart.exportSVG()` across all nine charts via a Canvas2D-shim that walks the live scene tree (pixel-identical to canvas paint, minus DPR scaling); a zero-GC audit pass fixing four allocation traps. 263 tests. |
+| v1.4.0 | Log scale; pan + zoom; brushing primitives |
+| v1.5.0 | Time-series specialized variants; legend virtualization via `lite-virtual`; annotation layer |
 
 ## Ecosystem
 

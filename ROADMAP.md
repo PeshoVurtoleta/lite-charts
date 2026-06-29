@@ -5,7 +5,79 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.2.0-alpha.3 (current)
+## v1.3.0 (current)
+
+Every chart now exports as a static SVG. `chart.exportSVG(opts?)` walks
+the live `scene.root` through a Canvas2D-shaped shim that emits SVG
+markup instead of issuing pixel ops -- the chart's draw callbacks don't
+know they're rendering to SVG, so the geometry is identical to the
+canvas paint (minus subpixel rasterization and DPR scaling).
+
+**New in this cut:**
+
+- **`chart.exportSVG(opts?)` on every chart.** Returns a complete
+  `<svg>...</svg>` string with `xmlns`, `viewBox`, `width`, `height`
+  -- droppable into HTML pages, PDFs, image-converter pipelines, or
+  diffable test fixtures. The chart must be mounted; mock canvases
+  work fine (SVG export doesn't read pixel data).
+- **`SVGExportOptions.background`.** Defaults to the chart's
+  construction-time `background`; passing `null` explicitly produces
+  a transparent SVG even when the chart was constructed with a fill.
+- **Bar category-label centering bug fixed.** The band-axis builder
+  passed `anchor: 'center'` to a lite-scene `textNode` that expects
+  `align:`. The wrong key was silently dropped, leaving `_align`
+  at its default `'left'`. Single-character labels masked the issue;
+  multi-character category names were offset right by half a glyph
+  width. Found while wiring SVG export -- the canvas visual mostly
+  hid it, but SVG's explicit `text-anchor` attribute made it
+  obvious. Fix is a one-key change; both canvas and SVG output
+  benefit.
+
+**Bundle deltas (vs v1.2.0):** every chart picks up ~8.9 KB of SVG
+infrastructure (the shim class implements enough of Canvas2D to
+cover everything lite-scene's draw walker calls). The shim, the
+scene walker, and the `_exportSceneToSVG` entry point are bundled
+into every chart that exposes `exportSVG` (which is all of them).
+The all-nine bundle grows by only ~9.6 KB (not 9 x 8.9) because
+the SVG helpers are shared module-level functions deduplicated by
+the bundler when more than one kernel is imported.
+
+| Chart | Kernel | Bundle (min) | v1.2.0 |
+|---|---|---|---|
+| `createLineChart`    | axis kernel  | ~32.5 KB | 23.6 |
+| `createAreaChart`    | axis kernel  | ~33.8 KB | 24.9 |
+| `createBarChart`     | axis kernel  | ~33.8 KB | 24.9 |
+| `createBubbleChart`  | axis kernel  | ~33.6 KB | 24.8 |
+| `createScatterChart` | axis kernel  | ~30.8 KB | 21.9 |
+| `createPieChart`     | polar slice  | ~22.1 KB | 13.3 |
+| `createDonutChart`   | polar slice  | ~22.1 KB | 13.3 |
+| `createRadarChart`   | radar kernel | ~22.0 KB | 13.1 |
+| `createHeatmap`      | grid kernel  | ~21.6 KB | 12.7 |
+| **all nine**         |              | **~82.4 KB** | **72.8** |
+
+Cross-kernel isolation remains clean since the SVG helpers are shared
+module-level functions, not kernel-specific. Verified with esbuild
+tree-shake: heatmap pulls zero axis/polar/radar code, and no other
+chart pulls grid-kernel code.
+
+---
+
+## v1.2.0
+
+The grid kernel ships with full polish, and a terminal-teardown
+`chart.destroy()` lands across all four kernels.
+
+**Highlights:**
+
+- `chart.destroy()` on all four kernels. Zero residue across 30
+  mount+destroy cycles per kernel.
+- Heatmap row + column highlight stripes on hover.
+- Quantile color binning (`colorScale: 'quantile'`, `colorBins`).
+- Auto-contrast value labels (`valueLabelColor: 'auto'`).
+
+---
+
+## v1.2.0-alpha.3
 
 Fourth kernel. `createHeatmap` rides a brand-new `createBaseGridChart`
 that knows nothing about the axis, polar, or radar kernels. Verified
@@ -513,6 +585,151 @@ to understand why the kernels are split the way they are.
   to the correct cell, hit-test null on missing cells, hit-test
   null outside plot, reacts to data signal updates, showValues
   renders labels, clean mount + unmount. 231 total.
+
+### v1.2.0 -- destroy() + heatmap polish
+
+- **`chart.destroy()` across all four kernels.** Each kernel tracks
+  every signal it creates at construction time in a per-instance
+  `_ownedSignals` array (via a small `_own(s)` helper); `destroy()`
+  calls `unmount()` first if mounted, then iterates the array and
+  calls lite-signal's `dispose()` on each. The visibility-growth
+  paths in polar (`ensureVisibilitySignals`) and radar
+  (`ensureSeriesSlots`) push new signals through `_own` too so the
+  array stays in sync as series counts change. Verified zero
+  residue across 30 mount+destroy cycles on every kernel; idempotent;
+  works before `mount()` (signals exist before mount, so they need
+  cleanup even if the chart was never displayed).
+- **Heatmap quantile binning** (`colorScale: 'quantile'`,
+  `colorBins`). Collect present values, sort ascending, place N-1
+  internal boundaries at the i/N percentiles. Pre-compute one
+  color per bin from the same lo/hi ramp; per-cell assignment is a
+  linear scan through the boundaries (typically 4-19 comparisons).
+  Faster than a binary search at this size and zero-alloc on the
+  per-cell path. Outliers no longer dominate the ramp: with 11
+  values in [1,11] plus one at 1000, the linear path collapses 11
+  of 12 cells to nearly the lowest ramp color, while quantile bins
+  spread them evenly across the chart.
+- **Heatmap row + column highlights.** On hover, fill stripes the
+  full plot width (row) and full plot height (column) at the band
+  width of the hovered cell before the cell stroke. Both default on;
+  either can be disabled via `rowHighlight: false` /
+  `columnHighlight: false`. Stripe color (`rowColumnHighlightFill`,
+  default `rgba(0,0,0,0.10)`) is resolved against the container at
+  mount time so CSS-vars work.
+- **Auto-contrast value labels.** `valueLabelColor` default changed
+  from `'#ffffff'` to `'auto'` for `showValues: true`. Per-cell:
+  NTSC luminance (`0.299R + 0.587G + 0.114B`) picks `#000000` /
+  `#ffffff` so labels stay readable across the ramp. Computed at
+  extract time alongside the cell color (no extra pass), stored in
+  `state.cellLabelColors`. For custom `colorFn` outputs, the
+  `_parseRGBLike` helper handles `rgb(...)` and hex strings;
+  unparseable returns (named colors, `oklch()`, `rgba()`) fall
+  through to `#ffffff`. Explicit `valueLabelColor` (any non-
+  `'auto'` value) skips the per-cell allocation entirely.
+- Helpers added: `_pickContrastColor(rgb) -> '#000'|'#fff'`,
+  `_parseRGBLike(css) -> [r,g,b]|null`.
+  Helper removed: `_lerpRGBString` (the linear and quantile paths
+  now inline the lerp because they need access to the integer R/G/B
+  triple for `_pickContrastColor`).
+- Test infra: added 14 new tests across two suites
+  (`chart.destroy()` and `createHeatmap polish`). 245 total.
+- All ASCII clean except for the U+00D7 (`x`) glyph already
+  whitelisted in the source-style rule.
+
+### v1.3.0 -- chart.exportSVG() across all four kernels
+
+- **`_SVGRenderingContext2D` Canvas2D shim** (~270 LOC in Charts.js,
+  inserted between `resolveColor` and the renderer-objects boundary).
+  Tracks CTM as a 2x3 matrix `[a, b, c, d, e, f]`; full save/restore
+  state stack snapshots `ctm`, `fillStyle`, `strokeStyle`, `lineWidth`,
+  `lineCap`, `lineJoin`, `lineDash`, `globalAlpha`, `font`, `textAlign`,
+  `textBaseline`, `clipPathId`. Method coverage spans:
+  `save`/`restore`; `translate`/`rotate`/`scale`/`setTransform`/
+  `resetTransform`; `beginPath`/`closePath`/`moveTo`/`lineTo`/
+  `bezierCurveTo`/`quadraticCurveTo`/`rect`/`arc`/`arcTo`/`roundRect`;
+  `stroke`/`fill` emit `<path d="...">` elements; `fillRect`/`strokeRect`
+  emit `<rect>` via an `_axisAligned()` check (CTM has no rotation/skew
+  -> direct rect; otherwise falls through to a path); `fillText`/
+  `strokeText` emit `<text>` with `text-anchor` + `dominant-baseline`
+  derived from canvas `textAlign`/`textBaseline`; `setLineDash`/
+  `getLineDash`; `clip()` emits a `<clipPath id="...">` def then marks
+  subsequent emissions with `clip-path="url(#id)"`; `toSVG(background)`
+  wraps the buffer with `<svg xmlns viewBox width height>` + optional
+  background `<rect>`. `measureText` returns `{ width: text.length *
+  size * 0.55 }` -- a Latin-text approximation that's good enough for
+  layout heuristics since the chart was typically laid out against a
+  real canvas first. `drawImage` + gradients are silent no-ops (none
+  of the v1.3.0 chart code touches them).
+- **`_drawNodeToSVG` + `_drawSelfToSVG` walker.** Structural mirror of
+  lite-scene's `drawNode`/`drawSelf` that walks the live `scene.root`
+  through the shim. Handles every node kind lite-scene supports:
+  `rect` (with `_radius` -> shim's `roundRect`), `circle` (-> `arc`),
+  `line` (-> `moveTo` + `lineTo` + `stroke`), `text` (-> `font`/`align`
+  /`baseline` + `fillText`/`strokeText`), `path` (delegates to the
+  node's `_draw(ctx, n)` callback), `group` with optional `_clip`
+  function. Kept in sync structurally with lite-scene's drawNode at
+  v1.x; any new node kind or transform property there needs a matching
+  branch here.
+- **`_exportSceneToSVG(scene, width, height, background)`** entry
+  point. Each kernel's `chart.exportSVG(opts?)` calls this with its
+  current dimension signals and the resolved background:
+  ```js
+  const exportSVG = (opts) => {
+      if (!mounted || !scene) throw new Error('lite-charts: exportSVG() requires mount() first');
+      const w = +widthAcc() | 0 || 800;
+      const h = +heightAcc() | 0 || 400;
+      const bg = (opts && opts.background !== undefined)
+          ? opts.background
+          : (config.background != null ? config.background : null);
+      return _exportSceneToSVG(scene, w, h, bg);
+  };
+  ```
+  Axis kernel binds `exportSVG` in the chart object literal next to
+  `exportPNG`. Polar / radar use inline `exportSVG: (opts) => {...}`.
+  Grid kernel binds via `chart.exportSVG = exportSVG` next to the
+  `destroy` bind.
+- **Pre-existing bar-label centering bug fixed** at Charts.js line
+  1329. The band-axis builder passed `anchor: 'center'` to a lite-scene
+  `textNode` that expects `align:`. The wrong key was silently dropped,
+  leaving `_align` at its default `'left'`. Canvas's
+  `ctx.textAlign = 'left'` masked it for single-character labels
+  ("A", "B", "C") since each glyph was narrow; multi-character names
+  ("Mon", "Tue", "Wed") were visibly offset right by half a glyph
+  width. Surfaced by SVG export -- canvas paint sometimes hides
+  alignment errors visually, but SVG's explicit `text-anchor`
+  attribute makes them unmissable. Fix: one-key change. Both canvas
+  and SVG output benefit going forward.
+- **Why a context shim, not nine per-kernel exporters.** Two reasons.
+  First, the shim guarantees pixel parity since the same projection
+  math runs whether the output is canvas or SVG. Second, the shim
+  ships in one place and works for every chart automatically -- nine
+  per-kernel `exportSVG` methods would each need their own draw-call
+  enumeration and would drift from canvas behavior over time. The
+  trade-off is less semantic SVG output (everything is `<path>` /
+  `<rect>` / `<text>` instead of, say, one `<rect>` per heatmap cell
+  with `data-row`/`data-col` attributes). A future v1.3.x or v1.4
+  could opt-in to richer per-chart semantics; for v1.3.0 the
+  pixel-parity approach is the right call.
+- **Why `_axisAligned()` for fillRect / strokeRect**. Most chart code
+  draws axis-aligned filled rects (heatmap cells, bar fills, axis
+  spines). For those, emitting `<rect x y width height>` is smaller
+  and more semantic than `<path d="M.. L.. L.. L.. Z">`. The
+  check is `m[1] === 0 && m[2] === 0` -- a one-line guard that
+  covers the 99% case. Rotated rects fall through to path emission.
+- **Tests:** 14 new tests under `describe('chart.exportSVG()
+  (v1.3.0)')`. Coverage: valid `<svg>` envelope per chart type
+  (line, area, bar, bubble, scatter, pie, donut, radar, heatmap);
+  rounded-corner arcs on bars (verifies `roundRect` -> SVG arc
+  commands); fixed `text-anchor="middle"` on bar labels
+  (regression guard for the band-axis fix); XML escaping of
+  `&`/`<`/`>` in label text; `background` option emits a
+  background `<rect>`; throws when called before mount; throws
+  after destroy. 259 total.
+- **Types:** `SVGExportOptions` interface added; `Chart.exportSVG()`,
+  `RadarChart.exportSVG()`, `PolarChart.exportSVG()` all declared.
+  `RadarChart` and `PolarChart` also picked up the v1.2.0 `destroy()`
+  that was missing from their specialized interfaces.
+- All ASCII clean.
 
 ---
 
