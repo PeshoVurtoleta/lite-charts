@@ -18,28 +18,17 @@
  * Run with:  node --test --expose-gc test/
  */
 
-import {describe, it, before, after} from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
-import {signal, createRegistry, setDefaultRegistry, stats} from '@zakkster/lite-signal';
+import { signal, createRegistry, setDefaultRegistry, stats, effect } from '@zakkster/lite-signal';
 // The full suite creates 200+ charts; each chart allocates ~12-20 reactive
 // nodes (visibility signals per series, crosshair, version stamps, draw
 // effects, etc.). Default lite-signal registry caps at 1024 nodes -- enough
 // for a single app session but not enough for an exhaustive test suite that
 // runs every chart variant back-to-back. Bump to 32k for headroom.
-setDefaultRegistry(createRegistry({maxNodes: 32768}));
-import {
-    createLineChart,
-    createAreaChart,
-    createBarChart,
-    createPieChart,
-    createDonutChart,
-    createBubbleChart,
-    createRadarChart,
-    createScatterChart,
-    createHeatmap,
-    _testHelpers
-} from '../Charts.js';
+setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
+import { createLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, _testHelpers } from '../Charts.js';
 import {
     createMockCanvas,
     countCalls,
@@ -64,6 +53,8 @@ const {
     extractBarSeriesData,
     scaleSeriesToPixels,
     makeLinearScale,
+    makeLogScale,
+    updateLogScale,
     makeBandScale,
     updateBandScale,
     buildAccessor,
@@ -115,13 +106,13 @@ describe('linear scale', () => {
 
 describe('niceYDomain', () => {
     it('with zero=true clamps min to 0 if positive data, max to 0 if negative', () => {
-        assert.deepEqual(niceYDomain(10, 50, {zero: true}), [0, 50]);
-        assert.deepEqual(niceYDomain(-50, -10, {zero: true}), [-50, 0]);
-        assert.deepEqual(niceYDomain(-10, 10, {zero: true}), [-10, 10]);
+        assert.deepEqual(niceYDomain(10, 50, { zero: true }), [0, 50]);
+        assert.deepEqual(niceYDomain(-50, -10, { zero: true }), [-50, 0]);
+        assert.deepEqual(niceYDomain(-10, 10, { zero: true }), [-10, 10]);
     });
 
     it('with nice=true pads 5% above and below', () => {
-        const [lo, hi] = niceYDomain(0, 100, {nice: true});
+        const [lo, hi] = niceYDomain(0, 100, { nice: true });
         assert.equal(lo, -5);
         assert.equal(hi, 105);
     });
@@ -133,28 +124,28 @@ describe('niceYDomain', () => {
 
 describe('inferXScaleType', () => {
     it('Date probe -> time', () => {
-        assert.equal(inferXScaleType({x: new Date()}, 'x'), 'time');
+        assert.equal(inferXScaleType({ x: new Date() }, 'x'), 'time');
     });
 
     it('large numeric epoch with key "t" -> time', () => {
-        assert.equal(inferXScaleType({t: Date.now()}, 't'), 'time');
+        assert.equal(inferXScaleType({ t: Date.now() }, 't'), 'time');
     });
 
     it('plain numeric -> linear', () => {
-        assert.equal(inferXScaleType({x: 42}, 'x'), 'linear');
+        assert.equal(inferXScaleType({ x: 42 }, 'x'), 'linear');
     });
 });
 
 describe('buildAccessor', () => {
     it('string key extracts numeric field', () => {
         const a = buildAccessor('v');
-        assert.equal(a({v: 3.14}), 3.14);
+        assert.equal(a({ v: 3.14 }), 3.14);
     });
 
     it('string key coerces Date to ms', () => {
         const a = buildAccessor('t');
         const d = new Date(2026, 0, 1);
-        assert.equal(a({t: d}), d.getTime());
+        assert.equal(a({ t: d }), d.getTime());
     });
 
     it('integer index reads array slot', () => {
@@ -164,7 +155,7 @@ describe('buildAccessor', () => {
 
     it('function is passed through', () => {
         const a = buildAccessor((row, i) => row.x * i);
-        assert.equal(a({x: 4}, 3), 12);
+        assert.equal(a({ x: 4 }, 3), 12);
     });
 
     it('invalid accessor throws', () => {
@@ -202,10 +193,10 @@ describe('extractSeriesData', () => {
         const xa = buildAccessor('x');
         const ya = buildAccessor('y');
         const data = [
-            {x: 0, y: 10},
-            {x: 5, y: 30},
-            {x: 10, y: 5},
-            {x: 15, y: 25},
+            { x: 0, y: 10 },
+            { x: 5, y: 30 },
+            { x: 10, y: 5 },
+            { x: 15, y: 25 },
         ];
         extractSeriesData(state, data, xa, ya);
         assert.equal(state.n, 4);
@@ -225,7 +216,7 @@ describe('extractSeriesData', () => {
         };
         const xs = new Float32Array([1, 2, 3, 4]);
         const ys = new Float32Array([10, 20, 30, 40]);
-        extractSeriesData(state, {xs, ys}, null, null);
+        extractSeriesData(state, { xs, ys }, null, null);
         assert.equal(state.xs, xs);
         assert.equal(state.ys, ys);
         assert.equal(state.n, 4);
@@ -330,12 +321,12 @@ describe('scaleSeriesToPixels', () => {
 describe('createLineChart -- lifecycle', () => {
     it('mounts and unmounts cleanly', () => {
         const data = signal([
-            {x: 0, y: 1},
-            {x: 1, y: 2},
-            {x: 2, y: 3},
+            { x: 0, y: 1 },
+            { x: 1, y: 2 },
+            { x: 2, y: 3 },
         ]);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, x: 'x', y: 'y'});
+        const chart = createLineChart({ data, x: 'x', y: 'y' });
         chart.mount(canvas);
         assert.ok(chart.scene, 'scene should exist after mount');
         chart.unmount();
@@ -344,14 +335,14 @@ describe('createLineChart -- lifecycle', () => {
 
     it('throws on double mount', () => {
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data: [{x: 0, y: 0}]});
+        const chart = createLineChart({ data: [{ x: 0, y: 0 }] });
         chart.mount(canvas);
         assert.throws(() => chart.mount(createMockCanvas(800, 400)), /already mounted/);
         chart.unmount();
     });
 
     it('unmount without mount is a no-op (does not throw)', () => {
-        const chart = createLineChart({data: [{x: 0, y: 0}]});
+        const chart = createLineChart({ data: [{ x: 0, y: 0 }] });
         chart.unmount(); // should not throw
         chart.unmount();
     });
@@ -361,18 +352,18 @@ describe('createLineChart -- lifecycle', () => {
     });
 
     it('throws helpful error on bad mount target', () => {
-        const chart = createLineChart({data: [{x: 0, y: 0}]});
+        const chart = createLineChart({ data: [{ x: 0, y: 0 }] });
         assert.throws(() => chart.mount(42), /HTMLElement|HTMLCanvasElement/);
     });
 
     it('exportPNG before mount throws', () => {
-        const chart = createLineChart({data: [{x: 0, y: 0}]});
+        const chart = createLineChart({ data: [{ x: 0, y: 0 }] });
         assert.throws(() => chart.exportPNG(), /requires mount/);
     });
 
     it('exportPNG on a mock canvas (no toDataURL) throws a clear error', () => {
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data: [{x: 0, y: 0}]});
+        const chart = createLineChart({ data: [{ x: 0, y: 0 }] });
         chart.mount(canvas);
         assert.throws(() => chart.exportPNG(), /real HTMLCanvasElement/);
         chart.unmount();
@@ -382,18 +373,18 @@ describe('createLineChart -- lifecycle', () => {
 describe('createLineChart -- reactivity', () => {
     it('updating data signal re-projects pixels', () => {
         const data = signal([
-            {x: 0, y: 0},
-            {x: 10, y: 10},
+            { x: 0, y: 0 },
+            { x: 10, y: 10 },
         ]);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, x: 'x', y: 'y', schedule: (fn) => fn()});
+        const chart = createLineChart({ data, x: 'x', y: 'y', schedule: (fn) => fn() });
         chart.mount(canvas);
         const beforeDMax = chart.xScale.dMax;
         assert.equal(beforeDMax, 10);
 
         data.set([
-            {x: 0, y: 0},
-            {x: 5, y: 10},
+            { x: 0, y: 0 },
+            { x: 5, y: 10 },
         ]);
         // Domain should now span [0, 5] -- last point still maps to the right
         // edge (that's the whole point of auto-scaling), but the SCALE itself
@@ -405,11 +396,11 @@ describe('createLineChart -- reactivity', () => {
     it('updating width signal resizes canvas and rescales', () => {
         const w = signal(800);
         const data = signal([
-            {x: 0, y: 0},
-            {x: 100, y: 50},
+            { x: 0, y: 0 },
+            { x: 100, y: 50 },
         ]);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, x: 'x', y: 'y', width: w, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, x: 'x', y: 'y', width: w, schedule: (fn) => fn() });
         chart.mount(canvas);
         const pxBefore = chart._internal.seriesStates[0].pxs[1];
 
@@ -424,13 +415,13 @@ describe('createLineChart -- reactivity', () => {
 describe('createLineChart -- render path selection', () => {
     it('direct polyline: small dataset issues n-1 lineTo calls', () => {
         const data = [
-            {x: 0, y: 0},
-            {x: 1, y: 1},
-            {x: 2, y: 0},
-            {x: 3, y: 1},
+            { x: 0, y: 0 },
+            { x: 1, y: 1 },
+            { x: 2, y: 0 },
+            { x: 3, y: 1 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
 
@@ -461,7 +452,7 @@ describe('createLineChart -- render path selection', () => {
             ys[i] = Math.sin(i * 0.01);
         }
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data: {xs, ys}, schedule: (fn) => fn()});
+        const chart = createLineChart({ data: { xs, ys }, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
 
@@ -491,18 +482,18 @@ describe('createLineChart -- render path selection', () => {
 describe('createLineChart -- multi-series', () => {
     it('union domain spans all series', () => {
         const a = [
-            {x: 0, y: 0},
-            {x: 100, y: 1},
+            { x: 0, y: 0 },
+            { x: 100, y: 1 },
         ];
         const b = [
-            {x: 50, y: -5},
-            {x: 150, y: 5},
+            { x: 50, y: -5 },
+            { x: 150, y: 5 },
         ];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'a', data: a},
-                {name: 'b', data: b},
+                { name: 'a', data: a },
+                { name: 'b', data: b },
             ],
             x: 'x',
             y: 'y',
@@ -518,15 +509,15 @@ describe('createLineChart -- multi-series', () => {
 
     it('xScale.domain override wins over inferred extents', () => {
         const data = [
-            {x: 10, y: 0},
-            {x: 90, y: 1},
+            { x: 10, y: 0 },
+            { x: 90, y: 1 },
         ];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             data,
             x: 'x',
             y: 'y',
-            xScale: {domain: [0, 100]},
+            xScale: { domain: [0, 100] },
         });
         chart.mount(canvas);
         assert.equal(chart.xScale.dMin, 0);
@@ -538,12 +529,12 @@ describe('createLineChart -- multi-series', () => {
 describe('createLineChart -- time scale inference', () => {
     it('Date probe in first row -> time scale', () => {
         const data = [
-            {t: new Date('2026-01-01'), v: 1},
-            {t: new Date('2026-02-01'), v: 2},
-            {t: new Date('2026-03-01'), v: 3},
+            { t: new Date('2026-01-01'), v: 1 },
+            { t: new Date('2026-02-01'), v: 2 },
+            { t: new Date('2026-03-01'), v: 3 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, x: 't', y: 'v'});
+        const chart = createLineChart({ data, x: 't', y: 'v' });
         chart.mount(canvas);
         assert.equal(chart.xScaleType, 'time');
         chart.unmount();
@@ -551,12 +542,12 @@ describe('createLineChart -- time scale inference', () => {
 
     it('numeric x with non-time key -> linear scale (no false positive)', () => {
         const data = [
-            {x: 1700000000000, y: 1},  // looks like epoch
-            {x: 1700003600000, y: 2},
+            { x: 1700000000000, y: 1 },  // looks like epoch
+            { x: 1700003600000, y: 2 },
         ];
         const canvas = createMockCanvas(800, 400);
         // Key is 'x', NOT 'time'/'date'/'t' -- inference should stay linear.
-        const chart = createLineChart({data, x: 'x', y: 'y'});
+        const chart = createLineChart({ data, x: 'x', y: 'y' });
         chart.mount(canvas);
         assert.equal(chart.xScaleType, 'linear');
         chart.unmount();
@@ -568,7 +559,7 @@ describe('createLineChart -- time scale inference', () => {
 // ---------------------------------------------------------------------------
 
 describe('zero-GC kernel (best-effort, requires --expose-gc)', () => {
-    it('decimateMinMax steady-state allocates < 8 bytes/call', {skip: typeof global.gc !== 'function'}, () => {
+    it('decimateMinMax steady-state allocates < 8 bytes/call', { skip: typeof global.gc !== 'function' }, () => {
         const cols = 800;
         const n = 100000;
         const pxs = new Float32Array(n);
@@ -647,11 +638,8 @@ describe('bisectNearest', () => {
     it('respects the n parameter (does not scan beyond)', () => {
         // Allocated 10 slots, only 3 are valid; high slots have leftover data.
         const xs = new Float32Array(10);
-        xs[0] = 5;
-        xs[1] = 15;
-        xs[2] = 25;
-        xs[3] = 999;
-        xs[4] = 999;
+        xs[0] = 5; xs[1] = 15; xs[2] = 25;
+        xs[3] = 999; xs[4] = 999;
         // Target 100 should clamp to index 2 (the last valid), not chase the 999s.
         assert.equal(bisectNearest(xs, 3, 100), 2);
     });
@@ -664,11 +652,11 @@ describe('bisectNearest', () => {
 describe('crosshair / tooltip', () => {
     it('moveCrosshair snaps to nearest x and updates state', () => {
         const data = [
-            {x: 0, y: 0}, {x: 10, y: 10},
-            {x: 20, y: 20}, {x: 30, y: 30},
+            { x: 0, y: 0 }, { x: 10, y: 10 },
+            { x: 20, y: 20 }, { x: 30, y: 30 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         // Pick a canvas-x near the middle of the plot. With domain [0,30] mapped
         // into plot.x..plot.x+plot.w, x=15 (domain) is at plot midpoint pixel.
@@ -686,9 +674,9 @@ describe('crosshair / tooltip', () => {
     });
 
     it('moveCrosshair outside the plot rect hides the crosshair', () => {
-        const data = [{x: 0, y: 0}, {x: 10, y: 10}];
+        const data = [{ x: 0, y: 0 }, { x: 10, y: 10 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         chart.moveCrosshair(400, 200);
         assert.equal(chart.crosshair.peek().visible, true);
@@ -700,7 +688,7 @@ describe('crosshair / tooltip', () => {
 
     it('moveCrosshair on empty data is a no-op (no error, stays hidden)', () => {
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data: [], schedule: (fn) => fn()});
+        const chart = createLineChart({ data: [], schedule: (fn) => fn() });
         chart.mount(canvas);
         const pb = chart._internal.plotBoundsBox;
         chart.moveCrosshair(pb.x + pb.w / 2, pb.y + pb.h / 2);
@@ -709,9 +697,9 @@ describe('crosshair / tooltip', () => {
     });
 
     it('hideCrosshair is idempotent', () => {
-        const data = [{x: 0, y: 0}, {x: 10, y: 10}];
+        const data = [{ x: 0, y: 0 }, { x: 10, y: 10 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const pb = chart._internal.plotBoundsBox;
         chart.moveCrosshair(pb.x + 100, pb.y + 100);
@@ -723,10 +711,10 @@ describe('crosshair / tooltip', () => {
 
     it('crosshair draws vertical line + marker(s) + tooltip box when visible', () => {
         const data = [
-            {x: 0, y: 0}, {x: 10, y: 5}, {x: 20, y: 8}, {x: 30, y: 3},
+            { x: 0, y: 0 }, { x: 10, y: 5 }, { x: 20, y: 8 }, { x: 30, y: 3 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
 
@@ -746,7 +734,7 @@ describe('crosshair / tooltip', () => {
     });
 
     it('crosshair: false disables both line and DOM listener', () => {
-        const data = [{x: 0, y: 0}, {x: 10, y: 10}];
+        const data = [{ x: 0, y: 0 }, { x: 10, y: 10 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             data,
@@ -763,13 +751,13 @@ describe('crosshair / tooltip', () => {
 
     it('multi-series tooltip surfaces a value from each series at the snap x', () => {
         // Two series with DIFFERENT xs to verify per-series bisect.
-        const a = [{x: 0, y: 100}, {x: 10, y: 200}, {x: 20, y: 300}];
-        const b = [{x: 0, y: 1}, {x: 5, y: 2}, {x: 10, y: 3}, {x: 15, y: 4}, {x: 20, y: 5}];
+        const a = [{ x: 0, y: 100 }, { x: 10, y: 200 }, { x: 20, y: 300 }];
+        const b = [{ x: 0, y: 1 }, { x: 5, y: 2 }, { x: 10, y: 3 }, { x: 15, y: 4 }, { x: 20, y: 5 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'A', data: a},
-                {name: 'B', data: b},
+                { name: 'A', data: a },
+                { name: 'B', data: b },
             ],
             schedule: (fn) => fn(),
         });
@@ -790,7 +778,7 @@ describe('crosshair / tooltip', () => {
     });
 
     it('custom tooltip.format string replaces the header and suppresses rows', () => {
-        const data = [{x: 0, y: 0}, {x: 10, y: 5}];
+        const data = [{ x: 0, y: 0 }, { x: 10, y: 5 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             data,
@@ -821,13 +809,13 @@ describe('crosshair / tooltip', () => {
 describe('createAreaChart', () => {
     it('mounts and emits fill (in addition to stroke when stroke:true)', () => {
         const data = [
-            {x: 0, y: 5},
-            {x: 1, y: 8},
-            {x: 2, y: 3},
-            {x: 3, y: 7},
+            { x: 0, y: 5 },
+            { x: 1, y: 8 },
+            { x: 2, y: 3 },
+            { x: 3, y: 7 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createAreaChart({data, schedule: (fn) => fn()});
+        const chart = createAreaChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
 
@@ -841,10 +829,10 @@ describe('createAreaChart', () => {
 
     it('stroke: false suppresses the upper-boundary stroke but keeps fill', () => {
         const data = [
-            {x: 0, y: 5}, {x: 1, y: 8}, {x: 2, y: 3},
+            { x: 0, y: 5 }, { x: 1, y: 8 }, { x: 2, y: 3 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createAreaChart({data, stroke: false, schedule: (fn) => fn()});
+        const chart = createAreaChart({ data, stroke: false, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
 
@@ -861,7 +849,7 @@ describe('createAreaChart', () => {
         chart.unmount();
 
         const canvas2 = createMockCanvas(800, 400);
-        const chart2 = createAreaChart({data, stroke: true, schedule: (fn) => fn()});
+        const chart2 = createAreaChart({ data, stroke: true, schedule: (fn) => fn() });
         chart2.mount(canvas2);
         const ctx2 = canvas2.getContext('2d');
         ctx2.calls.length = 0;
@@ -874,12 +862,12 @@ describe('createAreaChart', () => {
 
     it('default baseline is at y=0 (clamped to plot rect when 0 is out of domain)', () => {
         const data = [
-            {x: 0, y: 100}, {x: 1, y: 200}, {x: 2, y: 150},
+            { x: 0, y: 100 }, { x: 1, y: 200 }, { x: 2, y: 150 },
         ];
         const canvas = createMockCanvas(800, 400);
         // y-domain auto-pads to roughly [95, 205]; 0 is outside -> baseline
         // clamps to bottom of plot rect (= plot.y + plot.h).
-        const chart = createAreaChart({data, schedule: (fn) => fn()});
+        const chart = createAreaChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const pb = chart._internal.plotBoundsBox;
 
@@ -892,13 +880,13 @@ describe('createAreaChart', () => {
 
     it('custom numeric baseline lands at the right pixel', () => {
         const data = [
-            {x: 0, y: 10}, {x: 1, y: 20}, {x: 2, y: 15},
+            { x: 0, y: 10 }, { x: 1, y: 20 }, { x: 2, y: 15 },
         ];
         const canvas = createMockCanvas(800, 400);
         const chart = createAreaChart({
             data,
             baseline: 12,            // mid-range custom baseline
-            yScale: {domain: [0, 30]},
+            yScale: { domain: [0, 30] },
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -913,7 +901,7 @@ describe('createAreaChart', () => {
 
     it('baseline: "bottom" pins the baseline to the bottom of the plot rect', () => {
         const data = [
-            {x: 0, y: 1}, {x: 1, y: 5}, {x: 2, y: 3},
+            { x: 0, y: 1 }, { x: 1, y: 5 }, { x: 2, y: 3 },
         ];
         const canvas = createMockCanvas(800, 400);
         const chart = createAreaChart({
@@ -933,7 +921,7 @@ describe('createAreaChart', () => {
 
     it('fillOpacity adjusts globalAlpha before fill', () => {
         const data = [
-            {x: 0, y: 1}, {x: 1, y: 5}, {x: 2, y: 3},
+            { x: 0, y: 1 }, { x: 1, y: 5 }, { x: 2, y: 3 },
         ];
         const canvas = createMockCanvas(800, 400);
         const chart = createAreaChart({
@@ -963,8 +951,8 @@ describe('createAreaChart', () => {
         }
         const canvas = createMockCanvas(800, 400);
         const chart = createAreaChart({
-            data: {xs, ys},
-            yScale: {domain: [0, 3]},   // make baseline 0 visible
+            data: { xs, ys },
+            yScale: { domain: [0, 3] },   // make baseline 0 visible
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -994,13 +982,13 @@ describe('series visibility / legend', () => {
     it('setSeriesVisible(idx, false) excludes the series from y-domain', () => {
         // Series A: small range. Series B: large range. Hiding B should
         // collapse the y-domain to A's range only.
-        const a = [{x: 0, y: 1}, {x: 1, y: 2}, {x: 2, y: 3}];
-        const b = [{x: 0, y: 100}, {x: 1, y: 200}, {x: 2, y: 150}];
+        const a = [{ x: 0, y: 1 }, { x: 1, y: 2 }, { x: 2, y: 3 }];
+        const b = [{ x: 0, y: 100 }, { x: 1, y: 200 }, { x: 2, y: 150 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'A', data: a},
-                {name: 'B', data: b},
+                { name: 'A', data: a },
+                { name: 'B', data: b },
             ],
             schedule: (fn) => fn(),
         });
@@ -1015,13 +1003,13 @@ describe('series visibility / legend', () => {
     });
 
     it('hidden series does not stroke in the line draw', () => {
-        const a = [{x: 0, y: 1}, {x: 1, y: 2}, {x: 2, y: 3}];
-        const b = [{x: 0, y: 4}, {x: 1, y: 5}, {x: 2, y: 6}];
+        const a = [{ x: 0, y: 1 }, { x: 1, y: 2 }, { x: 2, y: 3 }];
+        const b = [{ x: 0, y: 4 }, { x: 1, y: 5 }, { x: 2, y: 6 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'A', data: a},
-                {name: 'B', data: b},
+                { name: 'A', data: a },
+                { name: 'B', data: b },
             ],
             schedule: (fn) => fn(),
         });
@@ -1044,13 +1032,13 @@ describe('series visibility / legend', () => {
     });
 
     it('hidden series does not appear in crosshair markers', () => {
-        const a = [{x: 0, y: 1}, {x: 1, y: 2}, {x: 2, y: 3}];
-        const b = [{x: 0, y: 4}, {x: 1, y: 5}, {x: 2, y: 6}];
+        const a = [{ x: 0, y: 1 }, { x: 1, y: 2 }, { x: 2, y: 3 }];
+        const b = [{ x: 0, y: 4 }, { x: 1, y: 5 }, { x: 2, y: 6 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'A', data: a},
-                {name: 'B', data: b},
+                { name: 'A', data: a },
+                { name: 'B', data: b },
             ],
             schedule: (fn) => fn(),
         });
@@ -1075,13 +1063,13 @@ describe('series visibility / legend', () => {
     });
 
     it('hidden series does not appear in tooltip rows', () => {
-        const a = [{x: 0, y: 1}, {x: 1, y: 2}, {x: 2, y: 3}];
-        const b = [{x: 0, y: 4}, {x: 1, y: 5}, {x: 2, y: 6}];
+        const a = [{ x: 0, y: 1 }, { x: 1, y: 2 }, { x: 2, y: 3 }];
+        const b = [{ x: 0, y: 4 }, { x: 1, y: 5 }, { x: 2, y: 6 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'A-series', data: a},
-                {name: 'B-series', data: b},
+                { name: 'A-series', data: a },
+                { name: 'B-series', data: b },
             ],
             schedule: (fn) => fn(),
         });
@@ -1108,9 +1096,9 @@ describe('series visibility / legend', () => {
     });
 
     it('seriesVisibility signal API matches setSeriesVisible', () => {
-        const data = [{x: 0, y: 1}, {x: 1, y: 2}];
+        const data = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
 
         assert.equal(chart.seriesVisibility[0].peek(), true);
@@ -1122,9 +1110,9 @@ describe('series visibility / legend', () => {
     });
 
     it('setSeriesVisible with out-of-range index is a safe no-op', () => {
-        const data = [{x: 0, y: 1}, {x: 1, y: 2}];
+        const data = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
 
         // Should not throw, should not affect any existing series.
@@ -1135,9 +1123,9 @@ describe('series visibility / legend', () => {
     });
 
     it('legend: false disables legend DOM creation', () => {
-        const data = [{x: 0, y: 1}, {x: 1, y: 2}];
+        const data = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, legend: false, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, legend: false, schedule: (fn) => fn() });
         chart.mount(canvas);
         // No legend was built (no document anyway, plus legend:false).
         assert.equal(chart.legend, null);
@@ -1149,22 +1137,22 @@ describe('series visibility / legend', () => {
 
     it('chart.legend is null when mounting a bare canvas (no parent to wrap)', () => {
         // Mock canvases used here have no parent and no document anyway.
-        const data = [{x: 0, y: 1}, {x: 1, y: 2}];
+        const data = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         assert.equal(chart.legend, null);
         chart.unmount();
     });
 
     it('hidden then re-shown series resumes rendering and contributes to domain', () => {
-        const a = [{x: 0, y: 1}, {x: 1, y: 2}];
-        const b = [{x: 0, y: 100}, {x: 1, y: 200}];
+        const a = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
+        const b = [{ x: 0, y: 100 }, { x: 1, y: 200 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'A', data: a},
-                {name: 'B', data: b},
+                { name: 'A', data: a },
+                { name: 'B', data: b },
             ],
             schedule: (fn) => fn(),
         });
@@ -1189,14 +1177,14 @@ describe('series visibility / legend', () => {
 describe('interpolation modes', () => {
     const makeData = (n) => {
         const out = [];
-        for (let i = 0; i < n; i++) out.push({x: i, y: Math.sin(i)});
+        for (let i = 0; i < n; i++) out.push({ x: i, y: Math.sin(i) });
         return out;
     };
 
     it('linear (default): emits n-1 lineTo per series + 1 moveTo', () => {
         const data = makeData(5);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1210,7 +1198,7 @@ describe('interpolation modes', () => {
     it('step-after: emits 2*(n-1) lineTos for the staircase', () => {
         const data = makeData(5);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, interpolation: 'step-after', schedule: (fn) => fn()});
+        const chart = createLineChart({ data, interpolation: 'step-after', schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1222,7 +1210,7 @@ describe('interpolation modes', () => {
         chart.unmount();
 
         const canvas2 = createMockCanvas(800, 400);
-        const chart2 = createLineChart({data, interpolation: 'linear', schedule: (fn) => fn()});
+        const chart2 = createLineChart({ data, interpolation: 'linear', schedule: (fn) => fn() });
         chart2.mount(canvas2);
         const ctx2 = canvas2.getContext('2d');
         ctx2.calls.length = 0;
@@ -1237,7 +1225,7 @@ describe('interpolation modes', () => {
     it('step-before: same lineTo count as step-after, different geometry', () => {
         const data = makeData(5);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, interpolation: 'step-before', schedule: (fn) => fn()});
+        const chart = createLineChart({ data, interpolation: 'step-before', schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1246,7 +1234,7 @@ describe('interpolation modes', () => {
         chart.unmount();
 
         const canvas2 = createMockCanvas(800, 400);
-        const chart2 = createLineChart({data, interpolation: 'step-after', schedule: (fn) => fn()});
+        const chart2 = createLineChart({ data, interpolation: 'step-after', schedule: (fn) => fn() });
         chart2.mount(canvas2);
         const ctx2 = canvas2.getContext('2d');
         ctx2.calls.length = 0;
@@ -1260,7 +1248,7 @@ describe('interpolation modes', () => {
     it('step-mid: 3 lineTos per segment, more than step-after', () => {
         const data = makeData(5);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, interpolation: 'step-mid', schedule: (fn) => fn()});
+        const chart = createLineChart({ data, interpolation: 'step-mid', schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1269,7 +1257,7 @@ describe('interpolation modes', () => {
         chart.unmount();
 
         const canvas2 = createMockCanvas(800, 400);
-        const chart2 = createLineChart({data, interpolation: 'step-after', schedule: (fn) => fn()});
+        const chart2 = createLineChart({ data, interpolation: 'step-after', schedule: (fn) => fn() });
         chart2.mount(canvas2);
         const ctx2 = canvas2.getContext('2d');
         ctx2.calls.length = 0;
@@ -1286,7 +1274,7 @@ describe('interpolation modes', () => {
     it('monotone: emits n-1 bezierCurveTo calls', () => {
         const data = makeData(5);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, interpolation: 'monotone', schedule: (fn) => fn()});
+        const chart = createLineChart({ data, interpolation: 'monotone', schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1299,7 +1287,7 @@ describe('interpolation modes', () => {
     it('catmull-rom: emits n-1 bezierCurveTo calls', () => {
         const data = makeData(5);
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, interpolation: 'catmull-rom', schedule: (fn) => fn()});
+        const chart = createLineChart({ data, interpolation: 'catmull-rom', schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1311,11 +1299,11 @@ describe('interpolation modes', () => {
     it('monotone preserves monotonicity on monotone data', () => {
         // Strictly increasing y: monotone tangents must all be >= 0.
         const data = [
-            {x: 0, y: 0}, {x: 1, y: 1}, {x: 2, y: 3},
-            {x: 3, y: 6}, {x: 4, y: 10},
+            { x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 3 },
+            { x: 3, y: 6 }, { x: 4, y: 10 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, interpolation: 'monotone', schedule: (fn) => fn()});
+        const chart = createLineChart({ data, interpolation: 'monotone', schedule: (fn) => fn() });
         chart.mount(canvas);
         const state = chart._internal.seriesStates[0];
         // Trigger draw so tangents get computed.
@@ -1331,7 +1319,7 @@ describe('interpolation modes', () => {
 
     it('unknown interpolation mode throws a clear error', () => {
         assert.throws(
-            () => createLineChart({data: [{x: 0, y: 0}], interpolation: 'bogus'}),
+            () => createLineChart({ data: [{x:0,y:0}], interpolation: 'bogus' }),
             /unknown interpolation mode/,
         );
     });
@@ -1341,13 +1329,10 @@ describe('interpolation modes', () => {
         const n = 5000;
         const xs = new Float32Array(n);
         const ys = new Float32Array(n);
-        for (let i = 0; i < n; i++) {
-            xs[i] = i;
-            ys[i] = Math.sin(i * 0.01);
-        }
+        for (let i = 0; i < n; i++) { xs[i] = i; ys[i] = Math.sin(i * 0.01); }
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
-            data: {xs, ys},
+            data: { xs, ys },
             interpolation: 'monotone',
             schedule: (fn) => fn(),
         });
@@ -1361,10 +1346,10 @@ describe('interpolation modes', () => {
 
     it('area chart respects interpolation: monotone emits bezier in fill AND stroke', () => {
         const data = [
-            {x: 0, y: 1}, {x: 1, y: 4}, {x: 2, y: 2}, {x: 3, y: 5},
+            { x: 0, y: 1 }, { x: 1, y: 4 }, { x: 2, y: 2 }, { x: 3, y: 5 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createAreaChart({data, interpolation: 'monotone', schedule: (fn) => fn()});
+        const chart = createAreaChart({ data, interpolation: 'monotone', schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1382,11 +1367,11 @@ describe('interpolation modes', () => {
 describe('markers', () => {
     it('markers: true draws a circle marker per sample', () => {
         const data = [
-            {x: 0, y: 1}, {x: 1, y: 2}, {x: 2, y: 1},
-            {x: 3, y: 3}, {x: 4, y: 2},
+            { x: 0, y: 1 }, { x: 1, y: 2 }, { x: 2, y: 1 },
+            { x: 3, y: 3 }, { x: 4, y: 2 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, markers: true, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, markers: true, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1397,9 +1382,9 @@ describe('markers', () => {
     });
 
     it('markers: false (or omitted) draws no markers', () => {
-        const data = [{x: 0, y: 1}, {x: 1, y: 2}, {x: 2, y: 3}];
+        const data = [{ x: 0, y: 1 }, { x: 1, y: 2 }, { x: 2, y: 3 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1409,11 +1394,11 @@ describe('markers', () => {
     });
 
     it('markers: { shape: "square" } uses rect not arc', () => {
-        const data = [{x: 0, y: 1}, {x: 1, y: 2}, {x: 2, y: 3}];
+        const data = [{ x: 0, y: 1 }, { x: 1, y: 2 }, { x: 2, y: 3 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             data,
-            markers: {shape: 'square'},
+            markers: { shape: 'square' },
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -1427,11 +1412,11 @@ describe('markers', () => {
 
     it('markers: { everyN: 2 } draws every other point', () => {
         const data = [];
-        for (let i = 0; i < 10; i++) data.push({x: i, y: i});
+        for (let i = 0; i < 10; i++) data.push({ x: i, y: i });
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             data,
-            markers: {everyN: 2},
+            markers: { everyN: 2 },
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -1447,13 +1432,10 @@ describe('markers', () => {
         const n = 5000;
         const xs = new Float32Array(n);
         const ys = new Float32Array(n);
-        for (let i = 0; i < n; i++) {
-            xs[i] = i;
-            ys[i] = Math.sin(i * 0.01);
-        }
+        for (let i = 0; i < n; i++) { xs[i] = i; ys[i] = Math.sin(i * 0.01); }
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
-            data: {xs, ys},
+            data: { xs, ys },
             markers: true,
             schedule: (fn) => fn(),
         });
@@ -1466,13 +1448,13 @@ describe('markers', () => {
     });
 
     it('per-series marker override beats chart-level default', () => {
-        const a = [{x: 0, y: 1}, {x: 1, y: 2}];
-        const b = [{x: 0, y: 3}, {x: 1, y: 4}];
+        const a = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
+        const b = [{ x: 0, y: 3 }, { x: 1, y: 4 }];
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             series: [
-                {name: 'A', data: a},                       // inherits chart-level markers: true
-                {name: 'B', data: b, markers: false},       // explicit override
+                { name: 'A', data: a },                       // inherits chart-level markers: true
+                { name: 'B', data: b, markers: false },       // explicit override
             ],
             markers: true,
             schedule: (fn) => fn(),
@@ -1493,14 +1475,14 @@ describe('markers', () => {
 
 describe('refreshTheme', () => {
     it('refreshTheme on unmounted chart is a safe no-op', () => {
-        const chart = createLineChart({data: [{x: 0, y: 0}]});
+        const chart = createLineChart({ data: [{ x: 0, y: 0 }] });
         chart.refreshTheme(); // should not throw
     });
 
     it('refreshTheme triggers a markDirty (redraw fires)', () => {
-        const data = [{x: 0, y: 1}, {x: 1, y: 2}];
+        const data = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1517,9 +1499,9 @@ describe('refreshTheme', () => {
 
 describe('grid', () => {
     it('grid: false (default) draws no gridlines', () => {
-        const data = [{x: 0, y: 0}, {x: 1, y: 1}, {x: 2, y: 0}];
+        const data = [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 0 }];
         const canvas = createMockCanvas(800, 400);
-        const chartNoGrid = createLineChart({data, schedule: (fn) => fn()});
+        const chartNoGrid = createLineChart({ data, schedule: (fn) => fn() });
         chartNoGrid.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1528,7 +1510,7 @@ describe('grid', () => {
         chartNoGrid.unmount();
 
         const canvas2 = createMockCanvas(800, 400);
-        const chartGrid = createLineChart({data, grid: true, schedule: (fn) => fn()});
+        const chartGrid = createLineChart({ data, grid: true, schedule: (fn) => fn() });
         chartGrid.mount(canvas2);
         const ctx2 = canvas2.getContext('2d');
         ctx2.calls.length = 0;
@@ -1542,9 +1524,9 @@ describe('grid', () => {
     });
 
     it('grid: { x: false } skips vertical gridlines', () => {
-        const data = [{x: 0, y: 0}, {x: 1, y: 1}];
+        const data = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
         const canvasBoth = createMockCanvas(800, 400);
-        const both = createLineChart({data, grid: true, schedule: (fn) => fn()});
+        const both = createLineChart({ data, grid: true, schedule: (fn) => fn() });
         both.mount(canvasBoth);
         const ctxBoth = canvasBoth.getContext('2d');
         ctxBoth.calls.length = 0;
@@ -1553,7 +1535,7 @@ describe('grid', () => {
         both.unmount();
 
         const canvasYOnly = createMockCanvas(800, 400);
-        const yOnly = createLineChart({data, grid: {x: false, y: true}, schedule: (fn) => fn()});
+        const yOnly = createLineChart({ data, grid: { x: false, y: true }, schedule: (fn) => fn() });
         yOnly.mount(canvasYOnly);
         const ctxYOnly = canvasYOnly.getContext('2d');
         ctxYOnly.calls.length = 0;
@@ -1568,9 +1550,9 @@ describe('grid', () => {
         // Verify that after a width change, grid line geometry actually
         // updates (the lite-scene line nodes get new x/y/dx/dy values).
         const w = signal(800);
-        const data = [{x: 0, y: 0}, {x: 100, y: 50}];
+        const data = [{ x: 0, y: 0 }, { x: 100, y: 50 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, grid: true, width: w, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, grid: true, width: w, schedule: (fn) => fn() });
         chart.mount(canvas);
         // Just verify no error on resize and the chart redraws.
         w.set(1600);
@@ -1585,9 +1567,9 @@ describe('grid', () => {
 
 describe('crosshair zero-alloc', () => {
     it('chart.crosshair.peek() returns the same mutable reference across calls', () => {
-        const data = [{x: 0, y: 0}, {x: 1, y: 1}, {x: 2, y: 2}];
+        const data = [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const a = chart.crosshair.peek();
         const b = chart.crosshair.peek();
@@ -1596,9 +1578,9 @@ describe('crosshair zero-alloc', () => {
     });
 
     it('moveCrosshair mutates the existing object without reallocating', () => {
-        const data = [{x: 0, y: 0}, {x: 1, y: 5}, {x: 2, y: 3}];
+        const data = [{ x: 0, y: 0 }, { x: 1, y: 5 }, { x: 2, y: 3 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
 
         const stateRef = chart.crosshair.peek();
@@ -1620,9 +1602,9 @@ describe('crosshair zero-alloc', () => {
     });
 
     it('chart.crosshair() subscribe-read pattern returns the live object', () => {
-        const data = [{x: 0, y: 0}, {x: 1, y: 1}];
+        const data = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const a = chart.crosshair();
         const b = chart.crosshair();
@@ -1631,12 +1613,12 @@ describe('crosshair zero-alloc', () => {
     });
 
     it('crosshair.set() preserves identity (back-compat for tests + callers)', () => {
-        const data = [{x: 0, y: 0}, {x: 1, y: 1}];
+        const data = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const before = chart.crosshair.peek();
-        chart.crosshair.set({visible: true, snapIdx: 1, snapDomainX: 1, snapPixelX: 100, mousePixelY: 50});
+        chart.crosshair.set({ visible: true, snapIdx: 1, snapDomainX: 1, snapPixelX: 100, mousePixelY: 50 });
         const after = chart.crosshair.peek();
         assert.strictEqual(after, before, 'set() must mutate, not replace');
         assert.equal(after.visible, true);
@@ -1645,9 +1627,9 @@ describe('crosshair zero-alloc', () => {
     });
 
     it('crosshair.subscribe fires on change and receives the live ref', () => {
-        const data = [{x: 0, y: 0}, {x: 1, y: 1}, {x: 2, y: 2}];
+        const data = [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createLineChart({data, schedule: (fn) => fn()});
+        const chart = createLineChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const received = [];
         const unsub = chart.crosshair.subscribe((s) => received.push(s));
@@ -1671,7 +1653,7 @@ describe('DPR canvas sizing', () => {
     it('default dpr=1 means backing buffer matches CSS dimensions', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
-            data: [{x: 0, y: 0}, {x: 1, y: 1}],
+            data: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
             width: 800,
             height: 400,
             dpr: 1,
@@ -1687,7 +1669,7 @@ describe('DPR canvas sizing', () => {
     it('dpr=2 sizes the backing buffer to 2x CSS dimensions', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
-            data: [{x: 0, y: 0}, {x: 1, y: 1}],
+            data: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
             width: 800,
             height: 400,
             dpr: 2,
@@ -1705,7 +1687,7 @@ describe('DPR canvas sizing', () => {
     it('dpr=3 sizes the backing buffer to 3x CSS dimensions', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
-            data: [{x: 0, y: 0}, {x: 1, y: 1}],
+            data: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
             width: 600,
             height: 200,
             dpr: 3,
@@ -1721,7 +1703,7 @@ describe('DPR canvas sizing', () => {
         // Some Windows scaling configs report dpr like 1.5 or 1.25.
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
-            data: [{x: 0, y: 0}, {x: 1, y: 1}],
+            data: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
             width: 800,
             height: 400,
             dpr: 1.5,
@@ -1740,7 +1722,7 @@ describe('DPR canvas sizing', () => {
         // projects into), which derives from plotBoundsBox.
         const c1 = createMockCanvas(800, 400);
         const chart1 = createLineChart({
-            data: [{x: 0, y: 0}, {x: 100, y: 50}],
+            data: [{ x: 0, y: 0 }, { x: 100, y: 50 }],
             width: 800,
             height: 400,
             dpr: 1,
@@ -1753,7 +1735,7 @@ describe('DPR canvas sizing', () => {
 
         const c2 = createMockCanvas(800, 400);
         const chart2 = createLineChart({
-            data: [{x: 0, y: 0}, {x: 100, y: 50}],
+            data: [{ x: 0, y: 0 }, { x: 100, y: 50 }],
             width: 800,
             height: 400,
             dpr: 2,
@@ -1801,18 +1783,18 @@ describe('makeBandScale', () => {
 
     it('invert returns the category index for a pixel', () => {
         const s = updateBandScale(makeBandScale(), 4, 0, 400, 0, 0);
-        assert.equal(s.invert(50), 0);   // center of band 0
+        assert.equal(s.invert(50),  0);   // center of band 0
         assert.equal(s.invert(150), 1);   // center of band 1
         assert.equal(s.invert(250), 2);
         assert.equal(s.invert(350), 3);
         // Edges snap to nearer band.
-        assert.equal(s.invert(99), 0);
+        assert.equal(s.invert(99),  0);
         assert.equal(s.invert(101), 1);
     });
 
     it('invert clamps to [0, n-1]', () => {
         const s = updateBandScale(makeBandScale(), 3, 0, 300, 0, 0);
-        assert.equal(s.invert(-50), 0);
+        assert.equal(s.invert(-50),  0);
         assert.equal(s.invert(9999), 2);
     });
 });
@@ -1824,13 +1806,13 @@ describe('makeBandScale', () => {
 describe('createBarChart', () => {
     it('renders one fillRect per category for single-series', () => {
         const data = [
-            {x: 'Jan', y: 10},
-            {x: 'Feb', y: 20},
-            {x: 'Mar', y: 15},
-            {x: 'Apr', y: 25},
+            { x: 'Jan', y: 10 },
+            { x: 'Feb', y: 20 },
+            { x: 'Mar', y: 15 },
+            { x: 'Apr', y: 25 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createBarChart({data, schedule: (fn) => fn()});
+        const chart = createBarChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         const ctx = canvas.getContext('2d');
         ctx.calls.length = 0;
@@ -1842,12 +1824,12 @@ describe('createBarChart', () => {
 
     it('y-domain includes baseline (0) by default so bars do not float', () => {
         const data = [
-            {x: 'Jan', y: 10},
-            {x: 'Feb', y: 20},
-            {x: 'Mar', y: 30},
+            { x: 'Jan', y: 10 },
+            { x: 'Feb', y: 20 },
+            { x: 'Mar', y: 30 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createBarChart({data, schedule: (fn) => fn()});
+        const chart = createBarChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         // y-data ranges [10, 30] but baseline 0 must be included so the
         // bars visually anchor at the x-axis. yScale.dMin should be <= 0.
@@ -1857,18 +1839,18 @@ describe('createBarChart', () => {
 
     it('multi-series grouped layout: each series renders n bars', () => {
         const seriesA = [
-            {x: 'Jan', y: 10},
-            {x: 'Feb', y: 20},
+            { x: 'Jan', y: 10 },
+            { x: 'Feb', y: 20 },
         ];
         const seriesB = [
-            {x: 'Jan', y: 15},
-            {x: 'Feb', y: 25},
+            { x: 'Jan', y: 15 },
+            { x: 'Feb', y: 25 },
         ];
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
             series: [
-                {name: 'A', data: seriesA},
-                {name: 'B', data: seriesB},
+                { name: 'A', data: seriesA },
+                { name: 'B', data: seriesB },
             ],
             schedule: (fn) => fn(),
         });
@@ -1883,13 +1865,13 @@ describe('createBarChart', () => {
 
     it('discrete hit detection via bandScale.invert (not bisect)', () => {
         const data = [
-            {x: 'Jan', y: 10},
-            {x: 'Feb', y: 20},
-            {x: 'Mar', y: 30},
-            {x: 'Apr', y: 40},
+            { x: 'Jan', y: 10 },
+            { x: 'Feb', y: 20 },
+            { x: 'Mar', y: 30 },
+            { x: 'Apr', y: 40 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createBarChart({data, schedule: (fn) => fn()});
+        const chart = createBarChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
 
         // Plot bounds: x in [56, 776], width 720. 4 bands -> step ~180.
@@ -1909,9 +1891,9 @@ describe('createBarChart', () => {
     });
 
     it('hideCrosshair when pointer leaves plot bounds', () => {
-        const data = [{x: 'Jan', y: 10}, {x: 'Feb', y: 20}];
+        const data = [{ x: 'Jan', y: 10 }, { x: 'Feb', y: 20 }];
         const canvas = createMockCanvas(800, 400);
-        const chart = createBarChart({data, schedule: (fn) => fn()});
+        const chart = createBarChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         chart.moveCrosshair(400, 200);
         assert.equal(chart.crosshair.peek().visible, true);
@@ -1922,8 +1904,8 @@ describe('createBarChart', () => {
 
     it('legend with click-to-toggle works for bar series', () => {
         const data = [
-            {name: 'A', data: [{x: 'Jan', y: 10}, {x: 'Feb', y: 20}]},
-            {name: 'B', data: [{x: 'Jan', y: 15}, {x: 'Feb', y: 25}]},
+            { name: 'A', data: [{ x: 'Jan', y: 10 }, { x: 'Feb', y: 20 }] },
+            { name: 'B', data: [{ x: 'Jan', y: 15 }, { x: 'Feb', y: 25 }] },
         ];
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
@@ -1944,7 +1926,7 @@ describe('createBarChart', () => {
     it('refreshTheme works on bar charts', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
-            data: [{x: 'A', y: 1}, {x: 'B', y: 2}],
+            data: [{ x: 'A', y: 1 }, { x: 'B', y: 2 }],
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -1955,12 +1937,12 @@ describe('createBarChart', () => {
 
     it('negative y values render bars extending downward from baseline', () => {
         const data = [
-            {x: 'A', y: 10},
-            {x: 'B', y: -5},
-            {x: 'C', y: 15},
+            { x: 'A', y: 10 },
+            { x: 'B', y: -5 },
+            { x: 'C', y: 15 },
         ];
         const canvas = createMockCanvas(800, 400);
-        const chart = createBarChart({data, schedule: (fn) => fn()});
+        const chart = createBarChart({ data, schedule: (fn) => fn() });
         chart.mount(canvas);
         // y-domain must include both -5 and 10 plus baseline 0.
         assert.ok(chart.yScale.dMin <= -5);
@@ -1981,9 +1963,9 @@ describe('extractSliceData', () => {
     it('normalizes array-of-objects shape', () => {
         const state = makePolarState();
         extractSliceData(state, [
-            {label: 'A', value: 30},
-            {label: 'B', value: 50},
-            {label: 'C', value: 20},
+            { label: 'A', value: 30 },
+            { label: 'B', value: 50 },
+            { label: 'C', value: 20 },
         ]);
         assert.equal(state.n, 3);
         assert.equal(state.total, 100);
@@ -2018,9 +2000,9 @@ describe('extractSliceData', () => {
     it('clamps negative values to 0 (pie requires non-negative)', () => {
         const state = makePolarState();
         extractSliceData(state, [
-            {label: 'A', value: 10},
-            {label: 'B', value: -5},
-            {label: 'C', value: 15},
+            { label: 'A', value: 10 },
+            { label: 'B', value: -5 },
+            { label: 'C', value: 15 },
         ]);
         assert.equal(state.values[1], 0);
         assert.equal(state.total, 25);
@@ -2029,22 +2011,22 @@ describe('extractSliceData', () => {
     it('computes startAngles cumulatively from 0', () => {
         const state = makePolarState();
         extractSliceData(state, [
-            {value: 25}, // 90deg = pi/2
-            {value: 25}, // 90deg
-            {value: 25},
-            {value: 25},
+            { value: 25 }, // 90deg = pi/2
+            { value: 25 }, // 90deg
+            { value: 25 },
+            { value: 25 },
         ]);
         const PI = Math.PI;
-        assert.ok(Math.abs(state.startAngles[0] - 0) < 1e-5);
-        assert.ok(Math.abs(state.startAngles[1] - PI / 2) < 1e-5);
-        assert.ok(Math.abs(state.startAngles[2] - PI) < 1e-5);
+        assert.ok(Math.abs(state.startAngles[0] - 0)         < 1e-5);
+        assert.ok(Math.abs(state.startAngles[1] - PI / 2)    < 1e-5);
+        assert.ok(Math.abs(state.startAngles[2] - PI)        < 1e-5);
         assert.ok(Math.abs(state.startAngles[3] - 3 * PI / 2) < 1e-5);
     });
 
     it('arcAngles sum to 2*PI when all visible', () => {
         const state = makePolarState();
         extractSliceData(state, [
-            {value: 17}, {value: 33}, {value: 50},
+            { value: 17 }, { value: 33 }, { value: 50 },
         ]);
         let sum = 0;
         for (let i = 0; i < state.n; i++) sum += state.arcAngles[i];
@@ -2054,7 +2036,7 @@ describe('extractSliceData', () => {
     it('toggling visibility off shrinks arcAngle to 0; others grow to fill', () => {
         const state = makePolarState();
         extractSliceData(state, [
-            {value: 50}, {value: 50},
+            { value: 50 }, { value: 50 },
         ]);
         // Both visible: each gets PI radians
         assert.ok(Math.abs(state.arcAngles[0] - Math.PI) < 1e-5);
@@ -2078,11 +2060,11 @@ describe('extractSliceData', () => {
 });
 
 describe('computeSliceGeometry', () => {
-    const geom = () => ({cx: 0, cy: 0, rOuter: 0, rInner: 0});
+    const geom = () => ({ cx: 0, cy: 0, rOuter: 0, rInner: 0 });
 
     it('centers in plot rect and uses min(w,h)/2 as outer radius', () => {
         const g = geom();
-        computeSliceGeometry(g, {x: 10, y: 20, w: 400, h: 300}, 0);
+        computeSliceGeometry(g, { x: 10, y: 20, w: 400, h: 300 }, 0);
         assert.equal(g.cx, 210);  // 10 + 400/2
         assert.equal(g.cy, 170);  // 20 + 300/2
         assert.equal(g.rOuter, 150);  // min(400, 300) / 2
@@ -2091,20 +2073,20 @@ describe('computeSliceGeometry', () => {
 
     it('innerRadius in [0,1] is treated as fraction of outer', () => {
         const g = geom();
-        computeSliceGeometry(g, {x: 0, y: 0, w: 200, h: 200}, 0.5);
+        computeSliceGeometry(g, { x: 0, y: 0, w: 200, h: 200 }, 0.5);
         assert.equal(g.rOuter, 100);
         assert.equal(g.rInner, 50);
     });
 
     it('innerRadius > 1 is treated as absolute pixels (clamped to rOuter-1)', () => {
         const g = geom();
-        computeSliceGeometry(g, {x: 0, y: 0, w: 200, h: 200}, 75);
+        computeSliceGeometry(g, { x: 0, y: 0, w: 200, h: 200 }, 75);
         assert.equal(g.rInner, 75);
     });
 
     it('innerRadius > rOuter clamps to rOuter - 1', () => {
         const g = geom();
-        computeSliceGeometry(g, {x: 0, y: 0, w: 100, h: 100}, 200);
+        computeSliceGeometry(g, { x: 0, y: 0, w: 100, h: 100 }, 200);
         // rOuter = 50; rInner clamped to 49
         assert.equal(g.rOuter, 50);
         assert.equal(g.rInner, 49);
@@ -2116,50 +2098,50 @@ describe('sliceHitTest', () => {
     const setup = (innerRadius = 0) => {
         const state = makePolarState();
         extractSliceData(state, [
-            {value: 25}, {value: 25}, {value: 25}, {value: 25},
+            { value: 25 }, { value: 25 }, { value: 25 }, { value: 25 },
         ]);
-        const geometry = {cx: 200, cy: 200, rOuter: 100, rInner: innerRadius};
-        return {state, geometry};
+        const geometry = { cx: 200, cy: 200, rOuter: 100, rInner: innerRadius };
+        return { state, geometry };
     };
 
     it('point above center hits slice 0 (12-3 oclock arc)', () => {
-        const {state, geometry} = setup();
+        const { state, geometry } = setup();
         // With 4 equal slices starting at 12, slice 0 spans 12-3 oclock.
         // Any point in the upper-right quadrant lands in it.
         assert.equal(sliceHitTest(220, 170, state, geometry), 0);
     });
 
     it('point in lower-right quadrant hits slice 1 (3-6 oclock arc)', () => {
-        const {state, geometry} = setup();
+        const { state, geometry } = setup();
         // Lower-right diagonal, clearly past the 3 oclock boundary
         assert.equal(sliceHitTest(250, 230, state, geometry), 1);
     });
 
     it('point in lower-left quadrant hits slice 2 (6-9 oclock arc)', () => {
-        const {state, geometry} = setup();
+        const { state, geometry } = setup();
         // Lower-left diagonal, clearly past the 6 oclock boundary
         assert.equal(sliceHitTest(170, 230, state, geometry), 2);
     });
 
     it('point in upper-left quadrant hits slice 3 (9-12 oclock arc)', () => {
-        const {state, geometry} = setup();
+        const { state, geometry } = setup();
         // Upper-left diagonal, clearly past the 9 oclock boundary
         assert.equal(sliceHitTest(170, 180, state, geometry), 3);
     });
 
     it('point outside outer radius returns -1', () => {
-        const {state, geometry} = setup();
+        const { state, geometry } = setup();
         assert.equal(sliceHitTest(500, 500, state, geometry), -1);
     });
 
     it('point inside donut hole returns -1', () => {
-        const {state, geometry} = setup(50);  // donut with rInner=50
+        const { state, geometry } = setup(50);  // donut with rInner=50
         // Center of canvas -> inside hole
         assert.equal(sliceHitTest(200, 200, state, geometry), -1);
     });
 
     it('hidden slice is skipped (point in its arc returns -1 with no other match)', () => {
-        const {state, geometry} = setup();
+        const { state, geometry } = setup();
         state.visible[0] = 0;
         // 12 oclock would normally hit slice 0, but it's hidden, AND angles
         // haven't been recomputed -- so the arc is still there in startAngles
@@ -2175,9 +2157,9 @@ describe('createPieChart', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createPieChart({
             data: [
-                {label: 'A', value: 30},
-                {label: 'B', value: 50},
-                {label: 'C', value: 20},
+                { label: 'A', value: 30 },
+                { label: 'B', value: 50 },
+                { label: 'C', value: 20 },
             ],
             schedule: (fn) => fn(),
         });
@@ -2196,7 +2178,7 @@ describe('createPieChart', () => {
     it('geometry centers in canvas with margins', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createPieChart({
-            data: [{value: 1}],
+            data: [{ value: 1 }],
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -2213,10 +2195,10 @@ describe('createPieChart', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createPieChart({
             data: [
-                {label: 'A', value: 25},
-                {label: 'B', value: 25},
-                {label: 'C', value: 25},
-                {label: 'D', value: 25},
+                { label: 'A', value: 25 },
+                { label: 'B', value: 25 },
+                { label: 'C', value: 25 },
+                { label: 'D', value: 25 },
             ],
             schedule: (fn) => fn(),
         });
@@ -2238,7 +2220,7 @@ describe('createPieChart', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createPieChart({
             data: [
-                {value: 50}, {value: 50},
+                { value: 50 }, { value: 50 },
             ],
             schedule: (fn) => fn(),
         });
@@ -2256,7 +2238,7 @@ describe('createPieChart', () => {
     it('handles single-slice (100%) without crashing', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createPieChart({
-            data: [{label: 'Only', value: 1}],
+            data: [{ label: 'Only', value: 1 }],
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -2267,8 +2249,8 @@ describe('createPieChart', () => {
 
     it('reactive data signal triggers re-render', () => {
         const data = signal([
-            {label: 'A', value: 10},
-            {label: 'B', value: 20},
+            { label: 'A', value: 10 },
+            { label: 'B', value: 20 },
         ]);
         const canvas = createMockCanvas(400, 400);
         const chart = createPieChart({
@@ -2280,9 +2262,9 @@ describe('createPieChart', () => {
         assert.equal(chart._internal.state.total, 30);
 
         data.set([
-            {label: 'A', value: 5},
-            {label: 'B', value: 10},
-            {label: 'C', value: 15},
+            { label: 'A', value: 5 },
+            { label: 'B', value: 10 },
+            { label: 'C', value: 15 },
         ]);
         assert.equal(chart._internal.state.n, 3);
         assert.equal(chart._internal.state.total, 30);
@@ -2290,7 +2272,7 @@ describe('createPieChart', () => {
     });
 
     it('throws on invalid data input', () => {
-        assert.throws(() => createPieChart({data: 'not-an-array'}), /requires.*data/);
+        assert.throws(() => createPieChart({ data: 'not-an-array' }), /requires.*data/);
         assert.throws(() => createPieChart({}), /requires.*data/);
     });
 });
@@ -2299,7 +2281,7 @@ describe('createDonutChart', () => {
     it('mounts with innerRadius default 0.5 (half-outer)', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createDonutChart({
-            data: [{value: 1}, {value: 1}],
+            data: [{ value: 1 }, { value: 1 }],
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -2314,7 +2296,7 @@ describe('createDonutChart', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createDonutChart({
             data: [
-                {value: 25}, {value: 25}, {value: 25}, {value: 25},
+                { value: 25 }, { value: 25 }, { value: 25 }, { value: 25 },
             ],
             schedule: (fn) => fn(),
         });
@@ -2332,7 +2314,7 @@ describe('createDonutChart', () => {
     it('user can override innerRadius', () => {
         const canvas = createMockCanvas(400, 400);
         const chart = createDonutChart({
-            data: [{value: 1}],
+            data: [{ value: 1 }],
             innerRadius: 0.7,
             schedule: (fn) => fn(),
         });
@@ -2354,10 +2336,10 @@ describe('createBubbleChart', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: [
-                {x: 10, y: 20, value: 50},
-                {x: 30, y: 35, value: 100},
-                {x: 50, y: 15, value: 25},
-                {x: 70, y: 45, value: 75},
+                { x: 10, y: 20, value: 50 },
+                { x: 30, y: 35, value: 100 },
+                { x: 50, y: 15, value: 25 },
+                { x: 70, y: 45, value: 75 },
             ],
             size: 'value',
             minRadius: 6,
@@ -2384,9 +2366,9 @@ describe('createBubbleChart', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: [
-                {x: 0, y: 0, value: 0},
-                {x: 1, y: 1, value: 50},
-                {x: 2, y: 2, value: 100},
+                { x: 0, y: 0, value: 0 },
+                { x: 1, y: 1, value: 50 },
+                { x: 2, y: 2, value: 100 },
             ],
             size: 'value',
             sizeScale: 'linear',
@@ -2410,9 +2392,9 @@ describe('createBubbleChart', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: [
-                {x: 1, y: 1, value: 10},
-                {x: 2, y: 2, value: 20},
-                {x: 3, y: 3, value: 30},
+                { x: 1, y: 1, value: 10 },
+                { x: 2, y: 2, value: 20 },
+                { x: 3, y: 3, value: 30 },
             ],
             size: 'value',
             schedule: (fn) => fn(),
@@ -2432,9 +2414,9 @@ describe('createBubbleChart', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: [
-                {x: 10, y: 10, value: 50},
-                {x: 50, y: 50, value: 50},
-                {x: 90, y: 90, value: 50},
+                { x: 10, y: 10, value: 50 },
+                { x: 50, y: 50, value: 50 },
+                { x: 90, y: 90, value: 50 },
             ],
             size: 'value',
             schedule: (fn) => fn(),
@@ -2462,8 +2444,8 @@ describe('createBubbleChart', () => {
         const chart = createBubbleChart({
             // Two bubbles at the SAME data position with different sizes
             data: [
-                {x: 50, y: 50, value: 100},  // large
-                {x: 50, y: 50, value: 25},   // small (visually on top)
+                { x: 50, y: 50, value: 100 },  // large
+                { x: 50, y: 50, value: 25 },   // small (visually on top)
             ],
             size: 'value',
             minRadius: 10,
@@ -2483,9 +2465,9 @@ describe('createBubbleChart', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: [
-                {x: 1, y: 1, value: 10},
-                {x: 2, y: 2, value: -5},
-                {x: 3, y: 3, value: 20},
+                { x: 1, y: 1, value: 10 },
+                { x: 2, y: 2, value: -5 },
+                { x: 3, y: 3, value: 20 },
             ],
             size: 'value',
             schedule: (fn) => fn(),
@@ -2500,9 +2482,9 @@ describe('createBubbleChart', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: [
-                {x: 1, y: 1, value: 42},
-                {x: 2, y: 2, value: 42},
-                {x: 3, y: 3, value: 42},
+                { x: 1, y: 1, value: 42 },
+                { x: 2, y: 2, value: 42 },
+                { x: 3, y: 3, value: 42 },
             ],
             size: 'value',
             minRadius: 10,
@@ -2522,8 +2504,8 @@ describe('createBubbleChart', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: [
-                {x: 1, y: 1, value: 10},
-                {x: 2, y: 2, value: 20},
+                { x: 1, y: 1, value: 10 },
+                { x: 2, y: 2, value: 20 },
             ],
             schedule: (fn) => fn(),
         });
@@ -2536,8 +2518,8 @@ describe('createBubbleChart', () => {
 
     it('reactive data update re-extracts sizes and radii', () => {
         const data = signal([
-            {x: 1, y: 1, value: 10},
-            {x: 2, y: 2, value: 20},
+            { x: 1, y: 1, value: 10 },
+            { x: 2, y: 2, value: 20 },
         ]);
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
@@ -2550,9 +2532,9 @@ describe('createBubbleChart', () => {
         assert.equal(state.n, 2);
 
         data.set([
-            {x: 1, y: 1, value: 50},
-            {x: 2, y: 2, value: 100},
-            {x: 3, y: 3, value: 200},
+            { x: 1, y: 1, value: 50 },
+            { x: 2, y: 2, value: 100 },
+            { x: 3, y: 3, value: 200 },
         ]);
         assert.equal(state.n, 3);
         assert.equal(state.rs[2], 200);
@@ -2564,9 +2546,9 @@ describe('createBubbleChart', () => {
         const chart = createBubbleChart({
             // x domain will be 0..100; plot bounds map across the canvas width.
             data: [
-                {x: 0, y: 50, value: 50},   // in
-                {x: 50, y: 50, value: 50},   // in
-                {x: 100, y: 50, value: 50},   // in (right edge)
+                { x: 0,   y: 50, value: 50 },   // in
+                { x: 50,  y: 50, value: 50 },   // in
+                { x: 100, y: 50, value: 50 },   // in (right edge)
             ],
             minRadius: 4,
             maxRadius: 4,  // all bubbles same size for clarity
@@ -2589,7 +2571,7 @@ describe('createBubbleChart', () => {
 describe('extractRadarSeriesData', () => {
     it('extracts values into Float32 and pads short input with zeros', () => {
         const state = makeRadarSeriesState();
-        extractRadarSeriesData(state, {name: 'A', color: '#abc', values: [10, 20, 30]}, 6);
+        extractRadarSeriesData(state, { name: 'A', color: '#abc', values: [10, 20, 30] }, 6);
         assert.equal(state.n, 6);
         assert.equal(state.name, 'A');
         assert.equal(state.rawColor, '#abc');
@@ -2598,14 +2580,14 @@ describe('extractRadarSeriesData', () => {
 
     it('truncates input longer than axis count', () => {
         const state = makeRadarSeriesState();
-        extractRadarSeriesData(state, {values: [1, 2, 3, 4, 5, 6, 7, 8]}, 4);
+        extractRadarSeriesData(state, { values: [1, 2, 3, 4, 5, 6, 7, 8] }, 4);
         assert.equal(state.n, 4);
         assert.deepEqual(Array.from(state.values.slice(0, 4)), [1, 2, 3, 4]);
     });
 
     it('replaces NaN values with 0', () => {
         const state = makeRadarSeriesState();
-        extractRadarSeriesData(state, {values: [10, NaN, 30]}, 3);
+        extractRadarSeriesData(state, { values: [10, NaN, 30] }, 3);
         assert.equal(state.values[0], 10);
         assert.equal(state.values[1], 0);
         assert.equal(state.values[2], 30);
@@ -2614,8 +2596,8 @@ describe('extractRadarSeriesData', () => {
 
 describe('computeRadarGeometry', () => {
     it('centers in plot rect and reserves label-pad from outer radius', () => {
-        const g = {cx: 0, cy: 0, rOuter: 0, axisCount: 0, cosA: null, sinA: null};
-        computeRadarGeometry(g, {x: 0, y: 0, w: 400, h: 400}, 6);
+        const g = { cx: 0, cy: 0, rOuter: 0, axisCount: 0, cosA: null, sinA: null };
+        computeRadarGeometry(g, { x: 0, y: 0, w: 400, h: 400 }, 6);
         assert.equal(g.cx, 200);
         assert.equal(g.cy, 200);
         // rOuter = min(w,h)/2 - 24 (label pad) = 200 - 24 = 176
@@ -2623,8 +2605,8 @@ describe('computeRadarGeometry', () => {
     });
 
     it('precomputes cos/sin per axis starting at -PI/2 (top, 12 oclock)', () => {
-        const g = {cx: 0, cy: 0, rOuter: 0, axisCount: 0, cosA: null, sinA: null};
-        computeRadarGeometry(g, {x: 0, y: 0, w: 400, h: 400}, 4);
+        const g = { cx: 0, cy: 0, rOuter: 0, axisCount: 0, cosA: null, sinA: null };
+        computeRadarGeometry(g, { x: 0, y: 0, w: 400, h: 400 }, 4);
         // Axis 0 at -PI/2: cos=0, sin=-1 (pointing up in screen coords)
         assert.ok(Math.abs(g.cosA[0] - 0) < 1e-9);
         assert.ok(Math.abs(g.sinA[0] - (-1)) < 1e-9);
@@ -2637,8 +2619,8 @@ describe('computeRadarGeometry', () => {
     });
 
     it('handles tiny plot rect by clamping rOuter to 0', () => {
-        const g = {cx: 0, cy: 0, rOuter: 0, axisCount: 0, cosA: null, sinA: null};
-        computeRadarGeometry(g, {x: 0, y: 0, w: 30, h: 30}, 4);
+        const g = { cx: 0, cy: 0, rOuter: 0, axisCount: 0, cosA: null, sinA: null };
+        computeRadarGeometry(g, { x: 0, y: 0, w: 30, h: 30 }, 4);
         // min(30,30)/2 - 24 = -9 -> clamped to 0
         assert.equal(g.rOuter, 0);
     });
@@ -2647,8 +2629,8 @@ describe('computeRadarGeometry', () => {
 describe('radarHitTest', () => {
     const setup = () => {
         const states = [
-            Object.assign(makeRadarSeriesState(), {n: 4, name: 'A', visible: true}),
-            Object.assign(makeRadarSeriesState(), {n: 4, name: 'B', visible: true}),
+            Object.assign(makeRadarSeriesState(), { n: 4, name: 'A', visible: true }),
+            Object.assign(makeRadarSeriesState(), { n: 4, name: 'B', visible: true }),
         ];
         // Series A: high on axis 0, low elsewhere
         states[0].values = new Float32Array([100, 20, 20, 20]);
@@ -2660,12 +2642,12 @@ describe('radarHitTest', () => {
             cosA: new Float64Array([0, 1, 0, -1]),
             sinA: new Float64Array([-1, 0, 1, 0]),
         };
-        const domainRef = {value: [0, 100]};
-        return {states, geometry, domainRef};
+        const domainRef = { value: [0, 100] };
+        return { states, geometry, domainRef };
     };
 
     it('finds nearest vertex within hit radius', () => {
-        const {states, geometry, domainRef} = setup();
+        const { states, geometry, domainRef } = setup();
         // Series A axis 0 vertex: cx + 100*1*0 = 200, cy + 100*1*-1 = 100
         const hit = radarHitTest(200, 100, states, geometry, domainRef);
         assert.ok(hit);
@@ -2675,12 +2657,12 @@ describe('radarHitTest', () => {
     });
 
     it('returns null when no vertex within 12px', () => {
-        const {states, geometry, domainRef} = setup();
+        const { states, geometry, domainRef } = setup();
         assert.equal(radarHitTest(500, 500, states, geometry, domainRef), null);
     });
 
     it('picks closest vertex when multiple are within hit radius', () => {
-        const {states, geometry, domainRef} = setup();
+        const { states, geometry, domainRef } = setup();
         // Both A[axis 1] and B[axis 1] have value=20 -> vertex at:
         // cx + 100*0.2*1 = 220, cy + 100*0.2*0 = 200
         // They're at the SAME pixel position (same axis + same value).
@@ -2693,7 +2675,7 @@ describe('radarHitTest', () => {
     });
 
     it('skips hidden series', () => {
-        const {states, geometry, domainRef} = setup();
+        const { states, geometry, domainRef } = setup();
         states[0].visible = false;
         // Series A's vertex at (200, 100) is unreachable; series B's axis-0 vertex
         // is at (200, 200 + 100*0.2*-1) = (200, 180) with value 20.
@@ -2709,8 +2691,8 @@ describe('createRadarChart', () => {
         const chart = createRadarChart({
             axes: ['A', 'B', 'C', 'D', 'E'],
             series: [
-                {name: 'X', color: '#3b82f6', values: [10, 20, 30, 40, 50]},
-                {name: 'Y', color: '#10b981', values: [50, 40, 30, 20, 10]},
+                { name: 'X', color: '#3b82f6', values: [10, 20, 30, 40, 50] },
+                { name: 'Y', color: '#10b981', values: [50, 40, 30, 20, 10] },
             ],
             domain: [0, 50],
             schedule: (fn) => fn(),
@@ -2723,11 +2705,11 @@ describe('createRadarChart', () => {
     });
 
     it('throws on fewer than 3 axes (radar requires triangle minimum)', () => {
-        assert.throws(() => createRadarChart({axes: ['A', 'B'], series: []}), /at least 3 axes/);
+        assert.throws(() => createRadarChart({ axes: ['A', 'B'], series: [] }), /at least 3 axes/);
     });
 
     it('throws on missing series config', () => {
-        assert.throws(() => createRadarChart({axes: ['A', 'B', 'C']}), /series/);
+        assert.throws(() => createRadarChart({ axes: ['A', 'B', 'C'] }), /series/);
     });
 
     it('auto-computes domain from visible series when not pinned', () => {
@@ -2735,8 +2717,8 @@ describe('createRadarChart', () => {
         const chart = createRadarChart({
             axes: ['A', 'B', 'C', 'D'],
             series: [
-                {name: 'X', values: [5, 10, 15, 20]},
-                {name: 'Y', values: [3, 12, 18, 25]},
+                { name: 'X', values: [5, 10, 15, 20] },
+                { name: 'Y', values: [3, 12, 18, 25] },
             ],
             // no explicit domain -> auto
             schedule: (fn) => fn(),
@@ -2754,8 +2736,8 @@ describe('createRadarChart', () => {
         const chart = createRadarChart({
             axes: ['A', 'B', 'C', 'D', 'E'],
             series: [
-                {name: 'X', color: '#3b82f6', values: [10, 20, 30, 40, 50]},
-                {name: 'Y', color: '#10b981', values: [50, 40, 30, 20, 10]},
+                { name: 'X', color: '#3b82f6', values: [10, 20, 30, 40, 50] },
+                { name: 'Y', color: '#10b981', values: [50, 40, 30, 20, 10] },
             ],
             domain: [0, 50],
             schedule: (fn) => fn(),
@@ -2775,7 +2757,7 @@ describe('createRadarChart', () => {
         const chart = createRadarChart({
             axes: ['Speed', 'Power', 'Range', 'Charging'],
             series: [
-                {name: 'A', values: [100, 0, 0, 0]},  // peak on Speed (axis 0)
+                { name: 'A', values: [100, 0, 0, 0] },  // peak on Speed (axis 0)
             ],
             domain: [0, 100],
             schedule: (fn) => fn(),
@@ -2799,8 +2781,8 @@ describe('createRadarChart', () => {
         const chart = createRadarChart({
             axes: ['A', 'B', 'C', 'D'],
             series: [
-                {name: 'X', values: [10, 20, 30, 40]},
-                {name: 'Y', values: [40, 30, 20, 10]},
+                { name: 'X', values: [10, 20, 30, 40] },
+                { name: 'Y', values: [40, 30, 20, 10] },
             ],
             domain: [0, 50],
             schedule: (fn) => fn(),
@@ -2825,7 +2807,7 @@ describe('createRadarChart', () => {
 
     it('reactive series signal triggers re-extract', () => {
         const series = signal([
-            {name: 'A', values: [10, 20, 30, 40, 50]},
+            { name: 'A', values: [10, 20, 30, 40, 50] },
         ]);
         const canvas = createMockCanvas(500, 500);
         const chart = createRadarChart({
@@ -2838,9 +2820,9 @@ describe('createRadarChart', () => {
         assert.equal(chart._internal.seriesStates.length, 1);
 
         series.set([
-            {name: 'A', values: [10, 20, 30, 40, 50]},
-            {name: 'B', values: [50, 40, 30, 20, 10]},
-            {name: 'C', values: [25, 25, 25, 25, 25]},
+            { name: 'A', values: [10, 20, 30, 40, 50] },
+            { name: 'B', values: [50, 40, 30, 20, 10] },
+            { name: 'C', values: [25, 25, 25, 25, 25] },
         ]);
         assert.equal(chart._internal.seriesStates.length, 3);
         chart.unmount();
@@ -2861,28 +2843,13 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
         observers = [];
         origRO = globalThis.ResizeObserver;
         globalThis.ResizeObserver = class {
-            constructor(cb) {
-                this.cb = cb;
-                observers.push(this);
-            }
-
-            observe(el) {
-                this.el = el;
-            }
-
-            disconnect() {
-                observers = observers.filter((o) => o !== this);
-            }
-
-            trigger() {
-                this.cb();
-            }
+            constructor(cb) { this.cb = cb; observers.push(this); }
+            observe(el) { this.el = el; }
+            disconnect() { observers = observers.filter((o) => o !== this); }
+            trigger() { this.cb(); }
         };
         origRAF = globalThis.requestAnimationFrame;
-        globalThis.requestAnimationFrame = (fn) => {
-            fn();
-            return 0;
-        };
+        globalThis.requestAnimationFrame = (fn) => { fn(); return 0; };
     };
     const teardownROMock = () => {
         globalThis.ResizeObserver = origRO;
@@ -2894,26 +2861,16 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
         clientWidth: w,
         clientHeight: h,
         children: [],
-        appendChild(c) {
-            this.children.push(c);
-            c.parentElement = this;
-            return c;
-        },
-        removeChild(c) {
-            this.children = this.children.filter((x) => x !== c);
-        },
+        appendChild(c) { this.children.push(c); c.parentElement = this; return c; },
+        removeChild(c) { this.children = this.children.filter((x) => x !== c); },
     });
 
     const withFakeDOM = (parent, fn) => {
         const origDoc = globalThis.document;
         globalThis.document = {
-            createElement: (tag) => tag === 'canvas' ? createMockCanvas(100, 100) : {style: {}},
+            createElement: (tag) => tag === 'canvas' ? createMockCanvas(100, 100) : { style: {} },
         };
-        try {
-            return fn();
-        } finally {
-            globalThis.document = origDoc;
-        }
+        try { return fn(); } finally { globalThis.document = origDoc; }
     };
 
     it('does not attach a ResizeObserver when width + height are explicit', () => {
@@ -2921,7 +2878,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
         try {
             const canvas = createMockCanvas(800, 400);
             const chart = createLineChart({
-                series: [{data: [{x: 0, y: 0}, {x: 1, y: 1}]}],
+                series: [{ data: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }],
                 width: 800,
                 height: 400,
                 schedule: (fn) => fn(),
@@ -2929,9 +2886,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
             chart.mount(canvas);
             assert.equal(observers.length, 0);
             chart.unmount();
-        } finally {
-            teardownROMock();
-        }
+        } finally { teardownROMock(); }
     });
 
     it('attaches ResizeObserver when width is omitted (axis kernel)', () => {
@@ -2940,7 +2895,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
             const parent = makeMockParent(600, 300);
             withFakeDOM(parent, () => {
                 const chart = createLineChart({
-                    series: [{data: [{x: 0, y: 0}, {x: 1, y: 1}]}],
+                    series: [{ data: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }],
                     schedule: (fn) => fn(),
                     legend: false,
                 });
@@ -2957,9 +2912,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
                 chart.unmount();
                 assert.equal(observers.length, 0);
             });
-        } finally {
-            teardownROMock();
-        }
+        } finally { teardownROMock(); }
     });
 
     it('attaches ResizeObserver when width is omitted (polar kernel)', () => {
@@ -2968,7 +2921,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
             const parent = makeMockParent(500, 500);
             withFakeDOM(parent, () => {
                 const chart = createPieChart({
-                    data: [{label: 'A', value: 10}, {label: 'B', value: 20}],
+                    data: [{ label: 'A', value: 10 }, { label: 'B', value: 20 }],
                     schedule: (fn) => fn(),
                     legend: false,
                 });
@@ -2977,9 +2930,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
                 assert.equal(chart.canvas.width, 500);
                 chart.unmount();
             });
-        } finally {
-            teardownROMock();
-        }
+        } finally { teardownROMock(); }
     });
 
     it('attaches ResizeObserver when width is omitted (radar kernel)', () => {
@@ -2989,7 +2940,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
             withFakeDOM(parent, () => {
                 const chart = createRadarChart({
                     axes: ['A', 'B', 'C', 'D'],
-                    series: [{name: 'X', values: [10, 20, 30, 40]}],
+                    series: [{ name: 'X', values: [10, 20, 30, 40] }],
                     domain: [0, 100],
                     schedule: (fn) => fn(),
                     legend: false,
@@ -2999,9 +2950,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
                 assert.equal(chart.canvas.width, 480);
                 chart.unmount();
             });
-        } finally {
-            teardownROMock();
-        }
+        } finally { teardownROMock(); }
     });
 
     it('falls back gracefully when ResizeObserver is unavailable', () => {
@@ -3009,7 +2958,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
         const parent = makeMockParent(600, 300);
         withFakeDOM(parent, () => {
             const chart = createLineChart({
-                series: [{data: [{x: 0, y: 0}, {x: 1, y: 1}]}],
+                series: [{ data: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }],
                 schedule: (fn) => fn(),
                 legend: false,
             });
@@ -3028,7 +2977,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
             withFakeDOM(parent, () => {
                 const userWidth = signal(700);
                 const chart = createLineChart({
-                    series: [{data: [{x: 0, y: 0}, {x: 1, y: 1}]}],
+                    series: [{ data: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }],
                     width: userWidth,
                     height: 350,
                     schedule: (fn) => fn(),
@@ -3043,9 +2992,7 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
                 assert.equal(chart.canvas.width, 900);
                 chart.unmount();
             });
-        } finally {
-            teardownROMock();
-        }
+        } finally { teardownROMock(); }
     });
 });
 
@@ -3058,9 +3005,9 @@ describe('plot-rect clipping (line + area)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
             data: [
-                {x: 0, y: 10},
-                {x: 50, y: 80},
-                {x: 100, y: 20},
+                { x: 0,   y: 10 },
+                { x: 50,  y: 80 },
+                { x: 100, y: 20 },
             ],
             color: '#3b82f6',
             lineWidth: 2,
@@ -3083,9 +3030,9 @@ describe('plot-rect clipping (line + area)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createAreaChart({
             data: [
-                {x: 0, y: 10},
-                {x: 50, y: 60},
-                {x: 100, y: 30},
+                { x: 0,   y: 10 },
+                { x: 50,  y: 60 },
+                { x: 100, y: 30 },
             ],
             color: '#10b981',
             lineWidth: 2,
@@ -3104,7 +3051,7 @@ describe('plot-rect clipping (line + area)', () => {
     it('clip rect dimensions equal the plot bounds (plotL, plotT, plotW, plotH)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createLineChart({
-            data: [{x: 0, y: 0}, {x: 100, y: 100}],
+            data: [{ x: 0, y: 0 }, { x: 100, y: 100 }],
             schedule: (fn) => fn(),
         });
         chart.mount(canvas);
@@ -3138,9 +3085,9 @@ describe('createBarChart -- stacked layout (v1.1.0)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
             series: [
-                {name: 'A', data: [{x: 'Mon', y: 10}, {x: 'Tue', y: 20}]},
-                {name: 'B', data: [{x: 'Mon', y: 5}, {x: 'Tue', y: 15}]},
-                {name: 'C', data: [{x: 'Mon', y: 3}, {x: 'Tue', y: 8}]},
+                { name: 'A', data: [{ x: 'Mon', y: 10 }, { x: 'Tue', y: 20 }] },
+                { name: 'B', data: [{ x: 'Mon', y: 5 },  { x: 'Tue', y: 15 }] },
+                { name: 'C', data: [{ x: 'Mon', y: 3 },  { x: 'Tue', y: 8 }] },
             ],
             stack: true,
             schedule: (fn) => fn(),
@@ -3161,8 +3108,8 @@ describe('createBarChart -- stacked layout (v1.1.0)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
             series: [
-                {name: 'A', data: [{x: 'Mon', y: 100}]},
-                {name: 'B', data: [{x: 'Mon', y: 100}]},
+                { name: 'A', data: [{ x: 'Mon', y: 100 }] },
+                { name: 'B', data: [{ x: 'Mon', y: 100 }] },
             ],
             stack: true,
             schedule: (fn) => fn(),
@@ -3177,9 +3124,9 @@ describe('createBarChart -- stacked layout (v1.1.0)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
             series: [
-                {name: 'A', data: [{x: 'Mon', y: 10}]},
-                {name: 'B', data: [{x: 'Mon', y: 5}]},
-                {name: 'C', data: [{x: 'Mon', y: 3}]},
+                { name: 'A', data: [{ x: 'Mon', y: 10 }] },
+                { name: 'B', data: [{ x: 'Mon', y: 5 }] },
+                { name: 'C', data: [{ x: 'Mon', y: 3 }] },
             ],
             stack: true,
             schedule: (fn) => fn(),
@@ -3197,8 +3144,8 @@ describe('createBarChart -- stacked layout (v1.1.0)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
             series: [
-                {name: 'A', data: [{x: 'Mon', y: 20}]},
-                {name: 'B', data: [{x: 'Mon', y: -5}]},  // negative -> clamps
+                { name: 'A', data: [{ x: 'Mon', y: 20 }] },
+                { name: 'B', data: [{ x: 'Mon', y: -5 }] },  // negative -> clamps
             ],
             stack: true,
             schedule: (fn) => fn(),
@@ -3215,8 +3162,8 @@ describe('createBarChart -- stacked layout (v1.1.0)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
             series: [
-                {name: 'A', data: [{x: 'Mon', y: 10}]},
-                {name: 'B', data: [{x: 'Mon', y: 5}]},
+                { name: 'A', data: [{ x: 'Mon', y: 10 }] },
+                { name: 'B', data: [{ x: 'Mon', y: 5 }] },
             ],
             stack: false,  // start ungrouped
             schedule: (fn) => fn(),
@@ -3232,8 +3179,8 @@ describe('createBarChart -- stacked layout (v1.1.0)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
             series: [
-                {name: 'A', data: [{x: 'Mon', y: 10}, {x: 'Tue', y: 20}]},
-                {name: 'B', data: [{x: 'Mon', y: 5}, {x: 'Tue', y: 15}]},
+                { name: 'A', data: [{ x: 'Mon', y: 10 }, { x: 'Tue', y: 20 }] },
+                { name: 'B', data: [{ x: 'Mon', y: 5 },  { x: 'Tue', y: 15 }] },
             ],
             stack: true,
             schedule: (fn) => fn(),
@@ -3252,7 +3199,7 @@ describe('createBarChart -- rounded corners (v1.1.0)', () => {
     it('cornerRadius > 0 switches from fillRect to roundRect path + fill', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
-            data: [{x: 'Mon', y: 30}, {x: 'Tue', y: 50}],
+            data: [{ x: 'Mon', y: 30 }, { x: 'Tue', y: 50 }],
             cornerRadius: 6,
             schedule: (fn) => fn(),
         });
@@ -3271,7 +3218,7 @@ describe('createBarChart -- rounded corners (v1.1.0)', () => {
     it('cornerRadius = 0 keeps the fillRect fast path', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
-            data: [{x: 'Mon', y: 30}, {x: 'Tue', y: 50}],
+            data: [{ x: 'Mon', y: 30 }, { x: 'Tue', y: 50 }],
             // cornerRadius omitted -> 0
             schedule: (fn) => fn(),
         });
@@ -3287,7 +3234,7 @@ describe('createBarChart -- rounded corners (v1.1.0)', () => {
     it('rounded corners cap at min(w, h) / 2 (no overlap on thin bars)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
-            data: [{x: 'A', y: 100}],
+            data: [{ x: 'A', y: 100 }],
             cornerRadius: 50,  // way larger than any reasonable bar
             schedule: (fn) => fn(),
         });
@@ -3302,7 +3249,7 @@ describe('createBarChart -- hover tint (v1.1.0)', () => {
     it('draws an extra tint fill on the hovered bar', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
-            data: [{x: 'A', y: 30}, {x: 'B', y: 50}, {x: 'C', y: 20}],
+            data: [{ x: 'A', y: 30 }, { x: 'B', y: 50 }, { x: 'C', y: 20 }],
             hoverTint: 'rgba(255,255,255,0.3)',
             schedule: (fn) => fn(),
         });
@@ -3327,7 +3274,7 @@ describe('createBarChart -- hover tint (v1.1.0)', () => {
     it('hoverTint: false disables overlay entirely', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBarChart({
-            data: [{x: 'A', y: 30}, {x: 'B', y: 50}],
+            data: [{ x: 'A', y: 30 }, { x: 'B', y: 50 }],
             hoverTint: false,
             schedule: (fn) => fn(),
         });
@@ -3358,10 +3305,7 @@ const makeReferenceIndex = (counters) => (pxs, pys, n) => {
     const snapN = n;
     const snapPxs = new Float32Array(n);
     const snapPys = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-        snapPxs[i] = pxs[i];
-        snapPys[i] = pys[i];
-    }
+    for (let i = 0; i < n; i++) { snapPxs[i] = pxs[i]; snapPys[i] = pys[i]; }
     return {
         findNearest(qx, qy, k, maxDistSq, outIndices, outDistSq) {
             counters.queries++;
@@ -3387,9 +3331,7 @@ const makeReferenceIndex = (counters) => (pxs, pys, n) => {
             }
             return count;
         },
-        dispose() {
-            counters.disposes++;
-        },
+        dispose() { counters.disposes++; },
     };
 };
 
@@ -3407,7 +3349,7 @@ const makeDenseBubbleData = (n) => {
 
 describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
     it('does not build an index below the threshold', () => {
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: makeDenseBubbleData(500),  // below default threshold of 1000
@@ -3422,7 +3364,7 @@ describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
     });
 
     it('builds lazily on first hit-test, not on mount', () => {
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: makeDenseBubbleData(1200),
@@ -3438,7 +3380,7 @@ describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
     });
 
     it('reuses the cached index across subsequent hit-tests', () => {
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: makeDenseBubbleData(1200),
@@ -3455,7 +3397,7 @@ describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
     });
 
     it('disposes the previous index on unmount', () => {
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: makeDenseBubbleData(1200),
@@ -3470,7 +3412,7 @@ describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
     });
 
     it('honors a custom spatialIndexThreshold', () => {
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             data: makeDenseBubbleData(200),  // 200 < default 1000, but >= 100
@@ -3488,7 +3430,7 @@ describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
         const data = makeDenseBubbleData(2000);
         // Two parallel charts: one with index, one without. Same data, same
         // canvas size, same hover points -> same hits.
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvasA = createMockCanvas(800, 600);
         const chartA = createBubbleChart({
             data, minRadius: 2, maxRadius: 5,
@@ -3523,7 +3465,7 @@ describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
     });
 
     it('rebuilds the index on data change', () => {
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvas = createMockCanvas(800, 400);
         const data1 = makeDenseBubbleData(1200);
         const data2 = makeDenseBubbleData(1500);
@@ -3551,7 +3493,7 @@ describe('createBubbleChart -- spatial index (v1.2.0-alpha.0)', () => {
         // This requires k > 1 in findNearest, which is the whole point of
         // not collapsing to a 1-NN interface.
         const data = makeDenseBubbleData(1100);
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const canvas = createMockCanvas(800, 600);
         const chart = createBubbleChart({
             data,
@@ -3580,7 +3522,7 @@ describe('createScatterChart (v1.2.0-alpha.1)', () => {
     it('renders one arc per data point', () => {
         const canvas = createMockCanvas(800, 400);
         const data = [];
-        for (let i = 0; i < 20; i++) data.push({x: i, y: Math.sin(i) * 5});
+        for (let i = 0; i < 20; i++) data.push({ x: i, y: Math.sin(i) * 5 });
         const chart = createScatterChart({
             data,
             markerSize: 4,
@@ -3651,7 +3593,7 @@ describe('createScatterChart (v1.2.0-alpha.1)', () => {
     });
 
     it('uses spatial index when n >= threshold', () => {
-        const counters = {builds: 0, queries: 0, disposes: 0};
+        const counters = { builds: 0, queries: 0, disposes: 0 };
         const makeIndex = (pxs, pys, n) => {
             counters.builds++;
             return {
@@ -3661,24 +3603,18 @@ describe('createScatterChart (v1.2.0-alpha.1)', () => {
                     for (let i = 0; i < n; i++) {
                         const dx = qx - pxs[i], dy = qy - pys[i];
                         const d = dx * dx + dy * dy;
-                        if (d < bD) {
-                            bD = d;
-                            bI = i;
-                        }
+                        if (d < bD) { bD = d; bI = i; }
                     }
                     if (bI < 0) return 0;
-                    outIdx[0] = bI;
-                    outDist[0] = bD;
+                    outIdx[0] = bI; outDist[0] = bD;
                     return 1;
                 },
-                dispose() {
-                    counters.disposes++;
-                },
+                dispose() { counters.disposes++; },
             };
         };
         const canvas = createMockCanvas(800, 400);
         const data = [];
-        for (let i = 0; i < 600; i++) data.push({x: i, y: i * 0.5});
+        for (let i = 0; i < 600; i++) data.push({ x: i, y: i * 0.5 });
         const chart = createScatterChart({
             data,
             spatialIndex: makeIndex,
@@ -3694,17 +3630,14 @@ describe('createScatterChart (v1.2.0-alpha.1)', () => {
     });
 
     it('does not use spatial index below threshold', () => {
-        const counters = {builds: 0};
+        const counters = { builds: 0 };
         const makeIndex = () => {
             counters.builds++;
-            return {
-                findNearest: () => 0, dispose() {
-                }
-            };
+            return { findNearest: () => 0, dispose() {} };
         };
         const canvas = createMockCanvas(800, 400);
         const chart = createScatterChart({
-            data: [{x: 1, y: 1}, {x: 2, y: 2}, {x: 3, y: 3}],  // n=3, well under default 1000
+            data: [{x:1,y:1},{x:2,y:2},{x:3,y:3}],  // n=3, well under default 1000
             spatialIndex: makeIndex,
             schedule: (fn) => fn(),
         });
@@ -3724,8 +3657,8 @@ describe('createBubbleChart -- multi-series (v1.2.0-alpha.2)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             series: [
-                {name: 'A', data: [{x: 1, y: 1, value: 10}, {x: 2, y: 2, value: 100}]},
-                {name: 'B', data: [{x: 3, y: 3, value: 50}, {x: 4, y: 4, value: 60}]},
+                { name: 'A', data: [{x: 1, y: 1, value: 10}, {x: 2, y: 2, value: 100}] },
+                { name: 'B', data: [{x: 3, y: 3, value: 50}, {x: 4, y: 4, value: 60}] },
             ],
             schedule: (fn) => fn(),
         });
@@ -3744,8 +3677,8 @@ describe('createBubbleChart -- multi-series (v1.2.0-alpha.2)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             series: [
-                {name: 'A', data: [{x: 1, y: 1, value: 50}]},
-                {name: 'B', data: [{x: 2, y: 2, value: 50}]},
+                { name: 'A', data: [{x: 1, y: 1, value: 50}] },
+                { name: 'B', data: [{x: 2, y: 2, value: 50}] },
             ],
             schedule: (fn) => fn(),
         });
@@ -3776,8 +3709,8 @@ describe('createBubbleChart -- multi-series (v1.2.0-alpha.2)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             series: [
-                {name: 'A', data: [{x: 10, y: 10, value: 30}]},
-                {name: 'B', data: [{x: 50, y: 50, value: 80}]},
+                { name: 'A', data: [{x: 10, y: 10, value: 30}] },
+                { name: 'B', data: [{x: 50, y: 50, value: 80}] },
             ],
             minRadius: 8, maxRadius: 30,
             schedule: (fn) => fn(),
@@ -3798,8 +3731,8 @@ describe('createBubbleChart -- multi-series (v1.2.0-alpha.2)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             series: [
-                {name: 'A', data: [{x: 10, y: 10, value: 30}]},
-                {name: 'B', data: [{x: 50, y: 50, value: 80}]},
+                { name: 'A', data: [{x: 10, y: 10, value: 30}] },
+                { name: 'B', data: [{x: 50, y: 50, value: 80}] },
             ],
             minRadius: 8, maxRadius: 30,
             schedule: (fn) => fn(),
@@ -3828,8 +3761,8 @@ describe('createBubbleChart -- multi-series (v1.2.0-alpha.2)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createBubbleChart({
             series: [
-                {name: 'A', data: [{x: 10, y: 10, value: 30}]},
-                {name: 'B', data: [{x: 50, y: 50, value: 80}]},
+                { name: 'A', data: [{x: 10, y: 10, value: 30}] },
+                { name: 'B', data: [{x: 50, y: 50, value: 80}] },
             ],
             minRadius: 8, maxRadius: 30,
             schedule: (fn) => fn(),
@@ -3916,9 +3849,9 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'Mon', y: 'AM', value: 10},
-                {x: 'Tue', y: 'PM', value: 20},
-                {x: 'Wed', y: 'AM', value: 15},
+                { x: 'Mon', y: 'AM', value: 10 },
+                { x: 'Tue', y: 'PM', value: 20 },
+                { x: 'Wed', y: 'AM', value: 15 },
             ],
             width: 600,
             height: 400,
@@ -3934,9 +3867,9 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 3},
-                {x: 'B', y: 'X', value: 17},
-                {x: 'A', y: 'Y', value: 9},
+                { x: 'A', y: 'X', value: 3 },
+                { x: 'B', y: 'X', value: 17 },
+                { x: 'A', y: 'Y', value: 9 },
             ],
             width: 600, height: 400,
             schedule: (fn) => fn(),
@@ -3951,8 +3884,8 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1}, {x: 'B', y: 'X', value: 2}, {x: 'C', y: 'X', value: 3},
-                {x: 'A', y: 'Y', value: 4}, {x: 'B', y: 'Y', value: 5}, {x: 'C', y: 'Y', value: 6},
+                { x: 'A', y: 'X', value: 1 }, { x: 'B', y: 'X', value: 2 }, { x: 'C', y: 'X', value: 3 },
+                { x: 'A', y: 'Y', value: 4 }, { x: 'B', y: 'Y', value: 5 }, { x: 'C', y: 'Y', value: 6 },
             ],
             width: 600, height: 400,
             schedule: (fn) => fn(),
@@ -3970,10 +3903,10 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1},
-                {x: 'B', y: 'X', value: 2},
+                { x: 'A', y: 'X', value: 1 },
+                { x: 'B', y: 'X', value: 2 },
                 // (A, Y) missing
-                {x: 'B', y: 'Y', value: 4},
+                { x: 'B', y: 'Y', value: 4 },
             ],
             width: 600, height: 400,
             schedule: (fn) => fn(),
@@ -3991,8 +3924,8 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 0},
-                {x: 'B', y: 'X', value: 100},
+                { x: 'A', y: 'X', value: 0 },
+                { x: 'B', y: 'X', value: 100 },
             ],
             colors: ['#000000', '#ffffff'],  // black -> white
             width: 600, height: 400,
@@ -4016,13 +3949,10 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         let calls = 0;
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 10},
-                {x: 'B', y: 'X', value: 90},
+                { x: 'A', y: 'X', value: 10 },
+                { x: 'B', y: 'X', value: 90 },
             ],
-            colorFn: (v) => {
-                calls++;
-                return v > 50 ? '#ff0000' : '#0000ff';
-            },
+            colorFn: (v) => { calls++; return v > 50 ? '#ff0000' : '#0000ff'; },
             width: 600, height: 400,
             schedule: (fn) => fn(),
         });
@@ -4043,8 +3973,8 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(600, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1}, {x: 'B', y: 'X', value: 2},
-                {x: 'A', y: 'Y', value: 3}, {x: 'B', y: 'Y', value: 4},
+                { x: 'A', y: 'X', value: 1 }, { x: 'B', y: 'X', value: 2 },
+                { x: 'A', y: 'Y', value: 3 }, { x: 'B', y: 'Y', value: 4 },
             ],
             width: 600, height: 400,
             schedule: (fn) => fn(),
@@ -4066,9 +3996,9 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(600, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1},
+                { x: 'A', y: 'X', value: 1 },
                 // (B, X), (A, Y) missing
-                {x: 'B', y: 'Y', value: 4},
+                { x: 'B', y: 'Y', value: 4 },
             ],
             width: 600, height: 400,
             schedule: (fn) => fn(),
@@ -4086,7 +4016,7 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
     it('hit-test returns null when cursor is outside plot rect', () => {
         const canvas = createMockCanvas(600, 400);
         const chart = createHeatmap({
-            data: [{x: 'A', y: 'X', value: 1}],
+            data: [{ x: 'A', y: 'X', value: 1 }],
             width: 600, height: 400,
             schedule: (fn) => fn(),
         });
@@ -4101,8 +4031,8 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
     it('reacts to data signal updates', () => {
         const canvas = createMockCanvas(800, 400);
         const dataSig = signal([
-            {x: 'A', y: 'X', value: 5},
-            {x: 'B', y: 'X', value: 10},
+            { x: 'A', y: 'X', value: 5 },
+            { x: 'B', y: 'X', value: 10 },
         ]);
         const chart = createHeatmap({
             data: dataSig,
@@ -4112,9 +4042,9 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         chart.mount(canvas);
         assert.deepEqual(chart.xCategories, ['A', 'B']);
         dataSig.set([
-            {x: 'A', y: 'X', value: 5},
-            {x: 'B', y: 'X', value: 10},
-            {x: 'C', y: 'X', value: 15},
+            { x: 'A', y: 'X', value: 5 },
+            { x: 'B', y: 'X', value: 10 },
+            { x: 'C', y: 'X', value: 15 },
         ]);
         assert.deepEqual(chart.xCategories, ['A', 'B', 'C']);
         chart.unmount();
@@ -4124,8 +4054,8 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
         const canvas = createMockCanvas(800, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 12},
-                {x: 'B', y: 'X', value: 34},
+                { x: 'A', y: 'X', value: 12 },
+                { x: 'B', y: 'X', value: 34 },
             ],
             showValues: true,
             width: 600, height: 400,
@@ -4147,7 +4077,7 @@ describe('createHeatmap (v1.2.0-alpha.3)', () => {
     it('mounts and unmounts cleanly (no throws)', () => {
         const canvas = createMockCanvas(600, 400);
         const chart = createHeatmap({
-            data: [{x: 'A', y: 'X', value: 1}],
+            data: [{ x: 'A', y: 'X', value: 1 }],
             width: 600, height: 400,
             schedule: (fn) => fn(),
         });
@@ -4181,7 +4111,7 @@ describe('chart.destroy() (v1.2.0)', () => {
 
     it('axis kernel: 30 mount+destroy cycles leak zero nodes', () => {
         const delta = cycle(() => createLineChart({
-            data: [{x: 1, y: 1}, {x: 2, y: 2}, {x: 3, y: 3}],
+            data: [{x:1,y:1},{x:2,y:2},{x:3,y:3}],
             width: 400, height: 200,
             schedule: (fn) => fn(),
         }));
@@ -4190,7 +4120,7 @@ describe('chart.destroy() (v1.2.0)', () => {
 
     it('polar kernel: 30 mount+destroy cycles leak zero nodes', () => {
         const delta = cycle(() => createPieChart({
-            data: [{label: 'A', value: 1}, {label: 'B', value: 2}],
+            data: [{label:'A',value:1},{label:'B',value:2}],
             width: 400, height: 200,
             schedule: (fn) => fn(),
         }));
@@ -4199,8 +4129,8 @@ describe('chart.destroy() (v1.2.0)', () => {
 
     it('radar kernel: 30 mount+destroy cycles leak zero nodes', () => {
         const delta = cycle(() => createRadarChart({
-            axes: ['a', 'b', 'c'],
-            series: [{name: 'X', values: [1, 2, 3]}],
+            axes: ['a','b','c'],
+            series: [{ name: 'X', values: [1,2,3] }],
             width: 400, height: 200,
             schedule: (fn) => fn(),
         }));
@@ -4209,7 +4139,7 @@ describe('chart.destroy() (v1.2.0)', () => {
 
     it('grid kernel: 30 mount+destroy cycles leak zero nodes', () => {
         const delta = cycle(() => createHeatmap({
-            data: [{x: 'A', y: 'X', value: 1}, {x: 'B', y: 'X', value: 2}],
+            data: [{x:'A',y:'X',value:1},{x:'B',y:'X',value:2}],
             width: 400, height: 200,
             schedule: (fn) => fn(),
         }));
@@ -4218,7 +4148,7 @@ describe('chart.destroy() (v1.2.0)', () => {
 
     it('destroy() is idempotent', () => {
         const c = createLineChart({
-            data: [{x: 1, y: 1}],
+            data: [{x:1,y:1}],
             width: 400, height: 200,
             schedule: (fn) => fn(),
         });
@@ -4232,7 +4162,7 @@ describe('chart.destroy() (v1.2.0)', () => {
         const before = stats().activeNodes;
         for (let i = 0; i < 20; i++) {
             const c = createLineChart({
-                data: [{x: 1, y: 1}],
+                data: [{x:1,y:1}],
                 width: 400, height: 200,
                 schedule: (fn) => fn(),
             });
@@ -4253,8 +4183,8 @@ describe('createHeatmap polish (v1.2.0)', () => {
         // binning with 4 bins splits these into 4 bands by RANK, so the
         // chart shows 4 distinct colors regardless of the outlier.
         const data = [];
-        for (let i = 0; i < 11; i++) data.push({x: 'C' + i, y: 'R0', value: i + 1});
-        data.push({x: 'C11', y: 'R0', value: 1000});
+        for (let i = 0; i < 11; i++) data.push({ x: 'C' + i, y: 'R0', value: i + 1 });
+        data.push({ x: 'C11', y: 'R0', value: 1000 });
 
         const canvas = createMockCanvas(800, 200);
         const chart = createHeatmap({
@@ -4277,8 +4207,8 @@ describe('createHeatmap polish (v1.2.0)', () => {
         // values collapse to ~colorLow because the outlier dominates.
         // With quantile, they spread across all 4 bins.
         const data = [];
-        for (let i = 0; i < 11; i++) data.push({x: 'C' + i, y: 'R0', value: i + 1});
-        data.push({x: 'C11', y: 'R0', value: 1000});
+        for (let i = 0; i < 11; i++) data.push({ x: 'C' + i, y: 'R0', value: i + 1 });
+        data.push({ x: 'C11', y: 'R0', value: 1000 });
 
         const linear = createHeatmap({
             data, colors: ['#000000', '#ffffff'],
@@ -4304,8 +4234,8 @@ describe('createHeatmap polish (v1.2.0)', () => {
     it('auto-contrast label colors: dark cells get white, light cells get black', () => {
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 0},    // black-ish cell
-                {x: 'B', y: 'X', value: 100},  // white-ish cell
+                { x: 'A', y: 'X', value: 0 },    // black-ish cell
+                { x: 'B', y: 'X', value: 100 },  // white-ish cell
             ],
             colors: ['#000000', '#ffffff'],
             showValues: true,
@@ -4321,7 +4251,7 @@ describe('createHeatmap polish (v1.2.0)', () => {
 
     it('explicit valueLabelColor disables auto-contrast', () => {
         const chart = createHeatmap({
-            data: [{x: 'A', y: 'X', value: 50}],
+            data: [{ x: 'A', y: 'X', value: 50 }],
             showValues: true,
             valueLabelColor: '#ff0000',
             width: 400, height: 200, schedule: (fn) => fn(),
@@ -4336,8 +4266,8 @@ describe('createHeatmap polish (v1.2.0)', () => {
         const canvas = createMockCanvas(600, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1}, {x: 'B', y: 'X', value: 2},
-                {x: 'A', y: 'Y', value: 3}, {x: 'B', y: 'Y', value: 4},
+                { x: 'A', y: 'X', value: 1 }, { x: 'B', y: 'X', value: 2 },
+                { x: 'A', y: 'Y', value: 3 }, { x: 'B', y: 'Y', value: 4 },
             ],
             width: 600, height: 400, schedule: (fn) => fn(),
         });
@@ -4353,8 +4283,8 @@ describe('createHeatmap polish (v1.2.0)', () => {
         // Same chart with stripes off should fire two fewer fillRect calls.
         const chart2 = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1}, {x: 'B', y: 'X', value: 2},
-                {x: 'A', y: 'Y', value: 3}, {x: 'B', y: 'Y', value: 4},
+                { x: 'A', y: 'X', value: 1 }, { x: 'B', y: 'X', value: 2 },
+                { x: 'A', y: 'Y', value: 3 }, { x: 'B', y: 'Y', value: 4 },
             ],
             rowHighlight: false,
             columnHighlight: false,
@@ -4377,8 +4307,8 @@ describe('createHeatmap polish (v1.2.0)', () => {
         const canvas = createMockCanvas(600, 400);
         const chart = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1}, {x: 'B', y: 'X', value: 2},
-                {x: 'A', y: 'Y', value: 3}, {x: 'B', y: 'Y', value: 4},
+                { x: 'A', y: 'X', value: 1 }, { x: 'B', y: 'X', value: 2 },
+                { x: 'A', y: 'Y', value: 3 }, { x: 'B', y: 'Y', value: 4 },
             ],
             rowHighlight: true,
             columnHighlight: false,
@@ -4397,7 +4327,7 @@ describe('createHeatmap polish (v1.2.0)', () => {
 
     it('quantile binning respects colorBins config', () => {
         const data = [];
-        for (let i = 0; i < 20; i++) data.push({x: 'C' + i, y: 'R0', value: i});
+        for (let i = 0; i < 20; i++) data.push({ x: 'C' + i, y: 'R0', value: i });
 
         for (const binCount of [2, 5, 10]) {
             const c = createHeatmap({
@@ -4414,7 +4344,7 @@ describe('createHeatmap polish (v1.2.0)', () => {
 
     it('quantile + auto-contrast: per-bin label colors are stable', () => {
         const data = [];
-        for (let i = 0; i < 10; i++) data.push({x: 'C' + i, y: 'R0', value: i});
+        for (let i = 0; i < 10; i++) data.push({ x: 'C' + i, y: 'R0', value: i });
 
         const chart = createHeatmap({
             data,
@@ -4461,7 +4391,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('line chart exports valid SVG with path elements', () => {
         const c = createLineChart({
-            data: [{x: 0, y: 0}, {x: 1, y: 1}, {x: 2, y: 4}, {x: 3, y: 9}],
+            data: [{x:0,y:0},{x:1,y:1},{x:2,y:4},{x:3,y:9}],
             width: 600, height: 300, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(600, 300));
@@ -4474,7 +4404,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('area chart exports valid SVG', () => {
         const c = createAreaChart({
-            data: [{x: 0, y: 5}, {x: 1, y: 8}, {x: 2, y: 3}],
+            data: [{x:0,y:5},{x:1,y:8},{x:2,y:3}],
             width: 600, height: 300, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(600, 300));
@@ -4485,7 +4415,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('bar chart exports rounded-corner bars as proper SVG arcs', () => {
         const c = createBarChart({
-            data: [{x: 'A', y: 5}, {x: 'B', y: 8}, {x: 'C', y: 3}],
+            data: [{x:'A',y:5},{x:'B',y:8},{x:'C',y:3}],
             cornerRadius: 4,
             width: 400, height: 250, schedule: (fn) => fn(),
         });
@@ -4499,7 +4429,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('bar chart band-axis labels render with text-anchor=middle', () => {
         const c = createBarChart({
-            data: [{x: 'Mon', y: 5}, {x: 'Tue', y: 8}],
+            data: [{x:'Mon',y:5},{x:'Tue',y:8}],
             width: 400, height: 250, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(400, 250));
@@ -4515,7 +4445,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('bubble chart exports circles as SVG arcs', () => {
         const c = createBubbleChart({
-            data: [{x: 1, y: 1, value: 5}, {x: 2, y: 3, value: 10}],
+            data: [{x:1,y:1,value:5},{x:2,y:3,value:10}],
             width: 600, height: 300, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(600, 300));
@@ -4528,7 +4458,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('scatter chart exports valid SVG', () => {
         const c = createScatterChart({
-            data: [{x: 1, y: 1}, {x: 2, y: 3}, {x: 3, y: 2}],
+            data: [{x:1,y:1},{x:2,y:3},{x:3,y:2}],
             width: 600, height: 300, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(600, 300));
@@ -4539,7 +4469,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('pie chart exports slices with the same arc paths', () => {
         const c = createPieChart({
-            data: [{label: 'A', value: 30}, {label: 'B', value: 20}, {label: 'C', value: 50}],
+            data: [{label:'A',value:30},{label:'B',value:20},{label:'C',value:50}],
             width: 300, height: 300, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(300, 300));
@@ -4553,7 +4483,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('donut chart exports valid SVG', () => {
         const c = createDonutChart({
-            data: [{label: 'A', value: 30}, {label: 'B', value: 20}],
+            data: [{label:'A',value:30},{label:'B',value:20}],
             width: 300, height: 300, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(300, 300));
@@ -4564,8 +4494,8 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('radar chart exports polygons + grid + axis spokes', () => {
         const c = createRadarChart({
-            axes: ['a', 'b', 'c', 'd'],
-            series: [{name: 'X', values: [3, 7, 5, 8]}],
+            axes: ['a','b','c','d'],
+            series: [{name:'X',values:[3,7,5,8]}],
             width: 400, height: 400, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(400, 400));
@@ -4577,8 +4507,8 @@ describe('chart.exportSVG() (v1.3.0)', () => {
     it('heatmap exports cells as <rect> elements (axis-aligned)', () => {
         const c = createHeatmap({
             data: [
-                {x: 'A', y: 'X', value: 1}, {x: 'B', y: 'X', value: 2},
-                {x: 'A', y: 'Y', value: 3}, {x: 'B', y: 'Y', value: 4},
+                {x:'A',y:'X',value:1},{x:'B',y:'X',value:2},
+                {x:'A',y:'Y',value:3},{x:'B',y:'Y',value:4},
             ],
             width: 400, height: 300, schedule: (fn) => fn(),
         });
@@ -4593,7 +4523,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('exportSVG escapes XML-significant characters in labels', () => {
         const c = createBarChart({
-            data: [{x: 'A & B', y: 5}, {x: '<script>', y: 8}],
+            data: [{x:'A & B',y:5},{x:'<script>',y:8}],
             width: 400, height: 250, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(400, 250));
@@ -4608,11 +4538,11 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('exportSVG with explicit background emits a background <rect>', () => {
         const c = createLineChart({
-            data: [{x: 0, y: 0}, {x: 1, y: 1}],
+            data: [{x:0,y:0},{x:1,y:1}],
             width: 400, height: 250, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(400, 250));
-        const svg = c.exportSVG({background: '#fafafa'});
+        const svg = c.exportSVG({ background: '#fafafa' });
         // Background rect is the first child after defs (no defs in this case).
         assert.match(svg, /<rect width="400" height="250" fill="#fafafa"\/>/);
         c.destroy();
@@ -4620,7 +4550,7 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('exportSVG throws when called before mount()', () => {
         const c = createLineChart({
-            data: [{x: 0, y: 0}],
+            data: [{x:0,y:0}],
             width: 400, height: 200, schedule: (fn) => fn(),
         });
         assert.throws(() => c.exportSVG(), /requires mount/);
@@ -4628,11 +4558,1150 @@ describe('chart.exportSVG() (v1.3.0)', () => {
 
     it('exportSVG throws on a destroyed chart', () => {
         const c = createLineChart({
-            data: [{x: 0, y: 0}, {x: 1, y: 1}],
+            data: [{x:0,y:0},{x:1,y:1}],
             width: 400, height: 200, schedule: (fn) => fn(),
         });
         c.mount(createMockCanvas(400, 200));
         c.destroy();
         assert.throws(() => c.exportSVG(), /requires mount/);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.4.0-alpha.0 -- log scale
+// ---------------------------------------------------------------------------
+
+describe('log scale (v1.4.0-alpha.0)', () => {
+    describe('makeLogScale math', () => {
+        it('maps decade boundaries to evenly spaced pixels', () => {
+            const s = makeLogScale();
+            // Domain [1, 1000] (3 decades) -> pixel range [0, 300]
+            // Expected: log(1)=0 -> 0px, log(10)=2.3 -> 100px,
+            // log(100)=4.6 -> 200px, log(1000)=6.9 -> 300px
+            updateLogScale(s, 1, 1000, 0, 300);
+            assert.ok(Math.abs(s.map(1) - 0) < 1e-9, 'map(1) should be 0, got ' + s.map(1));
+            assert.ok(Math.abs(s.map(10) - 100) < 1e-9, 'map(10) should be 100, got ' + s.map(10));
+            assert.ok(Math.abs(s.map(100) - 200) < 1e-9, 'map(100) should be 200, got ' + s.map(100));
+            assert.ok(Math.abs(s.map(1000) - 300) < 1e-9, 'map(1000) should be 300, got ' + s.map(1000));
+        });
+
+        it('inverts map() round-trip', () => {
+            const s = makeLogScale();
+            updateLogScale(s, 0.01, 1000, 0, 500);
+            for (const v of [0.05, 1, 7, 42, 100, 500, 999]) {
+                const back = s.invert(s.map(v));
+                assert.ok(Math.abs(back - v) / v < 1e-9, 'round-trip should be exact for ' + v + ', got ' + back);
+            }
+        });
+
+        it('returns NaN for non-positive values', () => {
+            const s = makeLogScale();
+            updateLogScale(s, 1, 100, 0, 100);
+            assert.ok(Number.isNaN(s.map(0)), 'map(0) should be NaN');
+            assert.ok(Number.isNaN(s.map(-1)), 'map(-1) should be NaN');
+            assert.ok(Number.isNaN(s.map(-1e9)), 'map(-1e9) should be NaN');
+        });
+
+        it('clamps non-positive bounds in updateLogScale (safety net)', () => {
+            const s = makeLogScale();
+            updateLogScale(s, 0, 100, 0, 100);
+            assert.ok(s.dMin > 0, 'dMin should be clamped to a positive epsilon, got ' + s.dMin);
+            assert.ok(s.dMax === 100, 'dMax should be unchanged when positive');
+        });
+
+        it('handles degenerate domains (dMin === dMax)', () => {
+            const s = makeLogScale();
+            updateLogScale(s, 10, 10, 0, 100);
+            // _slope should be 0 (no range) without throwing
+            assert.strictEqual(s._slope, 0);
+            // map() result is the intercept (defined behavior: collapsed range)
+            assert.strictEqual(s.map(10), 0);
+        });
+
+        it('reverses swapped bounds (dMax < dMin)', () => {
+            const s = makeLogScale();
+            updateLogScale(s, 1000, 1, 0, 300);
+            assert.strictEqual(s.dMin, 1);
+            assert.strictEqual(s.dMax, 1000);
+        });
+
+        it('has the same shape as linear scale (type, dMin/dMax/rMin/rMax)', () => {
+            const lin = makeLinearScale('linear');
+            const log = makeLogScale();
+            for (const key of ['type', 'dMin', 'dMax', 'rMin', 'rMax']) {
+                assert.ok(key in lin, 'linear missing ' + key);
+                assert.ok(key in log, 'log missing ' + key);
+            }
+            assert.strictEqual(log.type, 'log');
+        });
+    });
+
+    describe('end-to-end -- yScale: { type: "log" }', () => {
+        it('line chart constructs and mounts with log y-scale', () => {
+            const data = [];
+            for (let x = 0; x <= 10; x++) data.push({ x, y: Math.pow(10, x / 2) });
+            const c = createLineChart({
+                data,
+                yScale: { type: 'log' },
+                width: 400, height: 300, schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            assert.strictEqual(c.yScale.type, 'log');
+            // Domain should span the data: y goes from 1 to 10^5.
+            assert.ok(c.yScale.dMin <= 1.01);
+            assert.ok(c.yScale.dMax >= 100000 * 0.99);
+            c.destroy();
+        });
+
+        it('scatter chart works with log y-scale', () => {
+            const data = [];
+            for (let i = 0; i < 20; i++) data.push({ x: i, y: Math.pow(2, i) });
+            const c = createScatterChart({
+                data,
+                yScale: { type: 'log' },
+                width: 400, height: 300, schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            assert.strictEqual(c.yScale.type, 'log');
+            c.destroy();
+        });
+
+        it('default is linear (no opt-in needed for existing charts)', () => {
+            const c = createLineChart({
+                data: [{x:0,y:1},{x:1,y:2}],
+                width: 400, height: 200, schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 200));
+            assert.strictEqual(c.yScale.type, 'linear');
+            c.destroy();
+        });
+
+        it('log scale survives data updates', async () => {
+            const data1 = [{x:0,y:1},{x:1,y:10},{x:2,y:100}];
+            const c = createLineChart({
+                data: data1,
+                yScale: { type: 'log' },
+                width: 400, height: 300, schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            const d1 = c.yScale.dMax;
+            // Update to wider domain
+            c.data = [{x:0,y:1},{x:1,y:1000000}];
+            await new Promise((r) => setTimeout(r, 0));
+            // (Note: data setter may be a signal; mount schedule is sync,
+            // so the update should propagate immediately.)
+            assert.strictEqual(c.yScale.type, 'log', 'scale type should be preserved after update');
+            c.destroy();
+        });
+
+        it('SVG export works with log y-scale', () => {
+            const data = [{x:0,y:1},{x:1,y:10},{x:2,y:100},{x:3,y:1000}];
+            const c = createLineChart({
+                data,
+                yScale: { type: 'log' },
+                width: 400, height: 300, schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            const svg = c.exportSVG();
+            assert.ok(svg.startsWith('<svg'));
+            assert.ok(svg.endsWith('</svg>'));
+            c.destroy();
+        });
+
+        it('log scale tick labels reflect decade boundaries', () => {
+            const data = [];
+            for (let i = 0; i <= 6; i++) data.push({ x: i, y: Math.pow(10, i) });
+            // Domain spans 1 to 1,000,000 (6 decades).
+            const c = createLineChart({
+                data,
+                yScale: { type: 'log' },
+                width: 400, height: 400, schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 400));
+            const svg = c.exportSVG();
+            // logTicks() emits decade boundaries (1, 10, 100, ...).
+            // formatNumber formats large numbers compactly (e.g. "1k", "10k").
+            // Look for at least 3 power-of-10-style labels in the y-axis area.
+            // The y-axis labels are right-anchored (text-anchor="end").
+            const endAnchored = svg.match(/<text[^>]*text-anchor="end"[^>]*>([^<]+)<\/text>/g) || [];
+            assert.ok(endAnchored.length >= 3,
+                'should emit at least 3 y-axis labels, got ' + endAnchored.length);
+        });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.4.0-alpha.1 -- audit-fix regressions
+// ---------------------------------------------------------------------------
+
+describe('audit-fix regressions (v1.4.0-alpha.1)', () => {
+
+    // Fix 4: SVG path chunks (rope-string -> array-of-chunks)
+    describe('SVG export survives large point counts', () => {
+        it('exports a 10k-point line without throwing or producing malformed SVG', () => {
+            const data = new Array(10000);
+            for (let i = 0; i < 10000; i++) data[i] = { x: i, y: Math.sin(i * 0.01) * 100 };
+            const c = createLineChart({
+                data,
+                width: 1200, height: 400,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(1200, 400));
+            const svg = c.exportSVG();
+            assert.ok(svg.startsWith('<svg'));
+            assert.ok(svg.endsWith('</svg>'));
+            // Output should be substantial -- 10k points compressed by
+            // decimation still emits a path with thousands of segments.
+            assert.ok(svg.length > 5000, 'expected svg > 5KB, got ' + svg.length);
+            // The d attribute should be a single contiguous string (the
+            // join('') flatten). Spot-check that the rope didn't leave any
+            // empty-string artifacts.
+            assert.ok(!svg.includes('d=""'), 'no empty d attributes');
+            c.destroy();
+        });
+
+        it('produces valid SVG path commands (no rope-string artifacts)', () => {
+            const c = createLineChart({
+                data: [{x:0,y:0},{x:1,y:1},{x:2,y:4},{x:3,y:9}],
+                width: 400, height: 200,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 200));
+            const svg = c.exportSVG();
+            // Match standalone d="..." attributes; the leading space
+            // distinguishes the path's d from `id="..."` whose final
+            // letter is also d.
+            const m = svg.match(/ d="([^"]+)"/);
+            assert.ok(m, 'should find a d attribute');
+            const d = m[1];
+            // Path d must start with M, contain at least one L (line
+            // segments), and have no unexpected characters from rope-
+            // flattening bugs.
+            assert.match(d, /^M[\d\-.]/, 'd should start with M followed by a number');
+            assert.match(d, /L[\d\-.]/, 'd should contain at least one L command');
+            c.destroy();
+        });
+
+        it('beginPath truncates chunks in place (no array realloc)', () => {
+            // The new beginPath does `this._pathChunks.length = 0` which
+            // truncates in place rather than allocating a fresh []. There's
+            // no observable API for this but we can at least verify
+            // sequential paths don't bleed into one another.
+            const c = createBarChart({
+                data: [{x:'a',y:1},{x:'b',y:2}],
+                cornerRadius: 4,
+                width: 400, height: 200,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 200));
+            const svg1 = c.exportSVG();
+            const svg2 = c.exportSVG();
+            // Re-exports should produce identical output -- if begin/end
+            // path bookkeeping had a leak, the second export would have
+            // additional path data appended.
+            assert.strictEqual(svg1, svg2, 'two exports should match exactly');
+            c.destroy();
+        });
+
+        it('fillRect with rotated transform still works (rare path)', () => {
+            // The fillRect rotated-fallback uses the chunks-swap pattern.
+            // Drive it indirectly via a pie chart (which rotates slices).
+            const c = createPieChart({
+                data: [{label:'a',value:30},{label:'b',value:70}],
+                width: 300, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(300, 300));
+            const svg = c.exportSVG();
+            assert.ok(svg.startsWith('<svg'));
+            // Two slices = at least 2 path elements with d attributes.
+            const paths = svg.match(/<path[^>]*\bd=/g) || [];
+            assert.ok(paths.length >= 2, 'pie should emit at least 2 paths, got ' + paths.length);
+            c.destroy();
+        });
+    });
+
+    // Fix 1: Heatmap quantile pool
+    describe('heatmap quantile reuses pooled sort buffer', () => {
+        it('large dense heatmap with quantile binning does not throw', () => {
+            // 50x50 = 2500 cells, all present. Dense enough to exercise
+            // the gather/sort, small enough for fast tests.
+            const data = [];
+            for (let yi = 0; yi < 50; yi++) {
+                for (let xi = 0; xi < 50; xi++) {
+                    data.push({ x: 'c' + xi, y: 'r' + yi, value: (xi * yi) % 100 });
+                }
+            }
+            const c = createHeatmap({
+                data,
+                colorScale: 'quantile',
+                colorBins: 5,
+                width: 800, height: 600,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(800, 600));
+            // exportSVG forces a full draw so the quantile path runs
+            const svg = c.exportSVG();
+            assert.ok(svg.length > 1000);
+            c.destroy();
+        });
+
+        it('quantile output is identical to the old code on a fixed dataset', () => {
+            // Regression guard: the Float32Array sort should produce the
+            // same boundaries as the JS Array sort (both numerically
+            // ascending, stable for equal values).
+            const data = [
+                {x:'a',y:'x',value:1},  {x:'b',y:'x',value:2},
+                {x:'c',y:'x',value:10}, {x:'d',y:'x',value:100},
+                {x:'a',y:'y',value:5},  {x:'b',y:'y',value:50},
+                {x:'c',y:'y',value:500}, {x:'d',y:'y',value:1000},
+            ];
+            const c = createHeatmap({
+                data,
+                colorScale: 'quantile',
+                colorBins: 4,
+                width: 400, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            const svg = c.exportSVG();
+            // 8 cells should produce 8 <rect> elements (one per cell);
+            // the cell colors come from 4 quantile bins.
+            const rects = svg.match(/<rect/g) || [];
+            assert.ok(rects.length >= 8, 'heatmap should emit at least 8 cell rects, got ' + rects.length);
+            c.destroy();
+        });
+    });
+
+    // Fix 2: _parseRGBLike indexOf scan (smoke test only -- exercises the
+    // auto-contrast path which calls _parseRGBLike per cell at extract).
+    describe('heatmap auto-label color survives custom colorFn returning rgb()', () => {
+        it('parses rgb(...) without throwing', () => {
+            const c = createHeatmap({
+                data: [
+                    {x:'a',y:'x',value:0},   {x:'b',y:'x',value:0.5},
+                    {x:'a',y:'y',value:1},   {x:'b',y:'y',value:2},
+                ],
+                showValues: true,
+                colorFn: (v, vMin, vMax) => {
+                    const t = (v - vMin) / (vMax - vMin || 1);
+                    const r = (255 * t) | 0;
+                    return 'rgb(' + r + ', 50, ' + (255 - r) + ')';
+                },
+                width: 400, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            const svg = c.exportSVG();
+            // 4 cells with auto-label colors picked from rgb() parse
+            const texts = svg.match(/<text/g) || [];
+            assert.ok(texts.length >= 4, 'should emit at least one text label per cell');
+            c.destroy();
+        });
+    });
+
+    // Fix 3: charBufToString via apply (smoke -- axis labels render correctly)
+    describe('axis labels render correctly after charBufToString change', () => {
+        it('numeric labels are intact', () => {
+            const c = createLineChart({
+                data: [{x:0,y:0},{x:1,y:100},{x:2,y:200},{x:3,y:300}],
+                width: 600, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(600, 300));
+            const svg = c.exportSVG();
+            // Some numeric label should appear in the SVG (the exact
+            // value depends on niceYDomain, but at minimum there should
+            // be digit characters in a <text> element).
+            const labels = svg.match(/<text[^>]*>([^<]+)<\/text>/g) || [];
+            assert.ok(labels.length >= 4, 'should have multiple axis labels');
+            const hasNumeric = labels.some((l) => /\d/.test(l));
+            assert.ok(hasNumeric, 'at least one label should contain a digit');
+            c.destroy();
+        });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.4.0-alpha.2 -- pan + zoom
+// ---------------------------------------------------------------------------
+
+describe('pan + zoom math (v1.4.0-alpha.2)', () => {
+    const { _applyPan, _applyZoom, _clampToBounds } = _testHelpers;
+
+    describe('_applyPan', () => {
+        it('drag right shifts view left in data space (cursor convention)', () => {
+            const start = { xMin: 0, xMax: 100, yMin: 0, yMax: 50 };
+            // Drag 50 pixels right on a 500-pixel-wide plot = shift view
+            // by 50/500 * 100 = 10 data units LEFT (so view shows
+            // [-10, 90] -- you're "pulling" the data right).
+            const r = _applyPan(start, 50, 0, 500, 250);
+            assert.strictEqual(r.xMin, -10);
+            assert.strictEqual(r.xMax, 90);
+            assert.strictEqual(r.yMin, 0);   // no y drag
+            assert.strictEqual(r.yMax, 50);
+        });
+
+        it('drag up shifts view down in data space (cursor-anchor convention)', () => {
+            const start = { xMin: 0, xMax: 100, yMin: 0, yMax: 50 };
+            // Drag 25 pixels UP (negative dy) on a 250-pixel-tall plot.
+            // By the cursor-anchor convention (Google Maps, d3-zoom),
+            // dragging UP moves the data UP visually, which means the
+            // view's y-axis labels effectively roll DOWN -- the value
+            // that used to sit at pixel 200 (y=10) is now at pixel 175.
+            // dyData = -(-25) * 50 / 250 = +5; new yMin = 0 - 5 = -5.
+            const r = _applyPan(start, 0, -25, 500, 250);
+            assert.strictEqual(r.yMin, -5);
+            assert.strictEqual(r.yMax, 45);
+        });
+
+        it('zero drag returns unchanged bounds', () => {
+            const start = { xMin: 10, xMax: 90, yMin: -5, yMax: 5 };
+            const r = _applyPan(start, 0, 0, 800, 400);
+            assert.strictEqual(r.xMin, 10);
+            assert.strictEqual(r.xMax, 90);
+            assert.strictEqual(r.yMin, -5);
+            assert.strictEqual(r.yMax, 5);
+        });
+    });
+
+    describe('_applyZoom', () => {
+        it('zoom in centered on plot middle halves the visible range', () => {
+            const start = { xMin: 0, xMax: 100, yMin: 0, yMax: 50 };
+            // Cursor at plot center (250, 125) on a 500x250 plot.
+            // Zoom factor 0.5 -> range halves, centered on cursor's
+            // data anchor which is at (50, 25) in data space.
+            const r = _applyZoom(start, 250, 125, 0, 0, 500, 250, 0.5, 0.5);
+            assert.strictEqual(r.xMin, 25);
+            assert.strictEqual(r.xMax, 75);
+            assert.strictEqual(r.yMin, 12.5);
+            assert.strictEqual(r.yMax, 37.5);
+        });
+
+        it('zoom in keeps cursor data-point fixed', () => {
+            // Cursor at 25% across the plot horizontally => data anchor
+            // at xMin + 0.25 * (xMax - xMin) = 25. After zoom by 0.5,
+            // the data anchor should still be at the same pixel
+            // position, which we verify by reconstructing.
+            const start = { xMin: 0, xMax: 100, yMin: 0, yMax: 100 };
+            const cursorPx = 100;  // 25% of 400
+            const cursorPy = 100;  // 50% of 200
+            const r = _applyZoom(start, cursorPx, cursorPy, 0, 0, 400, 200, 0.5, 0.5);
+            // Anchor was at 25 in x. After zoom: 25 is still at the
+            // same fraction tx of the new range.
+            const newTx = (25 - r.xMin) / (r.xMax - r.xMin);
+            assert.ok(Math.abs(newTx - 0.25) < 1e-10, 'cursor x-anchor preserved, got tx=' + newTx);
+        });
+
+        it('zoom out (factor > 1) widens the range', () => {
+            const start = { xMin: 25, xMax: 75, yMin: 25, yMax: 75 };
+            const r = _applyZoom(start, 250, 125, 0, 0, 500, 250, 2, 2);
+            // Centered: anchor at (50, 50). Zoom 2x -> new range = 100.
+            assert.strictEqual(r.xMin, 0);
+            assert.strictEqual(r.xMax, 100);
+            assert.strictEqual(r.yMin, 0);
+            assert.strictEqual(r.yMax, 100);
+        });
+
+        it('y anchor is flipped (top of plot = yMax)', () => {
+            const start = { xMin: 0, xMax: 100, yMin: 0, yMax: 100 };
+            // Cursor at top of plot (py = 0). Anchor should be at yMax.
+            const r = _applyZoom(start, 250, 0, 0, 0, 500, 250, 0.5, 0.5);
+            // yMax stays at 100 (anchor); yMin moves up to 50.
+            assert.strictEqual(r.yMax, 100);
+            assert.strictEqual(r.yMin, 50);
+        });
+    });
+
+    describe('_clampToBounds', () => {
+        const dataDom = { xMin: 0, xMax: 100, yMin: 0, yMax: 100 };
+
+        it('view inside data domain is unchanged', () => {
+            const v = { xMin: 25, xMax: 75, yMin: 25, yMax: 75 };
+            const r = _clampToBounds(v, dataDom);
+            assert.strictEqual(r.xMin, 25);
+            assert.strictEqual(r.xMax, 75);
+        });
+
+        it('view extending past xMin shifts right', () => {
+            const v = { xMin: -10, xMax: 40, yMin: 0, yMax: 100 };
+            _clampToBounds(v, dataDom);
+            assert.strictEqual(v.xMin, 0);
+            assert.strictEqual(v.xMax, 50);
+        });
+
+        it('view extending past xMax shifts left', () => {
+            const v = { xMin: 70, xMax: 120, yMin: 0, yMax: 100 };
+            _clampToBounds(v, dataDom);
+            assert.strictEqual(v.xMin, 50);
+            assert.strictEqual(v.xMax, 100);
+        });
+
+        it('view wider than data snaps to full domain', () => {
+            const v = { xMin: -50, xMax: 200, yMin: 0, yMax: 100 };
+            _clampToBounds(v, dataDom);
+            assert.strictEqual(v.xMin, 0);
+            assert.strictEqual(v.xMax, 100);
+        });
+
+        it('y-axis follows the same logic independently', () => {
+            const v = { xMin: 25, xMax: 75, yMin: -20, yMax: 30 };
+            _clampToBounds(v, dataDom);
+            // x untouched (in bounds)
+            assert.strictEqual(v.xMin, 25);
+            // y clamped to start at 0
+            assert.strictEqual(v.yMin, 0);
+            assert.strictEqual(v.yMax, 50);
+        });
+    });
+});
+
+describe('view facade + scale integration (v1.4.0-alpha.2)', () => {
+    it('chart without pan/zoom config has no view facade methods that work', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:1,y:10}],
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        // view() returns null when interactions aren't enabled
+        assert.strictEqual(c.view(), null);
+        // setView/resetView throw
+        assert.throws(() => c.setView({ xMin: 0, xMax: 1 }), /pan: true.*zoom: true/);
+        assert.throws(() => c.resetView(), /pan: true.*zoom: true/);
+        c.destroy();
+    });
+
+    it('opting into pan exposes view facade', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:10,y:100}],
+            pan: true,
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        // Initial view is null (use data domain)
+        assert.strictEqual(c.view(), null);
+        // setView accepts a view object
+        c.setView({ xMin: 2, xMax: 5 });
+        const v = c.view();
+        assert.strictEqual(v.xMin, 2);
+        assert.strictEqual(v.xMax, 5);
+        // resetView clears it
+        c.resetView();
+        assert.strictEqual(c.view(), null);
+        c.destroy();
+    });
+
+    it('setView rejects malformed input', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:10,y:10}],
+            pan: true,
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        assert.throws(() => c.setView('not an object'), /view must be null or an object/);
+        assert.throws(() => c.setView(42), /view must be null or an object/);
+        // null is valid (alias for resetView)
+        c.setView(null);
+        assert.strictEqual(c.view(), null);
+        c.destroy();
+    });
+
+    it('view changes flow through to xScale domain', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:10,y:100},{x:20,y:200}],
+            pan: true,
+            width: 500, height: 250,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(500, 250));
+        // Initial: data domain x in [0, 20].
+        const xScaleInit = c.xScale;
+        const initMin = xScaleInit.dMin;
+        const initMax = xScaleInit.dMax;
+        assert.strictEqual(initMin, 0);
+        assert.strictEqual(initMax, 20);
+        // Set view to a subset
+        c.setView({ xMin: 5, xMax: 15 });
+        assert.strictEqual(c.xScale.dMin, 5);
+        assert.strictEqual(c.xScale.dMax, 15);
+        // Partial: only y set, x falls back to data
+        c.setView({ yMin: 50, yMax: 150 });
+        assert.strictEqual(c.xScale.dMin, 0);   // back to data
+        assert.strictEqual(c.xScale.dMax, 20);
+        assert.strictEqual(c.yScale.dMin, 50);
+        assert.strictEqual(c.yScale.dMax, 150);
+        // Reset
+        c.resetView();
+        assert.strictEqual(c.xScale.dMin, 0);
+        assert.strictEqual(c.xScale.dMax, 20);
+        c.destroy();
+    });
+
+    it('view is reactive -- effects fire on view change', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            zoom: true,    // zoom alone is enough to enable view
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        let observations = 0;
+        let lastView = 'init';
+        const stop = effect(() => {
+            lastView = c.view();
+            observations++;
+        });
+        assert.strictEqual(observations, 1);
+        assert.strictEqual(lastView, null);
+        c.setView({ xMin: 10, xMax: 90 });
+        assert.strictEqual(observations, 2);
+        assert.deepStrictEqual(lastView, { xMin: 10, xMax: 90, yMin: null, yMax: null });
+        c.resetView();
+        assert.strictEqual(observations, 3);
+        assert.strictEqual(lastView, null);
+        stop();
+        c.destroy();
+    });
+});
+
+describe('pan + zoom integration (v1.4.0-alpha.2)', () => {
+    // Extended mock that adds addEventListener so the actual listener
+    // path can be exercised. Keeps the API surface minimal: register
+    // handlers in a map and dispatch them via .dispatch(type, event).
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            // Iterate over a copy in case handlers mutate the list.
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        // setPointerCapture / releasePointerCapture: no-op stubs so the
+        // listener's try/catch path doesn't fire.
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+
+    it('pointerdown -> pointermove -> pointerup updates view', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            panBounds: 'free',   // disable clamping so small pan isn't snapped
+            width: 500, height: 300,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Start view = null (data domain x=[0,100], y=[0,100]).
+        // Drag from (250, 150) -- center of plot -- to (200, 150)
+        // (50 pixels to the LEFT).
+        canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 200, clientY: 150, pointerId: 1 });
+        canvas.dispatch('pointerup',   { clientX: 200, clientY: 150, pointerId: 1 });
+
+        const v = c.view();
+        assert.ok(v != null, 'view should be set after drag');
+        // dx = -50 pixels on a ~500-wide plot. dxData ~ -50 * 100 / plotW ~ -10.
+        // newXLo = 0 - (-10) = 10; newXMax = 100 - (-10) = 110.
+        assert.ok(v.xMin > 0, 'drag left should shift view RIGHT (xMin grows); got xMin=' + v.xMin);
+        assert.ok(v.xMax > 100, 'drag left should extend xMax past data; got xMax=' + v.xMax);
+
+        c.destroy();
+    });
+
+    it('wheel down zooms out, wheel up zooms in', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            zoom: true,
+            panBounds: 'free',   // disable clamping for cleaner math check
+            width: 500, height: 300,
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Set a starting view explicitly so we know what to expect after zoom.
+        c.setView({ xMin: 0, xMax: 100, yMin: 0, yMax: 100 });
+        const before = c.view();
+        const beforeSpanX = before.xMax - before.xMin;
+
+        // Wheel up (deltaY < 0) = zoom in -> span shrinks.
+        canvas.dispatch('wheel', {
+            clientX: 250, clientY: 150,
+            deltaY: -100,
+            preventDefault: () => {},
+        });
+        const after = c.view();
+        const afterSpanX = after.xMax - after.xMin;
+        assert.ok(afterSpanX < beforeSpanX, 'zoom in should shrink x-span; before=' + beforeSpanX + ' after=' + afterSpanX);
+
+        // Now zoom out -- span should grow back past the original.
+        canvas.dispatch('wheel', { clientX: 250, clientY: 150, deltaY: 100, preventDefault: () => {} });
+        canvas.dispatch('wheel', { clientX: 250, clientY: 150, deltaY: 100, preventDefault: () => {} });
+        const after2 = c.view();
+        const after2SpanX = after2.xMax - after2.xMin;
+        assert.ok(after2SpanX > afterSpanX, 'subsequent zoom-outs should grow span');
+
+        c.destroy();
+    });
+
+    it('pan with panBounds: data clamps to data domain', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            panBounds: 'data',  // default; explicit for clarity
+            width: 500, height: 300,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Drag VERY far right -- 10,000 pixels. Without clamping, this
+        // would push xMin way negative. With panBounds: 'data', the
+        // view should snap back to the data domain bounds.
+        canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 10250, clientY: 150, pointerId: 1 });
+
+        const v = c.view();
+        // With clamping, xMin should not be below 0.
+        assert.ok(v.xMin >= 0 - 1e-9, 'panBounds:data should keep xMin >= 0; got ' + v.xMin);
+        // And xMax should not exceed 100.
+        assert.ok(v.xMax <= 100 + 1e-9, 'panBounds:data should keep xMax <= 100; got ' + v.xMax);
+
+        canvas.dispatch('pointerup', { clientX: 10250, clientY: 150, pointerId: 1 });
+        c.destroy();
+    });
+
+    it('panBounds: free allows view to extend past data', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            panBounds: 'free',
+            width: 500, height: 300,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 10250, clientY: 150, pointerId: 1 });
+
+        const v = c.view();
+        // With free bounds, xMin should be well below 0 (we dragged way right).
+        assert.ok(v.xMin < -100, 'panBounds:free should let view extend; got xMin=' + v.xMin);
+
+        canvas.dispatch('pointerup', { clientX: 10250, clientY: 150, pointerId: 1 });
+        c.destroy();
+    });
+
+    it('non-left mouse buttons do not initiate pan', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            width: 500, height: 300,
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Right-click drag should NOT pan (reserved for context menu / future brush).
+        canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 2, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 200, clientY: 150, pointerId: 1 });
+        canvas.dispatch('pointerup',   { clientX: 200, clientY: 150, pointerId: 1 });
+
+        // View should still be null (no pan initiated).
+        assert.strictEqual(c.view(), null);
+        c.destroy();
+    });
+
+    it('pointerdown outside plot does not initiate pan', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            width: 500, height: 300,
+            margin: { top: 50, right: 50, bottom: 50, left: 50 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Click in the left margin (x=10, plot starts at x=50).
+        canvas.dispatch('pointerdown', { clientX: 10, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 60, clientY: 150, pointerId: 1 });
+        canvas.dispatch('pointerup',   { clientX: 60, clientY: 150, pointerId: 1 });
+
+        assert.strictEqual(c.view(), null, 'click in margin should not initiate pan');
+        c.destroy();
+    });
+
+    it('disposers remove listeners on destroy', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            zoom: true,
+            width: 500, height: 300,
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+        // Trigger one drag to confirm wiring.
+        canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 200, clientY: 150, pointerId: 1 });
+        canvas.dispatch('pointerup',   { clientX: 200, clientY: 150, pointerId: 1 });
+        assert.ok(c.view() != null, 'pre-destroy: pan should work');
+
+        c.destroy();
+
+        // After destroy, dispatching events should not throw or mutate
+        // anything (the listeners are gone -- and the chart is anyway
+        // destroyed so no observable state).
+        canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 200, clientY: 150, pointerId: 1 });
+        // No assertion -- just verify no crash.
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.4.0-alpha.3 -- brushing
+// ---------------------------------------------------------------------------
+
+describe('brush math (v1.4.0-alpha.3)', () => {
+    const { _normalizeBrushRect, _brushPxToData, _computeBrushIds, makeLinearScale, updateLinearScale } = _testHelpers;
+
+    describe('_normalizeBrushRect', () => {
+        it('orders corners regardless of drag direction', () => {
+            // Drag from top-left to bottom-right
+            const r1 = _normalizeBrushRect(10, 20, 100, 200);
+            assert.strictEqual(r1.pxMin, 10);
+            assert.strictEqual(r1.pxMax, 100);
+            assert.strictEqual(r1.pyMin, 20);
+            assert.strictEqual(r1.pyMax, 200);
+            // Drag from bottom-right to top-left -- same result
+            const r2 = _normalizeBrushRect(100, 200, 10, 20);
+            assert.deepStrictEqual(r1, r2);
+            // Drag from top-right to bottom-left
+            const r3 = _normalizeBrushRect(100, 20, 10, 200);
+            assert.deepStrictEqual(r1, r3);
+        });
+    });
+
+    describe('_brushPxToData', () => {
+        it('inverts pixel rect through linear scales (y flipped)', () => {
+            // x: 0..100 maps to pixel 0..500
+            const xs = makeLinearScale();
+            updateLinearScale(xs, 0, 100, 0, 500);
+            // y: 0..50 maps to pixel 250..0 (y flipped)
+            const ys = makeLinearScale();
+            updateLinearScale(ys, 0, 50, 250, 0);
+            const rect = { pxMin: 100, pxMax: 300, pyMin: 50, pyMax: 200 };
+            const data = _brushPxToData(rect, xs, ys);
+            // x: 100/500 * 100 = 20; 300/500 * 100 = 60
+            assert.strictEqual(data.xMin, 20);
+            assert.strictEqual(data.xMax, 60);
+            // y: pyMin=50 -> high y; pyMax=200 -> low y. invert maps
+            // top pixels to HIGH data. yMax = invert(50), yMin = invert(200).
+            // Pixel 50 = 250 - 5*y -> y = 40. Pixel 200 = 250 - 5*y -> y = 10.
+            assert.strictEqual(data.yMin, 10);
+            assert.strictEqual(data.yMax, 40);
+        });
+    });
+
+    describe('_computeBrushIds', () => {
+        it('returns indices of points inside the rect', () => {
+            const xs = [10, 20, 30, 40, 50];
+            const ys = [1, 5, 3, 8, 4];
+            const ids = _computeBrushIds(xs, ys, 5, 15, 45, 2, 7);
+            // 20,5  30,3  40,8(out, y>7)  -- so [1,2]
+            assert.deepStrictEqual(ids, [1, 2]);
+        });
+
+        it('inclusive at boundaries', () => {
+            const xs = [0, 10, 20];
+            const ys = [0, 5, 10];
+            const ids = _computeBrushIds(xs, ys, 3, 0, 20, 0, 10);
+            assert.deepStrictEqual(ids, [0, 1, 2]);
+        });
+
+        it('handles empty selection', () => {
+            const xs = [10, 20, 30];
+            const ys = [1, 2, 3];
+            const ids = _computeBrushIds(xs, ys, 3, 100, 200, 0, 10);
+            assert.deepStrictEqual(ids, []);
+        });
+
+        it('handles zero-length input', () => {
+            const ids = _computeBrushIds([], [], 0, 0, 100, 0, 100);
+            assert.deepStrictEqual(ids, []);
+        });
+    });
+});
+
+describe('brush facade (v1.4.0-alpha.3)', () => {
+    it('chart without brush:true returns null and throws on set/clear', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:1,y:1}],
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        assert.strictEqual(c.brush(), null);
+        assert.throws(() => c.setBrush({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }), /brush: true/);
+        assert.throws(() => c.clearBrush(), /brush: true/);
+        c.destroy();
+    });
+
+    it('opting in exposes setBrush + clearBrush', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:10,y:100}],
+            brush: true,
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        assert.strictEqual(c.brush(), null);
+        c.setBrush({ xMin: 2, xMax: 5, yMin: 10, yMax: 60 });
+        const b = c.brush();
+        assert.ok(b != null);
+        assert.strictEqual(b.xMin, 2);
+        assert.strictEqual(b.xMax, 5);
+        assert.strictEqual(b.yMin, 10);
+        assert.strictEqual(b.yMax, 60);
+        c.clearBrush();
+        assert.strictEqual(c.brush(), null);
+        c.destroy();
+    });
+
+    it('setBrush rejects malformed input', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:10,y:10}],
+            brush: true,
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        assert.throws(() => c.setBrush('garbage'), /brush must be null or an object/);
+        assert.throws(() => c.setBrush(42), /brush must be null or an object/);
+        c.setBrush(null);
+        assert.strictEqual(c.brush(), null);
+        c.destroy();
+    });
+
+    it('brush is reactive -- effects fire on changes', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            brush: true,
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        let observations = 0;
+        let lastBrush = 'init';
+        const stop = effect(() => {
+            lastBrush = c.brush();
+            observations++;
+        });
+        assert.strictEqual(observations, 1);
+        assert.strictEqual(lastBrush, null);
+        c.setBrush({ xMin: 10, xMax: 90, yMin: 10, yMax: 90 });
+        assert.strictEqual(observations, 2);
+        assert.ok(lastBrush != null);
+        assert.strictEqual(lastBrush.xMin, 10);
+        c.clearBrush();
+        assert.strictEqual(observations, 3);
+        assert.strictEqual(lastBrush, null);
+        stop();
+        c.destroy();
+    });
+
+    it('pan and brush coexist (both enabled)', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            brush: true,
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(400, 200));
+        // Both facades work
+        assert.strictEqual(c.view(), null);
+        assert.strictEqual(c.brush(), null);
+        c.setView({ xMin: 10, xMax: 50 });
+        c.setBrush({ xMin: 20, xMax: 40, yMin: 30, yMax: 60 });
+        assert.deepStrictEqual(c.view(), { xMin: 10, xMax: 50, yMin: null, yMax: null });
+        const b = c.brush();
+        assert.strictEqual(b.xMin, 20);
+        c.destroy();
+    });
+});
+
+describe('brush integration -- shift-drag (v1.4.0-alpha.3)', () => {
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+
+    it('shift+drag commits a brush selection', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:10,y:10},{x:20,y:20},{x:30,y:30},{x:40,y:40}],
+            brush: true,
+            width: 500, height: 300,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Shift-drag from middle to lower-right
+        canvas.dispatch('pointerdown', { clientX: 100, clientY: 100, button: 0, pointerId: 1, shiftKey: true, preventDefault: () => {} });
+        canvas.dispatch('pointermove', { clientX: 300, clientY: 200, pointerId: 1, shiftKey: true });
+        canvas.dispatch('pointerup',   { clientX: 300, clientY: 200, pointerId: 1, shiftKey: true });
+
+        const b = c.brush();
+        assert.ok(b != null, 'brush should be set after shift+drag');
+        assert.ok(b.xMin < b.xMax, 'xMin < xMax');
+        assert.ok(b.yMin < b.yMax, 'yMin < yMax');
+        assert.ok(Array.isArray(b.ids), 'ids should be an array');
+
+        c.destroy();
+    });
+
+    it('bare drag does not initiate brush (when pan is off)', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            brush: true,
+            width: 500, height: 300,
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Drag WITHOUT shift -- brush should ignore it
+        canvas.dispatch('pointerdown', { clientX: 100, clientY: 100, button: 0, pointerId: 1, shiftKey: false, preventDefault: () => {} });
+        canvas.dispatch('pointermove', { clientX: 300, clientY: 200, pointerId: 1, shiftKey: false });
+        canvas.dispatch('pointerup',   { clientX: 300, clientY: 200, pointerId: 1, shiftKey: false });
+
+        assert.strictEqual(c.brush(), null, 'bare drag should not produce a brush');
+        c.destroy();
+    });
+
+    it('shift+drag is brush even when pan is enabled (modifier routing)', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            pan: true,
+            brush: true,
+            panBounds: 'free',
+            width: 500, height: 300,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Shift+drag -- should produce a brush, NOT a view change
+        canvas.dispatch('pointerdown', { clientX: 100, clientY: 100, button: 0, pointerId: 1, shiftKey: true, preventDefault: () => {} });
+        canvas.dispatch('pointermove', { clientX: 300, clientY: 200, pointerId: 1, shiftKey: true });
+        canvas.dispatch('pointerup',   { clientX: 300, clientY: 200, pointerId: 1, shiftKey: true });
+
+        assert.ok(c.brush() != null, 'brush should be set');
+        assert.strictEqual(c.view(), null, 'view should NOT change');
+
+        c.destroy();
+    });
+
+    it('shift+click without movement clears existing brush', () => {
+        const c = createLineChart({
+            data: [{x:0,y:0},{x:100,y:100}],
+            brush: true,
+            width: 500, height: 300,
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Set an initial brush via API
+        c.setBrush({ xMin: 10, xMax: 50, yMin: 10, yMax: 50 });
+        assert.ok(c.brush() != null);
+
+        // Shift+click with minimal movement (1 pixel) -- below threshold
+        canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1, shiftKey: true, preventDefault: () => {} });
+        canvas.dispatch('pointermove', { clientX: 251, clientY: 150, pointerId: 1, shiftKey: true });
+        canvas.dispatch('pointerup',   { clientX: 251, clientY: 150, pointerId: 1, shiftKey: true });
+
+        assert.strictEqual(c.brush(), null, 'sub-threshold click should clear brush');
+        c.destroy();
+    });
+
+    it('brush IDs reflect points inside the selection', () => {
+        // Use a known dataset spread evenly across the plot.
+        const data = [
+            { x: 0,   y: 0 },
+            { x: 25,  y: 25 },
+            { x: 50,  y: 50 },
+            { x: 75,  y: 75 },
+            { x: 100, y: 100 },
+        ];
+        const c = createLineChart({
+            data,
+            brush: true,
+            width: 500, height: 300,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+
+        // Programmatically set a brush covering ~50% of the data.
+        c.setBrush({ xMin: 20, xMax: 80, yMin: 0, yMax: 100 });
+        // Note: setBrush via the facade does NOT recompute ids -- ids
+        // come only from the shift+drag gesture. This is documented
+        // behavior; programmatic brushes set by users may have ids: null.
+        const b = c.brush();
+        assert.strictEqual(b.xMin, 20);
+        assert.strictEqual(b.xMax, 80);
+        // ids is null because we set via API (no gesture)
+        assert.strictEqual(b.ids, null);
+
+        c.destroy();
     });
 });

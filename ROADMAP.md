@@ -5,7 +5,16 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.3.0 (current)
+## v1.4.0 (current)
+
+Three new interaction primitives on axis-kernel charts (log scale, pan +
+zoom, brushing) plus four pre-existing allocation traps closed during a
+bare-metal audit. See CHANGELOG.md for the full v1.4 details across the
+alpha line; the entries below track v1.3.0 and earlier.
+
+---
+
+## v1.3.0
 
 Every chart now exports as a static SVG. `chart.exportSVG(opts?)` walks
 the live `scene.root` through a Canvas2D-shaped shim that emits SVG
@@ -231,55 +240,70 @@ history below for details.
 
 ## Forward plan
 
-### v1.2.0 -- Heatmap + dense bubble + scatter
+### v1.4.0 (next) -- Interaction primitives
 
-- **`@zakkster/lite-delaunay` integration** *(shipped in alpha.0)* --
-  sweepline Delaunay -> half-edge mesh -> Voronoi-dual walk for the
-  cursor's enclosing cell. Pre-allocated arena (no per-frame `new`).
-  alpha.0 shipped the integration layer + reference implementation
-  in the demo; the actual Delaunay-backed factory lives in
-  `@zakkster/lite-delaunay` itself and users wire it through
-  `spatialIndex: createDelaunayIndex`.
-- **`createScatterChart`** *(shipped in alpha.1)* -- bubble's simpler
-  sibling, no size dimension. Reuses the spatial-index foundation
-  with `k = 1`.
-- **Multi-series bubble + per-point color encoding**
-  *(shipped in alpha.2)* -- `BUBBLE_RENDERER` gained `colorKey` config
-  (per-point color from data field) and the `series: [...]` shape.
-  Global size domain across visible series so equal values render
-  equal-area regardless of which series.
-- **`createHeatmap`** *(shipped in alpha.3)* -- new
-  `createBaseGridChart` kernel. Two band scales (x + y), flat
-  Float32Array cell storage, Uint8 presentMask for sparse data,
-  per-cell color strings precomputed at extract. Default linear-RGB
-  interp ramp; `colorFn` for custom mappings. Hit-test is O(1).
-  Bundle ~10.5 KB -- the smallest of the nine. Per-row /
-  per-column highlight on hover and value labels (`showValues`) are
-  planned for v1.2.0-final.
+Will ship in alphas before a combined release.
 
-### v1.3.0 -- SVG export
+- **v1.4.0-alpha.0 -- Log scale.** `yScale: { type: 'log' }` (and
+  `xScale` for time-series with exponential x). Adds a sibling to
+  `makeLinearScale` whose `map`/`invert` use `Math.log` /
+  `Math.exp`. Tick generation routes to `lite-axis`'s already-shipped
+  `logTicks` (decade boundaries plus optional 2x / 5x sub-ticks
+  per decade). Domain handling: non-positive data is the caller's
+  responsibility -- chart will draw what it can if any positive
+  values exist and warn-and-fallback to linear otherwise.
+- **v1.4.0-alpha.1 -- Pan + zoom.** Mouse-drag pans, wheel zooms.
+  Driven by a new `view` signal carrying `{ xMin, xMax, yMin, yMax }`
+  so a bounded-history undo/redo is one signal snapshot away.
+  Constrains to the data domain by default; `panBounds: 'free'`
+  opts out. The view signal becomes the chart-side analog of
+  `lite-camera-max`'s camera signal -- shape is intentionally
+  symmetric so users can drop the chart's view-signal into a
+  lite-gl `project` function unchanged (see lite-gl track below).
+- **v1.4.0-alpha.2 -- Brushing.** Modifier-key drag (shift) selects
+  a region; emits a `brushSignal` carrying `{ x: [min, max], y: [min,
+  max], ids: number[] }` that downstream code can subscribe to for
+  cross-chart filtering. Coexists with pan/zoom (no modifier = pan,
+  shift = brush).
 
-- **`chart.exportSVG()`** across all seven chart types. Mirrors every
-  draw fn through SVG path commands (`M`/`L`/`C`/`A`) instead of
-  `ctx.moveTo`/`lineTo`/`bezierCurveTo`/`arc`. Reuses every
-  projection function (scale.map, computeRadarGeometry, etc.) so the
-  output is pixel-identical to the canvas. Stand-alone string,
-  embeddable in `<img>` / downloadable / paste-into-Figma.
-- Internal refactor: each `make*DrawFn` factory will get a sibling
-  `make*SvgEmitter` that takes a path-emitter object instead of
-  `ctx`. Path emitters are tiny (~10 LOC each); the heavy lifting
-  stays in the per-renderer geometry helpers.
+### Companion track -- `@zakkster/lite-charts-gl` (post-v1.4.0)
 
-### v1.4.0 -- Interaction primitives
+The GPU sibling for chart types currently bottlenecked by point count.
+A separate package -- lite-charts proper stays canvas-only and ASCII-
+disciplined.
 
-- **Log scale** -- `xScale: { type: 'log', base: 10 }` and same for y.
-  Affects axis tick generation, scale.map, scale.invert. Bisect
-  hit-test stays in data space so behavior is unchanged for users.
-- **Pan + zoom** -- mouse-drag pans, wheel zooms. Driven by signals so
-  bounded-history undo/redo is one signal-snapshot call away. Constrains
-  to data domain by default; `panBounds: 'free'` opts out.
-- **Brushing** -- click-drag selects a region; emits a `brushSignal`
-  that downstream code can subscribe to for cross-chart filtering.
+**Why a companion package and not a renderer switch:** lite-gl is
+browser-only (WebGL2). Adding a `renderer: 'canvas' | 'webgl'` switch
+inside lite-charts would double the test surface for every chart
+(mock WebGL2 contexts, browser-only paths, conditional code branches).
+Splitting at the package boundary keeps lite-charts node-testable end-
+to-end while letting lite-charts-gl own the WebGL2 testing pattern that
+lite-gl already established (mock-WebGL2-context unit tests, real GPU
+in Playwright).
+
+**Initial scope:**
+
+- **`createScatterChartGL`** -- biggest immediate win. Scatter is
+  point-count-limited (one `ctx.beginPath + arc + fill` per point
+  in Canvas2D); the lite-gl POINT pipeline maps 1:1 (8 floats per
+  point: `x, y, size, r, g, b, a, +1 pad`). Spatial-index hit-test
+  stays on CPU (where it belongs -- `gl.readPixels` is a frame killer).
+- **`createBubbleChartGL`** -- same kernel, the `size` field in
+  the POINT layout makes per-point radius a free attribute.
+- **`createDensityChart`** -- a tenth chart type, optimized for the
+  100k-1M point range where scatter loses to overdraw. Aggregates
+  into hex-bin or grid-cell counts; renders the cells via lite-gl
+  (still allocation-free since cell-count is bounded).
+
+**What's reused from lite-charts:** the axis kernel's tick builder
+(canvas overlay for axes -- they're cheap and GL would be overkill
+for tick text), the scale builders (`makeLinearScale`,
+`makeBandScale`, the new `makeLogScale`), the configuration shape,
+the lifecycle API (mount/unmount/destroy/exportSVG).
+
+**Bench target:** 1M scatter points at 60fps with pan/zoom driving
+re-projection. lite-gl's README claims it; the integration test
+proves it.
 
 ### v1.5.0 -- Scale + polish
 
@@ -294,9 +318,10 @@ history below for details.
 
 ### v2.0.0 -- (possible)
 
-- **WebGPU rendering path** -- compute-shader projection for
-  multi-million-point scatter, instanced bar rendering. Optional;
-  the canvas path stays the default.
+- **Renderer-agnostic kernel refactor.** If the lite-charts-gl
+  companion proves out, fold the renderer choice into the lite-charts
+  core. Big lift -- the kernel pattern would need to abstract
+  scene-tree drawing from primitive-stream drawing.
 - **Deeper SSR support** -- server-render to inline SVG via the same
   draw fns; client hydrates without re-extraction.
 

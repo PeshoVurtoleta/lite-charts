@@ -17,24 +17,35 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.2.0 -- **nine** chart types across **four** independent
-kernels, every one of them now also a static SVG via
-`chart.exportSVG()`. **263/263 tests pass.**
+**Status:** v1.4.0 -- three new interaction primitives on axis-kernel
+charts (log scale, pan + zoom, brushing) plus four pre-existing
+allocation traps closed during a bare-metal audit. No public API
+breaks vs v1.3.0; the new features are all opt-in. **320/320 tests
+pass.**
 
-**New in v1.2.0:**
-- **`chart.exportSVG()`** on every chart. Returns a complete
-  `<svg>...</svg>` string with `xmlns`, `viewBox`, `width`, `height` --
-  droppable into any HTML page, PDF, or static asset pipeline.
-  Implementation walks the live `scene.root` tree through a
-  Canvas2D-shaped shim that emits SVG markup instead of pixels, so
-  the output is geometrically identical to the canvas paint (minus
-  DPR scaling -- SVG is resolution-independent).
-- **Bar category labels are now correctly centered.** Pre-existing
-  typo in the band-axis builder passed `anchor:` instead of `align:`
-  to a `textNode`, leaving `_align` at its `'left'` default. Single-
-  character labels masked the issue; multi-character names were
-  offset right by half a glyph width. Found during SVG work; both
-  canvas AND SVG output benefit.
+**New in v1.4.0:**
+- **`yScale: { type: 'log' }`** -- log scale on the y-axis for any
+  axis-kernel chart. Base-10 log; ticks via `lite-axis.logTicks`.
+  See "Log scale" below.
+- **`pan: true`** + **`zoom: true`** -- pointer-drag pans
+  (cursor-anchor convention); wheel zooms around the cursor.
+  `chart.view` is a reactive `{ xMin, xMax, yMin, yMax }` accessor
+  intentionally symmetric with `lite-camera-max`'s camera signal
+  for future lite-gl drop-in. See "Pan + zoom" below.
+- **`brush: true`** -- shift+drag rectangle selection. `chart.brush`
+  emits `{ xMin, xMax, yMin, yMax, ids }` for cross-chart linking.
+  Coexists with pan/zoom via modifier routing. See "Brushing"
+  below.
+- **Four allocation traps closed** (audit): heatmap quantile
+  Float32Array pool; `_parseRGBLike` indexOf scan;
+  `charBufToString` via `apply`; SVG path chunks for 100k+ point
+  export. No public API changes; pre-existing leaks in v1.2-1.3
+  code, fixed silently.
+
+**Inherited from v1.3.0:**
+- **`chart.exportSVG()`** on every chart. Safe at 100k+ points
+  (the SVG path-chunks audit fix above protects against
+  `RangeError: Invalid string length` on big exports).
 
 **Inherited from v1.2.0:**
 - `chart.destroy()` on every kernel; terminal counterpart to
@@ -618,13 +629,13 @@ nearest-vertex hit-test.
 The same architecture extends to upcoming chart families:
 
 ```javascript
-// v1.2.0 -- pie family (no axes, polar coordinates)
+// v1.3.0 -- pie family (no axes, polar coordinates)
 const createBasePolarChart = (config, renderer) => { /* polar scaffold */ };
 export const createPieChart   = (c) => createBasePolarChart(c, PIE_RENDERER);
 export const createDonutChart = (c) => createBasePolarChart(c, DONUT_RENDERER);
 export const createRadarChart = (c) => createBasePolarChart(c, RADAR_RENDERER);
 
-// v1.2.0 -- scatter family (extends axis chart with size dimension)
+// v1.3.0 -- scatter family (extends axis chart with size dimension)
 export const createBubbleChart = (c) => createBaseAxisChart(c, BUBBLE_RENDERER);
 
 // v1.4.0 -- heatmap (2D categorical grid)
@@ -691,7 +702,246 @@ itself is fully allocation-free in steady state (verified by the
 | Cold-start overhead | NO | Single-figure ms; not yet measured |
 | Bundle size min+gz | NO | Single-file ESM, ~6 KB estimated; not yet minified |
 
-## SVG export (v1.2.0)
+## Brushing (v1.4.0-alpha.3)
+
+Opt in with `brush: true` on any axis-kernel chart. Shift+drag
+selects a rectangle; the chart emits `{ xMin, xMax, yMin, yMax, ids }`
+via `chart.brush`:
+
+```js
+const chart = createLineChart({
+    data: [...],
+    brush: true,
+    // optional visual override:
+    brushStyle: {
+        fill: 'rgba(255, 99, 0, 0.18)',
+        stroke: 'rgba(255, 99, 0, 0.8)',
+        lineDash: [6, 4],
+        lineWidth: 1.5,
+    },
+});
+chart.mount(target);
+```
+
+### `chart.brush` -- reactive selection accessor
+
+```js
+chart.brush();                                    // reactive read
+chart.brush.peek();                               // untracked read
+chart.brush.set({ xMin: 0, xMax: 50,
+                  yMin: 0, yMax: 100 });          // imperative set
+chart.brush.clear();                              // clear selection
+
+// Aliases:
+chart.setBrush({ ... });
+chart.clearBrush();
+```
+
+The selection shape is `{ xMin, xMax, yMin, yMax, ids }`:
+
+- `xMin/xMax/yMin/yMax` are data-space bounds.
+- `ids` is an array of indices into the **primary series** (the
+  first series in `series[]`, or the single-series `data`). It's
+  freshly allocated each time the user releases a brush gesture.
+- Programmatic `setBrush()` does NOT recompute `ids` -- if you set
+  the brush imperatively, `ids` stays as whatever you pass (or null).
+  Pass your own array if you want them; or compute from the bounds
+  yourself.
+
+`setBrush` / `clearBrush` throw if `brush: true` was not in config --
+the throw is intentional, it tells the caller to opt in.
+
+### Cross-chart linking
+
+The standard d3-brush use case -- brush a subset on chart A,
+filter/highlight matching data on chart B -- works directly via
+the reactive facade:
+
+```js
+import { effect } from '@zakkster/lite-signal';
+
+// User brushes on chartA; chartB filters in response.
+effect(() => {
+    const b = chartA.brush();
+    if (b && b.ids) {
+        chartB.highlightIds(b.ids);  // or any other side effect
+    } else {
+        chartB.clearHighlight();
+    }
+});
+```
+
+The brush signal updates on every `pointermove` while the gesture is
+active, so the cross-chart effect runs live during the drag. Debounce
+in user code if needed for very large datasets.
+
+### Modifier routing -- coexists with pan/zoom
+
+Bare drag = pan (when `pan: true`). Shift+drag = brush (when
+`brush: true`). Wheel = zoom (when `zoom: true`, regardless of
+modifier). The pointerdown handler checks `ev.shiftKey` and routes
+the gesture accordingly; pan exits early when shift is held AND
+brush is enabled. If brush is NOT enabled, the modifier is ignored
+and shift+drag falls through to pan.
+
+Click-to-clear: a shift+click with total drag distance under 3
+pixels is treated as a click and clears the existing brush. This
+matches d3-brush's default.
+
+### Visual
+
+A translucent rect overlay renders on top of the chart's data and
+crosshair. Defaults to a translucent accent fill with a dashed
+accent outline. Override via `brushStyle`:
+
+| Field | Default | Notes |
+|---|---|---|
+| `fill` | `'rgba(99, 102, 241, 0.15)'` | Translucent indigo. Pass any CSS color. |
+| `stroke` | `'rgba(99, 102, 241, 0.7)'` | Outline color. |
+| `lineDash` | `[4, 4]` | Pass `[]` for a solid outline. |
+| `lineWidth` | `1` | Stroke width. |
+
+### Caveats (alpha.3)
+
+- **IDs from primary series only.** Multi-series filtering is up to
+  the caller -- the brush bounds are the universal hook; compute
+  your own per-series indices from them.
+- **Fixed modifier.** alpha.3 ships with shift as the modifier; a
+  configurable modifier is a follow-up.
+- **No bar / polar / radar / heatmap.** Brushing is on axis-kernel
+  charts only. Different interaction models -- pie has no x/y
+  rect to select; heatmap selection would be cell-based, not
+  bounds-based.
+
+## Pan + zoom (v1.4.0-alpha.2)
+
+Opt in with `pan: true` and/or `zoom: true` on any axis-kernel chart
+(line, area, bubble, scatter):
+
+```js
+const chart = createLineChart({
+    data: [...],
+    pan: true,           // pointer-drag pans
+    zoom: true,          // wheel zooms around cursor
+    panBounds: 'data',   // 'data' (default) clamps; 'free' allows past data
+    zoomMin: 0.001,      // can zoom in until visible = 0.1% of data span
+    zoomMax: 100,        // can zoom out until visible = 100x data span
+    zoomStep: 1.15,      // wheel ratio per tick (default 1.15)
+});
+chart.mount(target);
+```
+
+### `chart.view` -- reactive view accessor
+
+Mirrors the `chart.crosshair` facade pattern:
+
+```js
+chart.view();                          // reactive read (tracks in effects)
+chart.view.peek();                     // untracked read
+chart.view.set({ xMin: 10, xMax: 50 }); // write (partial views supported)
+chart.view.reset();                    // back to null (follow data domain)
+
+// Imperative aliases:
+chart.setView({ xMin: 0, xMax: 100 });
+chart.resetView();
+```
+
+The view shape is `{ xMin, xMax, yMin, yMax }`, each field optionally
+`null` to fall back to the data-derived domain on that axis. This
+shape is intentionally symmetric with `lite-camera-max`'s camera
+signal so the same value drops into a future lite-gl `project()`
+function unchanged when the `@zakkster/lite-charts-gl` companion
+package lands.
+
+`setView` / `resetView` throw if neither `pan` nor `zoom` was set at
+construction -- the throw is intentional, it tells the caller to
+opt in.
+
+### Interaction model
+
+**Pan**: pointer-drag with the left button. The cursor-anchor
+convention (d3-zoom, Plotly, Google Maps) is used throughout -- the
+data point under the cursor at pointerdown stays under the cursor as
+it moves. Concretely:
+
+- Drag right -> view shifts left in data space (xMin decreases).
+  You see more of the data that was previously off-screen to the left.
+- Drag up -> view shifts down in data space (yMin decreases). The
+  content rolls up with the cursor; the y-axis labels effectively
+  scroll down.
+
+**Zoom**: wheel up zooms in, wheel down zooms out. Each tick scales
+the range by `zoomStep` (default 1.15). The data point under the
+cursor stays at the same screen pixel through the zoom -- this is
+what makes zoom-on-detail feel intuitive.
+
+**Modifier keys**: shift is reserved for alpha.3 brushing. alpha.2
+uses no modifiers -- bare drag pans, bare wheel zooms.
+
+### Bounds
+
+`panBounds: 'data'` (the default) keeps the view within the data
+domain. Pan or zoom into territory past the data -> the view shifts
+back so the data edge sits at the plot edge. Zoom out wider than
+data -> the view snaps to the full data domain.
+
+`panBounds: 'free'` allows any view (extend past data on either axis,
+zoom out arbitrarily). Useful for showing context space around the
+data, or for charts where the "data domain" doesn't have a fixed
+extent in the relevant axis.
+
+### Caveats worth knowing
+
+- **Linear arithmetic only in alpha.2.** For `yScale: { type: 'log' }`
+  charts, the pan/zoom math is technically wrong (adds and scales in
+  data space rather than log space) -- the chart still renders, but
+  pan magnitude won't feel right and zoom centered on a log scale
+  will skew. A log-aware path is a follow-up.
+- **Bar charts** inherit pan/zoom typing via `Omit<LineChartConfig,
+  ...>` but their band x-axis isn't ideal for panning. Visually
+  weird; not documented as supported in alpha.2.
+- **Polar / radar / heatmap kernels** don't get pan/zoom in alpha.2.
+  Different interaction models -- pie has no x/y space; heatmap uses
+  band scales on both axes.
+
+## Log scale (v1.4.0-alpha.0)
+
+Opt in with `yScale: { type: 'log' }` on any axis-kernel chart
+(line, area, bar, bubble, scatter):
+
+```js
+const chart = createLineChart({
+    data: [{x:0,y:1},{x:1,y:10},{x:2,y:100},{x:3,y:1000}],
+    yScale: { type: 'log' },
+    width: 600, height: 300,
+});
+chart.mount(target);
+```
+
+Base-10 logarithm. Tick generation routes through
+`@zakkster/lite-axis`'s `logTicks` -- decade boundaries (1, 10, 100,
+...) with the major-only mode for v1.4.0-alpha.0. The `map` /
+`invert` path uses `Math.log` / `Math.exp` with cached slope and
+intercept so per-point projection stays a single multiply-add after
+one log call.
+
+**Non-positive values.** `map(v <= 0)` returns NaN. Line and area
+draw fns break the segment on NaN positions; markers (bubble,
+scatter) skip them. Callers are responsible for whatever upstream
+filtering policy they want -- the chart will render whatever subset
+of the data has positive y values.
+
+**Caveats worth knowing.**
+
+- **Log + bar.** Convention is "don't" -- bars represent magnitude
+  from zero, and log has no meaningful zero. The library doesn't
+  block the combination, but the visual won't be what most readers
+  expect.
+- **Log on x-axis** isn't wired yet (v1.4.0-alpha.0 is y-axis only).
+  The plumbing is symmetric; x-axis log is a small follow-up if
+  needed.
+
+## SVG export (v1.3.0)
 
 Every chart exposes `chart.exportSVG(opts?)` which returns a complete
 SVG string of the chart's current frame:
@@ -750,7 +1000,7 @@ interface SVGExportOptions {
   context that originally laid out the labels).
 - Unsupported Canvas2D ops (gradients, shadows, drawImage) are
   silent no-ops in the shim -- none of the built-in chart code
-  uses them in v1.2.0.
+  uses them in v1.3.0.
 
 ## Capacity considerations
 
@@ -833,8 +1083,11 @@ forward plan and the development history that led here. Headlines:
 | **v1.2.0-alpha.1** | `createScatterChart` (eighth chart type); reuses the spatial-index foundation with `k = 1`. 210 tests. |
 | **v1.2.0-alpha.2** | Multi-series bubble + global size domain via bubble's `postExtract`; per-point color via `colorKey`; cross-series hit-test with `snapSeriesIdx`. 219 tests. |
 | **v1.2.0-alpha.3** | `createHeatmap` on a new `createBaseGridChart` kernel (the fourth). 231 tests. |
-| **v1.2.0** (this) | Heatmap polish (row + column highlight, quantile binning, auto-contrast value labels); `chart.destroy()` terminal teardown on every kernel; `chart.exportSVG()` across all nine charts via a Canvas2D-shim that walks the live scene tree (pixel-identical to canvas paint, minus DPR scaling); a zero-GC audit pass fixing four allocation traps. 263 tests. |
-| v1.4.0 | Log scale; pan + zoom; brushing primitives |
+| **v1.2.0** | Heatmap polish (row + column highlight, quantile binning, auto-contrast value labels); `chart.destroy()` terminal teardown on every kernel. 245 tests. |
+| **v1.3.0** | `chart.exportSVG()` across all nine charts via a Canvas2D-shim that walks the live scene tree. Pixel-identical to canvas paint (minus DPR scaling). Pre-existing bar-label centering bug found and fixed. 259 tests. |
+| **v1.4.0** (this) | Three interaction primitives on axis-kernel charts: log scale on y (`yScale: { type: 'log' }`), pan + zoom (`pan` / `zoom`, `chart.view`), brushing (`brush`, `chart.brush`). Plus four pre-existing allocation traps closed during a bare-metal audit. 320 tests. Shipped across alphas .0-.3; see CHANGELOG for the per-alpha breakdown. |
+| v1.5.0 (next) | TBD. Candidate themes: log-aware pan/zoom math (data-space subtraction is technically wrong for log); brush-on-band-axis (proper bar/band support); configurable brush modifier; brush IDs from all visible series instead of just the primary. |
+| **companion** | `@zakkster/lite-charts-gl` v0.1.0+ -- separate WebGL2 package built on `@zakkster/lite-gl`. Scatter / bubble / density charts targeting the 100k-1M point range. lite-charts core stays canvas-only and node-testable. |
 | v1.5.0 | Time-series specialized variants; legend virtualization via `lite-virtual`; annotation layer |
 
 ## Ecosystem

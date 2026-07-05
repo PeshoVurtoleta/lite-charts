@@ -1,8 +1,13 @@
 /**
  * @zakkster/lite-charts -- Reactive, zero-GC charts built on lite-scene.
  *
+ * v1.4.0 ships nine chart types on four independent kernels
+ * (line/area/bar/bubble/scatter, pie/donut, radar, heatmap) plus three
+ * interaction primitives on the axis kernel (log scale, pan + zoom,
+ * brushing) and SVG export on every chart. See CHANGELOG.md for the
+ * full release history.
  *
- * Author:  Zahary Shinikchiev
+ * Author:  Zahary Shinikchiev <shinikchiev@yahoo.com>
  * License: MIT
  */
 
@@ -23,6 +28,7 @@ import {
 } from '@zakkster/lite-scene';
 import {
     linearTicks,
+    logTicks,
     timeTicks,
     thinLabels,
     formatNumber,
@@ -209,6 +215,77 @@ const updateLinearScale = (s, dMin, dMax, rMin, rMax) => {
     const dRange = dMax - dMin;
     s._slope = dRange !== 0 ? (rMax - rMin) / dRange : 0;
     s._intercept = rMin - dMin * s._slope;
+    s._invSlope = s._slope !== 0 ? 1 / s._slope : 0;
+    return s;
+};
+
+// ---------------------------------------------------------------------------
+// Log scale (v1.4.0-alpha.0)
+// ---------------------------------------------------------------------------
+//
+// Base-10 logarithmic mapping. Same shape as the linear scale (dMin/dMax,
+// rMin/rMax, cached _slope/_intercept/_invSlope) but `map` does
+// `log(v) * slope + intercept` and `invert` does `exp(...)`.
+//
+// Non-positive values:
+//   - `map(v)` returns NaN for v <= 0. Draw fns are expected to skip
+//     NaN positions (line/area break the segment; markers skip).
+//   - `updateLogScale` clamps `dMin` to a tiny epsilon (1e-10) if a
+//     non-positive bound is passed -- a safety net so a degenerate
+//     domain doesn't bring the whole chart down. Callers should
+//     ideally filter non-positive values from the extracted domain
+//     before getting here.
+//
+// Bench note: `Math.log` is ~3-5 ns per call on modern V8. The current
+// tick-pixel loop runs maybe 12 ticks per axis at sub-1 Hz update rate
+// (resize / data change), so the log path adds negligible cost
+// compared to the linear inlined-multiply path.
+
+const makeLogScale = () => ({
+    type: 'log',
+    dMin: 1,
+    dMax: 10,
+    rMin: 0,
+    rMax: 1,
+    _slope: 1,
+    _intercept: 0,
+    _invSlope: 1,
+    _logDMin: 0,
+    _logDMax: Math.log(10),
+    map(v) {
+        // v <= 0: outside the domain of log; return NaN so draw code can
+        // break/skip. Math.log(0) is -Infinity which would propagate to
+        // -Infinity * slope = NaN anyway, but explicit is clearer.
+        if (v <= 0) return NaN;
+        return Math.log(v) * this._slope + this._intercept;
+    },
+    invert(px) {
+        return Math.exp((px - this._intercept) * this._invSlope);
+    },
+});
+
+const updateLogScale = (s, dMin, dMax, rMin, rMax) => {
+    // Safety net for degenerate domains. The chart's domain extraction is
+    // expected to handle this upstream, but a small epsilon keeps the
+    // scale evaluable rather than NaN-everywhere.
+    if (!(dMin > 0)) dMin = 1e-10;
+    if (!(dMax > 0)) dMax = dMin * 10;
+    if (dMax < dMin) {
+        const t = dMin;
+        dMin = dMax;
+        dMax = t;
+    }
+    s.dMin = dMin;
+    s.dMax = dMax;
+    s.rMin = rMin;
+    s.rMax = rMax;
+    const logMin = Math.log(dMin);
+    const logMax = Math.log(dMax);
+    s._logDMin = logMin;
+    s._logDMax = logMax;
+    const logRange = logMax - logMin;
+    s._slope = logRange !== 0 ? (rMax - rMin) / logRange : 0;
+    s._intercept = rMin - logMin * s._slope;
     s._invSlope = s._slope !== 0 ? 1 / s._slope : 0;
     return s;
 };
@@ -438,10 +515,7 @@ const extractBarSeriesData = (state, data, xAccessor, yAccessor, categories) => 
         // Linear scan -- categories arrays are small (typically < 30). A
         // hash map adds setup cost that beats scan only beyond ~1000.
         for (let c = 0; c < categories.length; c++) {
-            if (categories[c] === catName) {
-                idx = c;
-                break;
-            }
+            if (categories[c] === catName) { idx = c; break; }
         }
         if (idx < 0) {
             idx = categories.length;
@@ -1111,7 +1185,7 @@ const computeBarStacks = (states, visibility, categoriesRef) => {
     for (let s = 0; s < states.length; s++) {
         const st = states[s];
         st.stackBottoms = ensureFloat32(st.stackBottoms, nCats);
-        st.stackTops = ensureFloat32(st.stackTops, nCats);
+        st.stackTops    = ensureFloat32(st.stackTops, nCats);
         // Zero-fill to handle categories where this series has no row.
         for (let c = 0; c < nCats; c++) {
             st.stackBottoms[c] = 0;
@@ -1133,10 +1207,7 @@ const computeBarStacks = (states, visibility, categoriesRef) => {
             // worst case -- fine for the typical 5-30 category range).
             let v = 0;
             for (let r = 0; r < st.n; r++) {
-                if ((st.xs[r] | 0) === c) {
-                    v = st.ys[r];
-                    break;
-                }
+                if ((st.xs[r] | 0) === c) { v = st.ys[r]; break; }
             }
             if (v !== v || v < 0) v = 0;  // NaN guard + clamp negatives
             st.stackBottoms[c] = acc;
@@ -1211,7 +1282,7 @@ const makeBarDrawFn = (state, refs, plotBoundsBox, xBandScale, yScale, seriesIdx
     // horizontal offset; vertical extent comes from stackBottoms/stackTops
     // in data space.
     const stacked = state.stackBottoms !== null && state.stackTops !== null
-        && state.stackBottoms !== undefined && state.stackTops !== undefined;
+                 && state.stackBottoms !== undefined && state.stackTops !== undefined;
 
     const baselinePx = yScale.map(baseline);
     let barW, offsetX;
@@ -1256,13 +1327,8 @@ const makeBarDrawFn = (state, refs, plotBoundsBox, xBandScale, yScale, seriesIdx
         }
 
         // Clamp to plot rect.
-        if (top < plotT) {
-            h -= (plotT - top);
-            top = plotT;
-        }
-        if (top + h > plotB) {
-            h = plotB - top;
-        }
+        if (top < plotT) { h -= (plotT - top); top = plotT; }
+        if (top + h > plotB) { h = plotB - top; }
         if (h <= 0) continue;
 
         const barX = xBandScale.map(catIdx) + offsetX - barW / 2;
@@ -1275,13 +1341,8 @@ const makeBarDrawFn = (state, refs, plotBoundsBox, xBandScale, yScale, seriesIdx
         let rTL = 0, rTR = 0, rBR = 0, rBL = 0;
         if (useRound) {
             const isPositive = stacked || y >= baseline;
-            if (isPositive) {
-                rTL = cornerRadius;
-                rTR = cornerRadius;
-            } else {
-                rBR = cornerRadius;
-                rBL = cornerRadius;
-            }
+            if (isPositive) { rTL = cornerRadius; rTR = cornerRadius; }
+            else            { rBR = cornerRadius; rBL = cornerRadius; }
         }
 
         if (useRound) {
@@ -1340,7 +1401,7 @@ const buildBarAxis = (parent, opts) => {
             labelPool.push(axisGroup.add(textNode({
                 fill: opts.labelColor,
                 font: opts.font,
-                // v1.2.0: this was previously `anchor: 'center'` -- lite-scene's
+                // v1.3.0: this was previously `anchor: 'center'` -- lite-scene's
                 // text node uses `align`, not `anchor`, so the prop was silently
                 // dropped and `_align` defaulted to 'left'. The canvas visual
                 // looked "close enough" with single-character labels, but
@@ -1393,18 +1454,19 @@ const buildBarAxis = (parent, opts) => {
                     text: cats[i],
                 });
             } else {
-                labelPool[i].set({visible: false});
+                labelPool[i].set({ visible: false });
             }
         }
         for (let i = n; i < tickPool.length; i++) {
-            tickPool[i].set({visible: false});
-            labelPool[i].set({visible: false});
+            tickPool[i].set({ visible: false });
+            labelPool[i].set({ visible: false });
         }
     };
 
     const dispose = effect(rebuild);
-    return {axisGroup, dispose};
+    return { axisGroup, dispose };
 };
+
 
 
 const _charBuf = new Uint8Array(32);
@@ -1430,7 +1492,7 @@ const _decimalsFor = (v) => {
 const charBufToString = (buf, n) => {
     // Slow path (axis update only, not per-frame): build a JS string.
     //
-    // v1.2.0 (GC audit fix): was `let s = ''; for (...) s +=
+    // v1.4.0-alpha.1 (audit fix): was `let s = ''; for (...) s +=
     // String.fromCharCode(buf[i])` which allocates N intermediate
     // strings as V8 walks the rope. For an axis with ~20 ticks at
     // ~10 chars each that's ~200 string allocations per axis update.
@@ -1480,9 +1542,9 @@ const buildAxis = (parent, opts) => {
     const updateSpine = () => {
         const pb = opts.plotBoundsBox;
         if (isX) {
-            spine.set({x: pb.x, y: pb.y + pb.h, dx: pb.w, dy: 0});
+            spine.set({ x: pb.x, y: pb.y + pb.h, dx: pb.w, dy: 0 });
         } else {
-            spine.set({x: pb.x, y: pb.y, dx: 0, dy: pb.h});
+            spine.set({ x: pb.x, y: pb.y, dx: 0, dy: pb.h });
         }
     };
 
@@ -1500,7 +1562,7 @@ const buildAxis = (parent, opts) => {
                 align: isX ? 'center' : 'right',
                 baseline: isX ? 'top' : 'middle',
             }));
-            tickPool.push({tickLine: t, label: l});
+            tickPool.push({ tickLine: t, label: l });
         }
     };
 
@@ -1520,15 +1582,25 @@ const buildAxis = (parent, opts) => {
             const res = timeTicks(s.dMin, s.dMax, target, tickBuf);
             count = res.count;
             timeUnit = res.unit;
+        } else if (s.type === 'log') {
+            // v1.4.0-alpha.0: decade boundaries (1, 10, 100, ...). The
+            // `minor` flag for 2x/5x sub-ticks is currently off; we may
+            // expose it via `tickSubdivisions: 'major' | 'all'` in a
+            // later cut.
+            count = logTicks(s.dMin, s.dMax, target, tickBuf, false);
         } else {
             count = linearTicks(s.dMin, s.dMax, target, tickBuf);
         }
         if (count > TICK_BUF_SIZE) count = TICK_BUF_SIZE;
 
-        const slope = s._slope;
-        const intercept = s._intercept;
+        // v1.4.0-alpha.0: use the scale's `map` method (was an inlined
+        // `tickBuf[i] * slope + intercept`). This is the once-per-resize
+        // tick projection path -- the method-call overhead is ~12 calls
+        // per axis update and not on the per-frame draw path. The change
+        // lets log-scale ticks project correctly through `Math.log` *
+        // slope + intercept without a parallel code path.
         for (let i = 0; i < count; i++) {
-            pixelBuf[i] = tickBuf[i] * slope + intercept;
+            pixelBuf[i] = s.map(tickBuf[i]);
         }
         const minPx = opts.format === 'time' ? 70 : 40;
         const kept = thinLabels(tickBuf, count, pixelBuf, minPx, keepBuf);
@@ -1540,8 +1612,8 @@ const buildAxis = (parent, opts) => {
         for (let i = 0; i < tickPool.length; i++) {
             const pair = tickPool[i];
             if (i >= count) {
-                pair.tickLine.set({visible: false});
-                pair.label.set({visible: false});
+                pair.tickLine.set({ visible: false });
+                pair.label.set({ visible: false });
                 continue;
             }
             const px = pixelBuf[i];
@@ -1582,14 +1654,14 @@ const buildAxis = (parent, opts) => {
                     });
                 }
             } else {
-                pair.label.set({visible: false});
+                pair.label.set({ visible: false });
             }
         }
     };
 
     const dispose = effect(rebuild);
 
-    return {axisGroup, dispose};
+    return { axisGroup, dispose };
 };
 
 // ---------------------------------------------------------------------------
@@ -1635,26 +1707,28 @@ const buildGrid = (parent, opts) => {
             const xTarget = Math.max(2, Math.min(12, (pb.w / 80) | 0));
             if (opts.xFormat === 'time') {
                 xCount = timeTicks(xS.dMin, xS.dMax, xTarget, xTickBuf).count;
+            } else if (xS.type === 'log') {
+                xCount = logTicks(xS.dMin, xS.dMax, xTarget, xTickBuf, false);
             } else {
                 xCount = linearTicks(xS.dMin, xS.dMax, xTarget, xTickBuf);
             }
             if (xCount > TICK_BUF_SIZE) xCount = TICK_BUF_SIZE;
-            const xSlope = xS._slope;
-            const xIntercept = xS._intercept;
             for (let i = 0; i < xCount; i++) {
-                xPixelBuf[i] = xTickBuf[i] * xSlope + xIntercept;
+                xPixelBuf[i] = xS.map(xTickBuf[i]);
             }
         }
 
         let yCount = 0;
         if (opts.enableY) {
             const yTarget = Math.max(2, Math.min(12, (pb.h / 40) | 0));
-            yCount = linearTicks(yS.dMin, yS.dMax, yTarget, yTickBuf);
+            if (yS.type === 'log') {
+                yCount = logTicks(yS.dMin, yS.dMax, yTarget, yTickBuf, false);
+            } else {
+                yCount = linearTicks(yS.dMin, yS.dMax, yTarget, yTickBuf);
+            }
             if (yCount > TICK_BUF_SIZE) yCount = TICK_BUF_SIZE;
-            const ySlope = yS._slope;
-            const yIntercept = yS._intercept;
             for (let i = 0; i < yCount; i++) {
-                yPixelBuf[i] = yTickBuf[i] * ySlope + yIntercept;
+                yPixelBuf[i] = yS.map(yTickBuf[i]);
             }
         }
 
@@ -1683,19 +1757,19 @@ const buildGrid = (parent, opts) => {
         }
         // Hide unused pool entries.
         for (let i = total; i < linePool.length; i++) {
-            linePool[i].set({visible: false});
+            linePool[i].set({ visible: false });
         }
     };
 
     const dispose = effect(rebuild);
-    return {gridGroup, dispose};
+    return { gridGroup, dispose };
 };
 
 // ---------------------------------------------------------------------------
 // Default margins / config
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MARGIN = {top: 16, right: 24, bottom: 32, left: 56};
+const DEFAULT_MARGIN = { top: 16, right: 24, bottom: 32, left: 56 };
 const DEFAULT_AXIS_COLOR = '#888888';
 const DEFAULT_LABEL_COLOR = '#444444';
 const DEFAULT_LINE_COLOR = '#3b82f6';
@@ -1706,7 +1780,7 @@ const DEFAULT_TOOLTIP_BORDER = '#cccccc';
 const DEFAULT_TOOLTIP_MARKER_STROKE = '#ffffff';
 const DEFAULT_LEGEND_POSITION = 'bottom';
 const DEFAULT_GRID_COLOR = 'rgba(0,0,0,0.08)';
-const VALID_LEGEND_POSITIONS = {top: 1, bottom: 1, left: 1, right: 1};
+const VALID_LEGEND_POSITIONS = { top: 1, bottom: 1, left: 1, right: 1 };
 
 // Pre-allocated constants used by the crosshair draw fn. Avoids `[]` /
 // `Math.PI * 2` allocations on every mousemove redraw.
@@ -1756,6 +1830,132 @@ const niceYDomain = (yMin, yMax, opts) => {
         hi += 0.5;
     }
     return [lo, hi];
+};
+
+// v1.4.0-alpha.2 -- pan + zoom math.
+//
+// All three helpers are pure functions of their arguments (no closure
+// over chart state), defined module-level so `_testHelpers` can export
+// them for white-box unit tests without pinning the entire chart kernel
+// in the reachable set. The chart constructor uses them inside its
+// pointer/wheel listeners; tests exercise them directly.
+//
+// Convention:
+//   - `start` / `view` / `dataDom` are { xMin, xMax, yMin, yMax } records.
+//   - Pixel space is in CSS (logical) pixels; lite-scene's setTransform
+//     handles the logical->device mapping at draw time, so we don't
+//     touch DPR here.
+//   - The y-axis is flipped (canvas y grows downward). Pan negates dyPx;
+//     zoom mirrors the anchor fraction via `1 - ty` to keep "data
+//     point under cursor stays under cursor" intact.
+//
+// alpha.2 implements LINEAR arithmetic on the data domain. For log
+// scales the math is technically wrong (it adds/scales in data space
+// rather than log space) -- the chart still renders, but pan magnitude
+// won't feel right and zoom centered on a log scale will skew. A
+// log-aware path is a small follow-up; we want the API and the
+// linear-case behavior stable first.
+const _applyPan = (start, dxPx, dyPx, plotW, plotH) => {
+    const dxData = dxPx * (start.xMax - start.xMin) / plotW;
+    const dyData = -dyPx * (start.yMax - start.yMin) / plotH;
+    return {
+        xMin: start.xMin - dxData,
+        xMax: start.xMax - dxData,
+        yMin: start.yMin - dyData,
+        yMax: start.yMax - dyData,
+    };
+};
+
+const _applyZoom = (start, anchorPx, anchorPy, plotLeft, plotTop, plotW, plotH, zoomX, zoomY) => {
+    // Convert anchor pixel to data via the START domain (the scale
+    // we're zooming around). zoomX/zoomY < 1 means zoom in (range
+    // shrinks); > 1 means zoom out.
+    const tx = plotW > 0 ? (anchorPx - plotLeft) / plotW : 0.5;
+    const ty = plotH > 0 ? (anchorPy - plotTop) / plotH : 0.5;
+    const anchorDataX = start.xMin + tx * (start.xMax - start.xMin);
+    // y is flipped: top of plot = yMax, bottom = yMin.
+    const anchorDataY = start.yMax - ty * (start.yMax - start.yMin);
+    return {
+        xMin: anchorDataX - (anchorDataX - start.xMin) * zoomX,
+        xMax: anchorDataX + (start.xMax - anchorDataX) * zoomX,
+        yMin: anchorDataY - (anchorDataY - start.yMin) * zoomY,
+        yMax: anchorDataY + (start.yMax - anchorDataY) * zoomY,
+    };
+};
+
+const _clampToBounds = (view, dataDom) => {
+    // Width and height of the proposed view.
+    const vw = view.xMax - view.xMin;
+    const vh = view.yMax - view.yMin;
+    const dw = dataDom.xMax - dataDom.xMin;
+    const dh = dataDom.yMax - dataDom.yMin;
+    // x-axis: if view wider than data, snap to full data domain; else
+    // shift to keep within [dataXMin, dataXMax].
+    if (vw >= dw) {
+        view.xMin = dataDom.xMin;
+        view.xMax = dataDom.xMax;
+    } else if (view.xMin < dataDom.xMin) {
+        view.xMax += dataDom.xMin - view.xMin;
+        view.xMin = dataDom.xMin;
+    } else if (view.xMax > dataDom.xMax) {
+        view.xMin -= view.xMax - dataDom.xMax;
+        view.xMax = dataDom.xMax;
+    }
+    // y-axis: same pattern.
+    if (vh >= dh) {
+        view.yMin = dataDom.yMin;
+        view.yMax = dataDom.yMax;
+    } else if (view.yMin < dataDom.yMin) {
+        view.yMax += dataDom.yMin - view.yMin;
+        view.yMin = dataDom.yMin;
+    } else if (view.yMax > dataDom.yMax) {
+        view.yMin -= view.yMax - dataDom.yMax;
+        view.yMax = dataDom.yMax;
+    }
+    return view;
+};
+
+// v1.4.0-alpha.3 -- brush math.
+//
+// Pure module-level helpers, exported via _testHelpers. _normalizeBrushRect
+// orders a (px0, py0)-(px1, py1) drag rectangle into min/max corners.
+// _brushPxToData converts a pixel-space rect to data-space bounds via
+// the scale's invert. _computeBrushIds scans series xs/ys arrays for
+// points falling inside the data-space rect. ids are returned in a
+// freshly allocated array (not pooled -- aliasing across brushes would
+// surprise users); brushing is sub-Hz, the allocation cost is in the
+// noise band.
+const _normalizeBrushRect = (px0, py0, px1, py1) => ({
+    pxMin: Math.min(px0, px1),
+    pxMax: Math.max(px0, px1),
+    pyMin: Math.min(py0, py1),
+    pyMax: Math.max(py0, py1),
+});
+
+const _brushPxToData = (rect, xScale, yScale) => {
+    // y is flipped: pyMin (smaller pixel) maps to yMax (larger data).
+    const xMin = xScale.invert(rect.pxMin);
+    const xMax = xScale.invert(rect.pxMax);
+    const yMax = yScale.invert(rect.pyMin);
+    const yMin = yScale.invert(rect.pyMax);
+    return {
+        xMin: Math.min(xMin, xMax),
+        xMax: Math.max(xMin, xMax),
+        yMin: Math.min(yMin, yMax),
+        yMax: Math.max(yMin, yMax),
+    };
+};
+
+const _computeBrushIds = (xs, ys, n, xMin, xMax, yMin, yMax) => {
+    const ids = [];
+    for (let i = 0; i < n; i++) {
+        const x = xs[i];
+        const y = ys[i];
+        if (x >= xMin && x <= xMax && y >= yMin && y <= yMax) {
+            ids.push(i);
+        }
+    }
+    return ids;
 };
 
 const inferXScaleType = (firstRow, xKey) => {
@@ -1874,9 +2074,9 @@ const installLegend = (target, canvas, legendEl, position) => {
         : 'flex-start';
     wrapper.style.flexDirection =
         position === 'top' ? 'column-reverse' :
-            position === 'bottom' ? 'column' :
-                position === 'left' ? 'row-reverse' :
-                    'row';
+        position === 'bottom' ? 'column' :
+        position === 'left' ? 'row-reverse' :
+        'row';
     wrapper.style.gap = '4px';
 
     // Move canvas into wrapper (it's currently a child of target).
@@ -1928,10 +2128,7 @@ const _wireAutoSize = (container, widthAutoSig, heightAutoSig, disposers) => {
     const ro = new ResizeObserver(() => {
         if (scheduled) return;
         scheduled = true;
-        const update = () => {
-            scheduled = false;
-            readSize();
-        };
+        const update = () => { scheduled = false; readSize(); };
         if (typeof requestAnimationFrame === 'function') requestAnimationFrame(update);
         else update();
     });
@@ -1941,7 +2138,7 @@ const _wireAutoSize = (container, widthAutoSig, heightAutoSig, disposers) => {
 
 
 // ===========================================================================
-// SVG export (v1.2.0)
+// SVG export (v1.3.0)
 // ===========================================================================
 //
 // `chart.exportSVG()` mirrors what the chart paints to canvas as a static
@@ -1995,7 +2192,7 @@ const _escapeXML = (s) => {
 // the subset of Canvas2D that lite-scene's `drawSelf` and the charts'
 // pathNode draw callbacks actually use. Unsupported ops (drawImage,
 // gradients, shadows) are silent no-ops -- none of the chart code uses
-// them in v1.2.0.
+// them in v1.3.0.
 class _SVGRenderingContext2D {
     constructor(width, height) {
         this._w = width;
@@ -2003,7 +2200,7 @@ class _SVGRenderingContext2D {
         this._svg = '';
         this._defs = '';
         this._clipCounter = 0;
-        // v1.2.0 (GC audit fix): was `this._currentPath = ''` with
+        // v1.4.0-alpha.1 (audit fix): was `this._currentPath = ''` with
         // `_currentPath += chunk` accumulating into a rope string. For a
         // 100k-point line chart the rope would balloon then flatten on
         // the `<path d="...">` attribute read in stroke()/fill(),
@@ -2044,7 +2241,6 @@ class _SVGRenderingContext2D {
             clipPathId: this._clipPathId,
         });
     }
-
     restore() {
         const s = this._stack.pop();
         if (!s) return;
@@ -2067,70 +2263,45 @@ class _SVGRenderingContext2D {
         const m = this._ctm;
         return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
     }
-
     translate(dx, dy) {
         const m = this._ctm;
         m[4] += m[0] * dx + m[2] * dy;
         m[5] += m[1] * dx + m[3] * dy;
     }
-
     scale(sx, sy) {
         const m = this._ctm;
-        m[0] *= sx;
-        m[1] *= sx;
-        m[2] *= sy;
-        m[3] *= sy;
+        m[0] *= sx; m[1] *= sx;
+        m[2] *= sy; m[3] *= sy;
     }
-
     rotate(theta) {
         const m = this._ctm;
         const cos = Math.cos(theta);
         const sin = Math.sin(theta);
-        const a = m[0] * cos + m[2] * sin;
-        const b = m[1] * cos + m[3] * sin;
+        const a =  m[0] * cos + m[2] * sin;
+        const b =  m[1] * cos + m[3] * sin;
         const c = -m[0] * sin + m[2] * cos;
         const d = -m[1] * sin + m[3] * cos;
-        m[0] = a;
-        m[1] = b;
-        m[2] = c;
-        m[3] = d;
+        m[0] = a; m[1] = b; m[2] = c; m[3] = d;
     }
-
-    setTransform(a, b, c, d, e, f) {
-        this._ctm = [a, b, c, d, e, f];
-    }
-
-    resetTransform() {
-        this._ctm = [1, 0, 0, 1, 0, 0];
-    }
+    setTransform(a, b, c, d, e, f) { this._ctm = [a, b, c, d, e, f]; }
+    resetTransform() { this._ctm = [1, 0, 0, 1, 0, 0]; }
 
     // ---- Paths -------------------------------------------------------
-    // v1.2.0 (GC audit fix): every path command pushes into the
+    // v1.4.0-alpha.1 (audit fix): every path command pushes into the
     // shared `_pathChunks` array. `_pathD()` joins exactly once when
     // stroke/fill/clip needs the d-attribute string. beginPath() resets
     // by truncating the array length (in-place; no realloc).
-    _pathD() {
-        return this._pathChunks.join('');
-    }
-
-    beginPath() {
-        this._pathChunks.length = 0;
-    }
-
-    closePath() {
-        this._pathChunks.push('Z');
-    }
-
+    _pathD() { return this._pathChunks.join(''); }
+    beginPath() { this._pathChunks.length = 0; }
+    closePath() { this._pathChunks.push('Z'); }
     moveTo(x, y) {
         const [px, py] = this._t(x, y);
         this._pathChunks.push('M', _emitNumber(px), ' ', _emitNumber(py));
     }
-
     lineTo(x, y) {
         const [px, py] = this._t(x, y);
         this._pathChunks.push('L', _emitNumber(px), ' ', _emitNumber(py));
     }
-
     bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
         const [a, b] = this._t(c1x, c1y);
         const [c, d] = this._t(c2x, c2y);
@@ -2140,7 +2311,6 @@ class _SVGRenderingContext2D {
             _emitNumber(c), ' ', _emitNumber(d), ' ',
             _emitNumber(e), ' ', _emitNumber(f));
     }
-
     quadraticCurveTo(cx, cy, x, y) {
         const [a, b] = this._t(cx, cy);
         const [c, d] = this._t(x, y);
@@ -2148,7 +2318,6 @@ class _SVGRenderingContext2D {
             _emitNumber(a), ' ', _emitNumber(b), ' ',
             _emitNumber(c), ' ', _emitNumber(d));
     }
-
     rect(x, y, w, h) {
         // Path-form rect (the form drawSelf's "rect" kind uses before fill/stroke)
         const [a, b] = this._t(x, y);
@@ -2162,7 +2331,6 @@ class _SVGRenderingContext2D {
             'L', _emitNumber(g), ' ', _emitNumber(hh),
             'Z');
     }
-
     arc(cx, cy, r, startAngle, endAngle, anticlockwise) {
         // Approximate uniform scale (no skew) for the radius. All chart code
         // satisfies this; lite-scene's transforms are translate / rotate /
@@ -2200,7 +2368,6 @@ class _SVGRenderingContext2D {
                 _emitNumber(eX), ' ', _emitNumber(eY));
         }
     }
-
     arcTo(x1, y1, x2, y2, _r) {
         // Approximate: lineTo each point. The arcTo fallback in bar's
         // rounded-corner code only invokes this with small r, so the visual
@@ -2214,14 +2381,10 @@ class _SVGRenderingContext2D {
             'L', _emitNumber(p1x), ' ', _emitNumber(p1y),
             'L', _emitNumber(p2x), ' ', _emitNumber(p2y));
     }
-
     roundRect(x, y, w, h, r) {
         let rTL, rTR, rBR, rBL;
         if (Array.isArray(r)) {
-            rTL = +r[0] || 0;
-            rTR = +r[1] || 0;
-            rBR = +r[2] || 0;
-            rBL = +r[3] || 0;
+            rTL = +r[0] || 0; rTR = +r[1] || 0; rBR = +r[2] || 0; rBL = +r[3] || 0;
         } else {
             rTL = rTR = rBR = rBL = +r || 0;
         }
@@ -2241,28 +2404,23 @@ class _SVGRenderingContext2D {
             const [a, b] = this._t(px, py);
             chunks.push(_emitNumber(a), ' ', _emitNumber(b));
         };
-        chunks.push('M');
-        pushP(x + rTL, y);
-        chunks.push('L');
-        pushP(x + w - rTR, y);
+        chunks.push('M'); pushP(x + rTL, y);
+        chunks.push('L'); pushP(x + w - rTR, y);
         if (rTR > 0) {
             chunks.push('A', _emitNumber(rTR * scl), ' ', _emitNumber(rTR * scl), ' 0 0 1 ');
             pushP(x + w, y + rTR);
         }
-        chunks.push('L');
-        pushP(x + w, y + h - rBR);
+        chunks.push('L'); pushP(x + w, y + h - rBR);
         if (rBR > 0) {
             chunks.push('A', _emitNumber(rBR * scl), ' ', _emitNumber(rBR * scl), ' 0 0 1 ');
             pushP(x + w - rBR, y + h);
         }
-        chunks.push('L');
-        pushP(x + rBL, y + h);
+        chunks.push('L'); pushP(x + rBL, y + h);
         if (rBL > 0) {
             chunks.push('A', _emitNumber(rBL * scl), ' ', _emitNumber(rBL * scl), ' 0 0 1 ');
             pushP(x, y + h - rBL);
         }
-        chunks.push('L');
-        pushP(x, y + rTL);
+        chunks.push('L'); pushP(x, y + rTL);
         if (rTL > 0) {
             chunks.push('A', _emitNumber(rTL * scl), ' ', _emitNumber(rTL * scl), ' 0 0 1 ');
             pushP(x + rTL, y);
@@ -2277,7 +2435,6 @@ class _SVGRenderingContext2D {
         if (this._clipPathId) s += ' clip-path="url(#' + this._clipPathId + ')"';
         return s;
     }
-
     stroke() {
         if (this._pathChunks.length === 0) return;
         const d = this._pathD();
@@ -2290,7 +2447,6 @@ class _SVGRenderingContext2D {
         attrs += this._commonAttrs();
         this._svg += '<path' + attrs + '/>';
     }
-
     fill() {
         if (this._pathChunks.length === 0) return;
         const d = this._pathD();
@@ -2309,7 +2465,6 @@ class _SVGRenderingContext2D {
         // CTM has no rotation/skew if (m[1] === 0 && m[2] === 0).
         return m[1] === 0 && m[2] === 0;
     }
-
     fillRect(x, y, w, h) {
         if (this._axisAligned()) {
             const [px, py] = this._t(x, y);
@@ -2334,7 +2489,6 @@ class _SVGRenderingContext2D {
             this._pathChunks = saved;
         }
     }
-
     strokeRect(x, y, w, h) {
         if (this._axisAligned()) {
             const [px, py] = this._t(x, y);
@@ -2355,19 +2509,11 @@ class _SVGRenderingContext2D {
             this._pathChunks = saved;
         }
     }
-
-    clearRect() { /* SVG default is transparent; no-op */
-    }
+    clearRect() { /* SVG default is transparent; no-op */ }
 
     // ---- Text --------------------------------------------------------
-    fillText(text, x, y) {
-        this._emitText(text, x, y, false);
-    }
-
-    strokeText(text, x, y) {
-        this._emitText(text, x, y, true);
-    }
-
+    fillText(text, x, y) { this._emitText(text, x, y, false); }
+    strokeText(text, x, y) { this._emitText(text, x, y, true); }
     _emitText(text, x, y, stroke) {
         const [px, py] = this._t(x, y);
         const [size, family] = this._parseFont(this.font);
@@ -2387,52 +2533,35 @@ class _SVGRenderingContext2D {
         attrs += this._commonAttrs();
         this._svg += '<text' + attrs + '>' + _escapeXML(text) + '</text>';
     }
-
     measureText(text) {
         const [size] = this._parseFont(this.font);
-        return {width: text.length * size * 0.55};
+        return { width: text.length * size * 0.55 };
     }
-
     _parseFont(font) {
         // "13px sans-serif" or "bold 12px 'Helvetica Neue', sans-serif"
         const m = font.match(/(\d+(?:\.\d+)?)px\s+(.+)/);
         if (m) return [+m[1], m[2]];
         return [10, font];
     }
-
     _textAnchor() {
         switch (this.textAlign) {
-            case 'right':
-            case 'end':
-                return 'end';
-            case 'center':
-                return 'middle';
+            case 'right': case 'end': return 'end';
+            case 'center': return 'middle';
         }
         return 'start';
     }
-
     _textBaseline() {
         switch (this.textBaseline) {
-            case 'top':
-            case 'hanging':
-                return 'hanging';
-            case 'middle':
-                return 'central';
-            case 'bottom':
-            case 'ideographic':
-                return 'text-after-edge';
+            case 'top': case 'hanging': return 'hanging';
+            case 'middle': return 'central';
+            case 'bottom': case 'ideographic': return 'text-after-edge';
         }
         return 'alphabetic';
     }
 
     // ---- Line dash ---------------------------------------------------
-    setLineDash(dash) {
-        this._lineDash = Array.isArray(dash) ? dash.slice() : [];
-    }
-
-    getLineDash() {
-        return this._lineDash.slice();
-    }
+    setLineDash(dash) { this._lineDash = Array.isArray(dash) ? dash.slice() : []; }
+    getLineDash() { return this._lineDash.slice(); }
 
     // ---- Clipping ----------------------------------------------------
     clip() {
@@ -2443,16 +2572,9 @@ class _SVGRenderingContext2D {
     }
 
     // ---- No-op stubs -------------------------------------------------
-    drawImage() { /* not used by any chart in v1.2.0 */
-    }
-
-    createLinearGradient() {
-        return this.strokeStyle;
-    }
-
-    createRadialGradient() {
-        return this.strokeStyle;
-    }
+    drawImage() { /* not used by any chart in v1.3.0 */ }
+    createLinearGradient() { return this.strokeStyle; }
+    createRadialGradient() { return this.strokeStyle; }
 
     // ---- Output ------------------------------------------------------
     toSVG(background) {
@@ -2503,30 +2625,16 @@ const _drawSelfToSVG = (ctx, n) => {
             } else {
                 ctx.rect(0, 0, n._width, n._height);
             }
-            if (n._fill) {
-                ctx.fillStyle = n._fill;
-                ctx.fill();
-            }
-            if (n._stroke) {
-                ctx.strokeStyle = n._stroke;
-                ctx.lineWidth = n._strokeWidth;
-                ctx.stroke();
-            }
+            if (n._fill)   { ctx.fillStyle = n._fill;   ctx.fill(); }
+            if (n._stroke) { ctx.strokeStyle = n._stroke; ctx.lineWidth = n._strokeWidth; ctx.stroke(); }
             return;
         }
         case 'circle': {
             if (n._radius <= 0) return;
             ctx.beginPath();
             ctx.arc(0, 0, n._radius, 0, Math.PI * 2);
-            if (n._fill) {
-                ctx.fillStyle = n._fill;
-                ctx.fill();
-            }
-            if (n._stroke) {
-                ctx.strokeStyle = n._stroke;
-                ctx.lineWidth = n._strokeWidth;
-                ctx.stroke();
-            }
+            if (n._fill)   { ctx.fillStyle = n._fill;   ctx.fill(); }
+            if (n._stroke) { ctx.strokeStyle = n._stroke; ctx.lineWidth = n._strokeWidth; ctx.stroke(); }
             return;
         }
         case 'line': {
@@ -2543,22 +2651,15 @@ const _drawSelfToSVG = (ctx, n) => {
             ctx.font = n._font;
             ctx.textAlign = n._align;
             ctx.textBaseline = n._baseline;
-            if (n._fill) {
-                ctx.fillStyle = n._fill;
-                ctx.fillText(n._text, 0, 0);
-            }
-            if (n._stroke) {
-                ctx.strokeStyle = n._stroke;
-                ctx.lineWidth = n._strokeWidth;
-                ctx.strokeText(n._text, 0, 0);
-            }
+            if (n._fill)   { ctx.fillStyle = n._fill;   ctx.fillText(n._text, 0, 0); }
+            if (n._stroke) { ctx.strokeStyle = n._stroke; ctx.lineWidth = n._strokeWidth; ctx.strokeText(n._text, 0, 0); }
             return;
         }
         case 'path': {
             if (n._draw) n._draw(ctx, n);
             return;
         }
-        // group / image: no self-draw (image not supported in SVG export v1.2.0)
+        // group / image: no self-draw (image not supported in SVG export v1.3.0)
     }
 };
 
@@ -2639,7 +2740,7 @@ const _numericTooltipHeader = (snapIdx, snapDomainX, xScaleType /*, ctx*/) =>
     formatTooltipHeader(snapDomainX, xScaleType);
 
 const _buildAxisX = (parent, opts /*, ctx*/) =>
-    buildAxis(parent, {orientation: 'x', ...opts});
+    buildAxis(parent, { orientation: 'x', ...opts });
 
 const _extractLineData = (state, data, xAcc, yAcc /*, ctx*/) =>
     extractSeriesData(state, data, xAcc, yAcc);
@@ -2656,7 +2757,7 @@ const _makeAreaDraw = (state, refs, plotBoundsBox, seriesIdx, totalSeries, ctx) 
 const _initAreaOpts = (config) => ({
     baseline: config.baseline != null ? config.baseline : 0,
     stroke: config.stroke !== false,
-    fillOpacityRef: {value: config.fillOpacity != null ? config.fillOpacity : 0.3},
+    fillOpacityRef: { value: config.fillOpacity != null ? config.fillOpacity : 0.3 },
 });
 
 // Line renderer: numeric x, polyline draw, bisect hit detection, markers on snap.
@@ -2666,7 +2767,7 @@ const LINE_RENDERER = {
     createXScale: makeLinearScale,
     initOpts: null,
     extractData: _extractLineData,
-    yDefaults: {nice: true},
+    yDefaults: { nice: true },
     updateXScale: _updateXScaleLinear,
     projectToPixels: true,
     enableXGrid: true,
@@ -2685,7 +2786,7 @@ const AREA_RENDERER = {
     createXScale: makeLinearScale,
     initOpts: _initAreaOpts,
     extractData: _extractLineData,
-    yDefaults: {nice: true},
+    yDefaults: { nice: true },
     updateXScale: _updateXScaleLinear,
     projectToPixels: true,
     enableXGrid: true,
@@ -2720,7 +2821,7 @@ const _initBarOpts = (config) => {
         // v1.1.0
         stack: config.stack === true,
         cornerRadius: config.cornerRadius != null ? Math.max(0, +config.cornerRadius) : 0,
-        hoverTintRef: {value: hoverTintValue},
+        hoverTintRef: { value: hoverTintValue },
     };
 };
 
@@ -2743,7 +2844,7 @@ const _barPostExtract = (states, ctx) => {
 
 const _updateXScaleBand = (xScale, dxMin, dxMax, rMin, rMax, ctx) =>
     updateBandScale(xScale, ctx.categoriesRef.value.length, rMin, rMax,
-        ctx.opts.paddingInner, ctx.opts.paddingOuter);
+                    ctx.opts.paddingInner, ctx.opts.paddingOuter);
 
 const _buildAxisBar = (parent, opts, ctx) =>
     buildBarAxis(parent, {
@@ -2759,11 +2860,11 @@ const _buildAxisBar = (parent, opts, ctx) =>
 
 const _makeBarDraw = (state, refs, plotBoundsBox, seriesIdx, totalSeries, ctx) =>
     makeBarDrawFn(state, refs, plotBoundsBox,
-        ctx.xScale, ctx.yScale,
-        seriesIdx, totalSeries,
-        ctx.opts.baseline, ctx.opts.groupInnerPad,
-        ctx.opts.cornerRadius, ctx.opts.hoverTintRef,
-        ctx.crosshairDataRef);
+                  ctx.xScale, ctx.yScale,
+                  seriesIdx, totalSeries,
+                  ctx.opts.baseline, ctx.opts.groupInnerPad,
+                  ctx.opts.cornerRadius, ctx.opts.hoverTintRef,
+                  ctx.crosshairDataRef);
 
 const _bandHitTest = (canvasX, /*canvasY*/_cy, primary, xScale, ctx) => {
     if (ctx.categoriesRef.value.length === 0) return null;
@@ -2796,7 +2897,7 @@ const BAR_RENDERER = {
     initOpts: _initBarOpts,
     extractData: _extractBarData,
     postExtract: _barPostExtract,  // v1.1.0: stack pass
-    yDefaults: {nice: true, zero: true},
+    yDefaults: { nice: true, zero: true },
     updateXScale: _updateXScaleBand,
     projectToPixels: false,
     enableXGrid: false,
@@ -2886,7 +2987,7 @@ const SPATIAL_INDEX_HIT_BUFFER_SIZE = 8;  // k for findNearest; balances
 const _ensureHitBuffers = (state) => {
     if (!state._hitIndices) {
         state._hitIndices = new Int32Array(SPATIAL_INDEX_HIT_BUFFER_SIZE);
-        state._hitDistSq = new Float32Array(SPATIAL_INDEX_HIT_BUFFER_SIZE);
+        state._hitDistSq  = new Float32Array(SPATIAL_INDEX_HIT_BUFFER_SIZE);
     }
 };
 
@@ -2921,9 +3022,9 @@ const _initBubbleOpts = (config) => {
         // 'linear': radius-proportional; useful when the size dimension is
         // already a radius/length quantity rather than a magnitude.
         sizeScaleType: config.sizeScale === 'linear' ? 'linear' : 'sqrt',
-        strokeRef: {value: config.stroke != null ? config.stroke : '#ffffff'},
-        strokeWidthRef: {value: config.strokeWidth != null ? +config.strokeWidth : 1},
-        fillOpacityRef: {value: config.fillOpacity != null ? +config.fillOpacity : 0.6},
+        strokeRef: { value: config.stroke != null ? config.stroke : '#ffffff' },
+        strokeWidthRef: { value: config.strokeWidth != null ? +config.strokeWidth : 1 },
+        fillOpacityRef: { value: config.fillOpacity != null ? +config.fillOpacity : 0.6 },
         // v1.2.0-alpha.0: spatial-index integration. Pass a factory matching
         // the SpatialIndexFactory contract (see notes above) to enable
         // O(log n) hit-test on dense bubble clouds. Threshold defaults to
@@ -3231,10 +3332,7 @@ const _bubbleHitTestSingle = (canvasX, canvasY, primary, opts) => {
             const dx = canvasX - x;
             const dy = canvasY - y;
             if (dx * dx + dy * dy <= r * r) {
-                if (r < bestR) {
-                    bestR = r;
-                    bestIdx = i;
-                }
+                if (r < bestR) { bestR = r; bestIdx = i; }
             }
         }
     }
@@ -3321,7 +3419,7 @@ const BUBBLE_RENDERER = {
     initOpts: _initBubbleOpts,
     extractData: _extractBubbleData,
     postExtract: _bubblePostExtract,  // v1.2.0-alpha.2: global size domain
-    yDefaults: {nice: true},
+    yDefaults: { nice: true },
     updateXScale: _updateXScaleLinear,
     projectToPixels: true,           // x/y projection; size projection happens in extractData
     enableXGrid: true,
@@ -3361,9 +3459,9 @@ const _initScatterOpts = (config) => {
     return {
         markerSize,
         hitToleranceSq: hitTolerance * hitTolerance,
-        strokeRef: {value: config.stroke != null ? config.stroke : null},
-        strokeWidthRef: {value: config.strokeWidth != null ? +config.strokeWidth : 0},
-        fillOpacityRef: {value: config.fillOpacity != null ? +config.fillOpacity : 1},
+        strokeRef: { value: config.stroke != null ? config.stroke : null },
+        strokeWidthRef: { value: config.strokeWidth != null ? +config.strokeWidth : 0 },
+        fillOpacityRef: { value: config.fillOpacity != null ? +config.fillOpacity : 1 },
         // v1.2.0-alpha.0: same spatial-index plumbing as bubble. k = 1 in
         // findNearest because scatter has no overlap; the single nearest
         // point either is or isn't inside the hit-tolerance disc.
@@ -3493,7 +3591,7 @@ const SCATTER_RENDERER = {
     createXScale: makeLinearScale,
     initOpts: _initScatterOpts,
     extractData: _extractScatterData,
-    yDefaults: {nice: true},
+    yDefaults: { nice: true },
     updateXScale: _updateXScaleLinear,
     projectToPixels: true,
     enableXGrid: true,
@@ -3570,10 +3668,7 @@ const createBaseAxisChart = (config, renderer) => {
     // (config.data, config.width when reactive, etc.) are owned by the user
     // and NEVER pushed here.
     const _ownedSignals = [];
-    const _own = (s) => {
-        _ownedSignals.push(s);
-        return s;
-    };
+    const _own = (s) => { _ownedSignals.push(s); return s; };
     const widthAutoSig = widthExplicit ? null : _own(signal(800));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthAcc = widthExplicit ? asAccessor(config.width) : widthAutoSig;
@@ -3612,13 +3707,20 @@ const createBaseAxisChart = (config, renderer) => {
     // For bar charts, x is categorical -- override the inferred type to 'band'.
     if (renderer.forceXType) resolvedXType = renderer.forceXType;
     const xScale = renderer.createXScale(resolvedXType);
-    const yScale = makeLinearScale('linear');
+
+    // v1.4.0-alpha.0: y-scale type. `yScale: { type: 'log' }` opts in to a
+    // base-10 log scale; default is linear. Log y is supported on every
+    // axis-kernel chart (line/area/bar/bubble/scatter); convention says
+    // log + bar is rarely meaningful, but the chart will render whatever
+    // the user opts into.
+    const yScaleType = (config.yScale && config.yScale.type === 'log') ? 'log' : 'linear';
+    const yScale = yScaleType === 'log' ? makeLogScale() : makeLinearScale('linear');
 
     // Bar-chart shared state: the union of category names across all visible
     // series, in first-seen order. Mutated in place by extractBarSeriesData
     // during data extraction; bar axis + bandScale read .value. Always
     // allocated (cheap) -- non-bar renderers simply never reference it.
-    const categoriesRef = {value: []};
+    const categoriesRef = { value: [] };
 
     // Chart-type-specific options bag. `null` for line; structured config
     // for area / bar / future renderers.
@@ -3648,7 +3750,7 @@ const createBaseAxisChart = (config, renderer) => {
     const scaleVersion = _own(signal(0));
 
     // -- Plot bounds: a single mutable box + a signal that publishes "the box changed" --
-    const plotBoundsBox = {x: 0, y: 0, w: 0, h: 0};
+    const plotBoundsBox = { x: 0, y: 0, w: 0, h: 0 };
     const plotBoundsSignal = _own(signal(0));
 
     // -- Refs that the draw closures read (mutated by an effect) --
@@ -3656,11 +3758,11 @@ const createBaseAxisChart = (config, renderer) => {
     // draw fns (which run outside a reactive context) can read synchronously
     // without going through signal-call overhead.
     const seriesRefs = normalized.map((s) => ({
-        colorRef: {value: '#888'},
-        lineWidthRef: {value: s.lineWidth},
-        visibleRef: {value: true},
-        interpolationRef: {value: INTERP_LINEAR},
-        markersRef: {value: null},
+        colorRef: { value: '#888' },
+        lineWidthRef: { value: s.lineWidth },
+        visibleRef: { value: true },
+        interpolationRef: { value: INTERP_LINEAR },
+        markersRef: { value: null },
     }));
 
     // -- Public series-visibility signals. Used by the legend click handler,
@@ -3671,9 +3773,9 @@ const createBaseAxisChart = (config, renderer) => {
 
     // -- Axis-render styling refs --
     const axisStyleRefs = {
-        tickColor: {value: DEFAULT_AXIS_COLOR},
-        labelColor: {value: DEFAULT_LABEL_COLOR},
-        font: {value: config.font != null ? config.font : DEFAULT_FONT},
+        tickColor: { value: DEFAULT_AXIS_COLOR },
+        labelColor: { value: DEFAULT_LABEL_COLOR },
+        font: { value: config.font != null ? config.font : DEFAULT_FONT },
     };
 
     // (areaOpts and barOpts have been replaced by chartOpts -- a unified
@@ -3694,7 +3796,7 @@ const createBaseAxisChart = (config, renderer) => {
         gridEnableY = config.grid.y !== false;
         if (config.grid.color) gridColorSpec = config.grid.color;
     }
-    const gridColorRef = {value: gridColorSpec};
+    const gridColorRef = { value: gridColorSpec };
 
     // -- Legend config --
     // `legend: false` disables. `legend: 'top'|'bottom'|'left'|'right'` is
@@ -3731,7 +3833,7 @@ const createBaseAxisChart = (config, renderer) => {
     const crosshairColorSpec = crosshairOpts && crosshairOpts.color
         ? crosshairOpts.color
         : DEFAULT_CROSSHAIR_COLOR;
-    const crosshairColorRef = {value: crosshairColorSpec};
+    const crosshairColorRef = { value: crosshairColorSpec };
     const crosshairDash = crosshairOpts && crosshairOpts.dash ? crosshairOpts.dash : [3, 3];
     const tooltipBgSpec = tooltipOpts && tooltipOpts.background
         ? tooltipOpts.background
@@ -3739,8 +3841,8 @@ const createBaseAxisChart = (config, renderer) => {
     const tooltipBorderSpec = tooltipOpts && tooltipOpts.border
         ? tooltipOpts.border
         : DEFAULT_TOOLTIP_BORDER;
-    const tooltipBgRef = {value: tooltipBgSpec};
-    const tooltipBorderRef = {value: tooltipBorderSpec};
+    const tooltipBgRef = { value: tooltipBgSpec };
+    const tooltipBorderRef = { value: tooltipBorderSpec };
     const tooltipFormatter = tooltipOpts && typeof tooltipOpts.format === 'function'
         ? tooltipOpts.format
         : null;
@@ -3798,6 +3900,125 @@ const createBaseAxisChart = (config, renderer) => {
     let legendWrapper = null;     // wrapper around canvas+legend if we created one
     const disposers = [];
     let mounted = false;
+
+    // v1.4.0-alpha.2: opt-in pan + zoom. View signal carries the
+    // currently-visible domain as { xMin, xMax, yMin, yMax }; any field
+    // can be null to fall back to the data-derived domain. Shape is
+    // intentionally symmetric with `lite-camera-max`'s camera signal so
+    // the same value drops into a lite-gl `project()` function unchanged
+    // when the lite-charts-gl companion package lands.
+    //
+    // Opt-in: both `pan` and `zoom` default to false. When neither is
+    // set, the view signal isn't allocated and no listeners attach --
+    // zero cost for charts that don't want interactions.
+    const panEnabled = !!config.pan;
+    const zoomEnabled = !!config.zoom;
+    // v1.4.0-alpha.3: brush -- shift+drag selects a rect, emits the
+    // resulting selection through `chart.brush`. Independent of pan/zoom
+    // but the same `interactionsEnabled` flag controls allocation of
+    // viewSig + _dataDomain + listener attachment, so flipping `brush`
+    // on alone is sufficient to wire up the listener cluster.
+    const brushEnabled = !!config.brush;
+    const interactionsEnabled = panEnabled || zoomEnabled || brushEnabled;
+    const viewSig = (panEnabled || zoomEnabled) ? _own(signal(null)) : null;
+    const brushSig = brushEnabled ? _own(signal(null)) : null;
+    const panBoundsMode = config.panBounds === 'free' ? 'free' : 'data';
+    // Zoom range expressed as a multiplier on the data domain. Default
+    // [0.01, 1000] -- zoom out to 100x the data span, zoom in to 1/1000
+    // of it. zoomMin === zoomMax disables zoom even if `zoom: true`.
+    const zoomMinFactor = config.zoomMin != null ? Math.max(1e-6, +config.zoomMin) : 0.01;
+    const zoomMaxFactor = config.zoomMax != null ? Math.max(zoomMinFactor, +config.zoomMax) : 1000;
+    // Wheel ratio per tick. 1.1 means each wheel notch zooms in by
+    // 1.1x (or out by 1/1.1x). Configurable for users who want finer or
+    // coarser zoom granularity.
+    const zoomWheelStep = config.zoomStep != null ? Math.max(1.001, +config.zoomStep) : 1.15;
+
+    // Data-derived domain snapshot. The scale-update effect populates this
+    // every time it runs; pan/zoom math reads from it to compute bounds.
+    // Kept as a plain object (no signal, not reactive) so the listeners
+    // can read without triggering effects.
+    const _dataDomain = interactionsEnabled
+        ? { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
+        : null;
+
+    // Reactive view facade mirroring the crosshair facade pattern: `view()`
+    // reads (tracked), `view.peek()` reads (untracked), `view.set(v)` writes,
+    // `view.reset()` clears to null. Always defined; throws on set/reset if
+    // interactions are not enabled (signals the user they need `pan: true`
+    // or `zoom: true`).
+    const viewFacade = function () {
+        return viewSig ? viewSig() : null;
+    };
+    viewFacade.peek = () => viewSig ? untrack(() => viewSig()) : null;
+    viewFacade.set = (v) => {
+        if (!viewSig) throw new Error('lite-charts: setView() requires `pan: true` or `zoom: true` in config');
+        if (v === null) {
+            viewSig.set(null);
+            return;
+        }
+        if (typeof v !== 'object') {
+            throw new Error('lite-charts: view must be null or an object {xMin?, xMax?, yMin?, yMax?}');
+        }
+        viewSig.set({
+            xMin: v.xMin != null ? +v.xMin : null,
+            xMax: v.xMax != null ? +v.xMax : null,
+            yMin: v.yMin != null ? +v.yMin : null,
+            yMax: v.yMax != null ? +v.yMax : null,
+        });
+    };
+    viewFacade.reset = () => {
+        if (!viewSig) throw new Error('lite-charts: resetView() requires `pan: true` or `zoom: true` in config');
+        viewSig.set(null);
+    };
+
+    // v1.4.0-alpha.3: brush facade. Same shape pattern as viewFacade
+    // (callable for reactive read; .peek / .set / .clear methods). The
+    // brush selection shape is { xMin, xMax, yMin, yMax, ids } with
+    // `ids` being indices into the primary series. ids is freshly
+    // allocated each emit -- not pooled to avoid aliasing bugs across
+    // brushes; brushing is a user-driven gesture (sub-Hz), not a hot
+    // path, so the allocation is acceptable.
+    const brushFacade = function () {
+        return brushSig ? brushSig() : null;
+    };
+    brushFacade.peek = () => brushSig ? untrack(() => brushSig()) : null;
+    brushFacade.set = (v) => {
+        if (!brushSig) throw new Error('lite-charts: setBrush() requires `brush: true` in config');
+        if (v === null) {
+            brushSig.set(null);
+            return;
+        }
+        if (typeof v !== 'object') {
+            throw new Error('lite-charts: brush must be null or an object {xMin, xMax, yMin, yMax, ids?}');
+        }
+        brushSig.set({
+            xMin: +v.xMin,
+            xMax: +v.xMax,
+            yMin: +v.yMin,
+            yMax: +v.yMax,
+            ids: Array.isArray(v.ids) ? v.ids : null,
+        });
+    };
+    brushFacade.clear = () => {
+        if (!brushSig) throw new Error('lite-charts: clearBrush() requires `brush: true` in config');
+        brushSig.set(null);
+    };
+
+    // Brush visual style. Defaults: translucent accent fill + dashed
+    // outline. All overridable via config.brushStyle.
+    const brushStyleCfg = config.brushStyle || {};
+    const brushFill = brushStyleCfg.fill != null ? brushStyleCfg.fill : 'rgba(99, 102, 241, 0.15)';
+    const brushStroke = brushStyleCfg.stroke != null ? brushStyleCfg.stroke : 'rgba(99, 102, 241, 0.7)';
+    const brushDash = Array.isArray(brushStyleCfg.lineDash) ? brushStyleCfg.lineDash : [4, 4];
+    const brushLineWidth = brushStyleCfg.lineWidth != null ? +brushStyleCfg.lineWidth : 1;
+    // Click-to-clear threshold (pixel distance below which a "brush"
+    // is treated as a click and clears the existing selection). 3px
+    // matches d3-brush's default.
+    const brushClickThreshold = 3;
+
+    // Pan/zoom math helpers are module-level (defined above the kernel)
+    // so `_testHelpers` can export them for white-box unit tests without
+    // pinning the entire chart kernel in the reachable set.
 
     const mount = (target) => {
         if (mounted) throw new Error('lite-charts: chart already mounted');
@@ -3958,10 +4179,7 @@ const createBaseAxisChart = (config, renderer) => {
             }
 
             if (!anyData) {
-                xMin = 0;
-                xMax = 1;
-                yMin = 0;
-                yMax = 1;
+                xMin = 0; xMax = 1; yMin = 0; yMax = 1;
             }
             if (xMin === xMax) xMax = xMin + 1;
 
@@ -3982,13 +4200,45 @@ const createBaseAxisChart = (config, renderer) => {
                 ? [yConf.domain[0], yConf.domain[1]]
                 : niceYDomain(yMin, yMax, yConf || renderer.yDefaults);
 
+            // v1.4.0-alpha.2: snapshot data-derived domain for pan/zoom
+            // bounds math. The view-override layer below reads viewSig()
+            // (tracked); we want to write _dataDomain in untrack so this
+            // ref-write doesn't add a spurious dependency.
+            if (_dataDomain) {
+                _dataDomain.xMin = dxMin;
+                _dataDomain.xMax = dxMax;
+                _dataDomain.yMin = yBase[0];
+                _dataDomain.yMax = yBase[1];
+            }
+
+            // v1.4.0-alpha.2: view-override layer. If pan/zoom is enabled
+            // AND the view signal has been set (non-null), use the view's
+            // bounds. Any null field on the view falls back to the data
+            // domain so partial-axis pan ("only x is panned") works.
+            // Tracking viewSig() here makes this effect re-run when the
+            // user pans or zooms, which is exactly the data-flow we want.
+            let xLo = dxMin, xHi = dxMax, yLo = yBase[0], yHi = yBase[1];
+            if (viewSig) {
+                const view = viewSig();
+                if (view) {
+                    if (view.xMin != null) xLo = +view.xMin;
+                    if (view.xMax != null) xHi = +view.xMax;
+                    if (view.yMin != null) yLo = +view.yMin;
+                    if (view.yMax != null) yHi = +view.yMax;
+                }
+            }
+
             renderer.updateXScale(
                 xScale,
-                dxMin, dxMax,
+                xLo, xHi,
                 plotBoundsBox.x, plotBoundsBox.x + plotBoundsBox.w,
                 rendererCtx,
             );
-            updateLinearScale(yScale, yBase[0], yBase[1], plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
+            if (yScaleType === 'log') {
+                updateLogScale(yScale, yLo, yHi, plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
+            } else {
+                updateLinearScale(yScale, yLo, yHi, plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
+            }
 
             // Renderers that use pre-projected pixel arrays in their draw fn
             // (line / area) request projection; renderers that compute pixels
@@ -4114,7 +4364,7 @@ const createBaseAxisChart = (config, renderer) => {
                 const onMove = (ev) => {
                     const rect = typeof canvas.getBoundingClientRect === 'function'
                         ? canvas.getBoundingClientRect()
-                        : {left: 0, top: 0, width: canvas.width, height: canvas.height};
+                        : { left: 0, top: 0, width: canvas.width, height: canvas.height };
                     // CSS pixels relative to canvas top-left. moveCrosshair
                     // expects logical (CSS-pixel) coords because plotBoundsBox,
                     // pixel buffers, and xScale.invert all operate in logical
@@ -4132,6 +4382,296 @@ const createBaseAxisChart = (config, renderer) => {
             }
         }
 
+        // -- Brush overlay (v1.4.0-alpha.3) --
+        // Translucent rect drawn over the plot when a brush is active.
+        // Added AFTER the crosshair node so the rect renders on top.
+        // The draw fn reads the brush signal untracked; the dirty bridge
+        // below tracks it and bumps the scene.
+        if (brushEnabled) {
+            const drawBrushOverlay = (ctx) => {
+                const b = brushFacade.peek();
+                if (!b) return;
+                // Convert data-space bounds back to pixels via the live
+                // scales. y is flipped: data yMax sits at the SMALLER
+                // pixel (top of plot).
+                const px1 = xScale.map(b.xMin);
+                const px2 = xScale.map(b.xMax);
+                const py1 = yScale.map(b.yMax);
+                const py2 = yScale.map(b.yMin);
+                if (!isFinite(px1) || !isFinite(px2) || !isFinite(py1) || !isFinite(py2)) return;
+                const rx = Math.min(px1, px2);
+                const ry = Math.min(py1, py2);
+                const rw = Math.abs(px2 - px1);
+                const rh = Math.abs(py2 - py1);
+                if (rw < 1 && rh < 1) return;   // degenerate; skip draw
+                ctx.fillStyle = brushFill;
+                ctx.fillRect(rx, ry, rw, rh);
+                ctx.strokeStyle = brushStroke;
+                ctx.lineWidth = brushLineWidth;
+                if (brushDash.length) ctx.setLineDash(brushDash);
+                ctx.strokeRect(rx, ry, rw, rh);
+                if (brushDash.length) ctx.setLineDash([]);
+            };
+            scene.root.add(pathNode({ draw: drawBrushOverlay }));
+
+            // Dirty bridge: brush signal changes -> markDirty. Both
+            // user-driven (shift+drag) and programmatic (setBrush) paths
+            // run through this.
+            disposers.push(effect(() => {
+                brushSig();
+                if (scene) scene.markDirty();
+            }));
+        }
+
+        // -- Pan + zoom (v1.4.0-alpha.2) --
+        // Opt-in via `pan: true` and/or `zoom: true` in config. Listeners
+        // only attach if interactionsEnabled AND the canvas supports
+        // addEventListener (mock canvases in tests don't; the math is
+        // exercised directly via _testHelpers + the view facade in those
+        // tests).
+        if (interactionsEnabled && typeof canvas.addEventListener === 'function') {
+            // Drag state. We capture the start view + start pointer on
+            // pointerdown, recompute the new view on every pointermove,
+            // release on pointerup / pointerleave / pointercancel.
+            //
+            // The chunked structure avoids closure-over-loop traps: each
+            // gesture is a single pointer interaction with stable refs.
+            let dragActive = false;
+            let dragStartX = 0, dragStartY = 0;
+            const dragStartView = { xMin: 0, xMax: 0, yMin: 0, yMax: 0 };
+            const dragPlotBounds = { left: 0, top: 0, width: 1, height: 1 };
+
+            // Read the current effective view (either user-set view OR
+            // data domain). Untracked because this runs inside event
+            // handlers, not reactive effects.
+            const _readEffectiveView = (out) => {
+                const v = viewFacade.peek();
+                out.xMin = (v && v.xMin != null) ? v.xMin : _dataDomain.xMin;
+                out.xMax = (v && v.xMax != null) ? v.xMax : _dataDomain.xMax;
+                out.yMin = (v && v.yMin != null) ? v.yMin : _dataDomain.yMin;
+                out.yMax = (v && v.yMax != null) ? v.yMax : _dataDomain.yMax;
+            };
+
+            const _canvasPx = (ev) => {
+                const rect = typeof canvas.getBoundingClientRect === 'function'
+                    ? canvas.getBoundingClientRect()
+                    : { left: 0, top: 0 };
+                return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+            };
+
+            const _inPlot = (px, py) => (
+                px >= plotBoundsBox.x && px <= plotBoundsBox.x + plotBoundsBox.w &&
+                py >= plotBoundsBox.y && py <= plotBoundsBox.y + plotBoundsBox.h
+            );
+
+            const onPanDown = panEnabled ? (ev) => {
+                // Left button only (button === 0). Touches send pointerdown
+                // without a button; allow those too (button === 0 on pen,
+                // -1 on some touch implementations).
+                if (ev.button != null && ev.button > 0) return;
+                // v1.4.0-alpha.3: shift-modifier reserved for brushing.
+                // If brush is also enabled, shift+drag routes there
+                // instead of pan. If brush is NOT enabled, shift-drag
+                // still falls through to pan -- the modifier-key
+                // contract is documented as "shift = brush WHEN brush
+                // is enabled".
+                if (brushEnabled && ev.shiftKey) return;
+                const p = _canvasPx(ev);
+                if (!_inPlot(p.x, p.y)) return;
+                dragActive = true;
+                dragStartX = p.x;
+                dragStartY = p.y;
+                _readEffectiveView(dragStartView);
+                // Snapshot plot bounds at gesture start. They could change
+                // mid-drag if the container resizes; the gesture is
+                // anchored to the start geometry to keep the math stable.
+                dragPlotBounds.left = plotBoundsBox.x;
+                dragPlotBounds.top = plotBoundsBox.y;
+                dragPlotBounds.width = plotBoundsBox.w;
+                dragPlotBounds.height = plotBoundsBox.h;
+                // Suppress crosshair-hover during active drag (hide and
+                // gate further moves below). Resumed on pointerup.
+                if (typeof hideCrosshair === 'function') hideCrosshair();
+                if (typeof canvas.setPointerCapture === 'function' && ev.pointerId != null) {
+                    try { canvas.setPointerCapture(ev.pointerId); } catch (_) { /* swallow */ }
+                }
+            } : null;
+
+            const onPanMove = panEnabled ? (ev) => {
+                if (!dragActive) return;
+                const p = _canvasPx(ev);
+                const dx = p.x - dragStartX;
+                const dy = p.y - dragStartY;
+                const w = dragPlotBounds.width || 1;
+                const h = dragPlotBounds.height || 1;
+                const newView = _applyPan(dragStartView, dx, dy, w, h);
+                if (panBoundsMode === 'data' && _dataDomain) {
+                    _clampToBounds(newView, _dataDomain);
+                }
+                viewSig.set(newView);
+            } : null;
+
+            const onPanUp = panEnabled ? (ev) => {
+                if (!dragActive) return;
+                dragActive = false;
+                if (typeof canvas.releasePointerCapture === 'function' && ev && ev.pointerId != null) {
+                    try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* swallow */ }
+                }
+            } : null;
+
+            const onWheel = zoomEnabled ? (ev) => {
+                const p = _canvasPx(ev);
+                if (!_inPlot(p.x, p.y)) return;
+                // preventDefault: stop the page scrolling while the cursor
+                // is over the chart. Passive: false is required for this
+                // to take effect on modern browsers; we set it below.
+                if (typeof ev.preventDefault === 'function') ev.preventDefault();
+                // deltaY > 0 = scroll down = zoom out; < 0 = zoom in.
+                const zoomFactor = ev.deltaY > 0 ? zoomWheelStep : (1 / zoomWheelStep);
+                const start = { xMin: 0, xMax: 0, yMin: 0, yMax: 0 };
+                _readEffectiveView(start);
+                // Zoom-factor cap: the data-domain ratio of the proposed
+                // new view must stay within [zoomMinFactor, zoomMaxFactor].
+                // (zoomMinFactor < 1 means "zoomed in"; > 1 means
+                // "zoomed out".) The factor we check is newSpan / dataSpan.
+                const dataXSpan = _dataDomain.xMax - _dataDomain.xMin;
+                const dataYSpan = _dataDomain.yMax - _dataDomain.yMin;
+                const proposedXSpan = (start.xMax - start.xMin) * zoomFactor;
+                const proposedYSpan = (start.yMax - start.yMin) * zoomFactor;
+                const proposedXRatio = dataXSpan > 0 ? proposedXSpan / dataXSpan : 1;
+                const proposedYRatio = dataYSpan > 0 ? proposedYSpan / dataYSpan : 1;
+                // Block the zoom if either axis would exceed bounds. We
+                // could split the factor per axis but symmetric zoom is
+                // the convention; refusing here keeps interaction predictable.
+                if (proposedXRatio < zoomMinFactor || proposedYRatio < zoomMinFactor) return;
+                if (proposedXRatio > zoomMaxFactor || proposedYRatio > zoomMaxFactor) return;
+                const newView = _applyZoom(
+                    start,
+                    p.x, p.y,
+                    plotBoundsBox.x, plotBoundsBox.y, plotBoundsBox.w, plotBoundsBox.h,
+                    zoomFactor, zoomFactor,
+                );
+                if (panBoundsMode === 'data' && _dataDomain) {
+                    _clampToBounds(newView, _dataDomain);
+                }
+                viewSig.set(newView);
+            } : null;
+
+            if (panEnabled) {
+                canvas.addEventListener('pointerdown', onPanDown);
+                canvas.addEventListener('pointermove', onPanMove);
+                canvas.addEventListener('pointerup', onPanUp);
+                canvas.addEventListener('pointercancel', onPanUp);
+                canvas.addEventListener('pointerleave', onPanUp);
+                disposers.push(() => {
+                    canvas.removeEventListener('pointerdown', onPanDown);
+                    canvas.removeEventListener('pointermove', onPanMove);
+                    canvas.removeEventListener('pointerup', onPanUp);
+                    canvas.removeEventListener('pointercancel', onPanUp);
+                    canvas.removeEventListener('pointerleave', onPanUp);
+                });
+            }
+            if (zoomEnabled) {
+                // passive:false so preventDefault stops page scroll.
+                canvas.addEventListener('wheel', onWheel, { passive: false });
+                disposers.push(() => canvas.removeEventListener('wheel', onWheel));
+            }
+
+            // v1.4.0-alpha.3: brush gesture handlers. Independent of
+            // pan/zoom state (separate flag, separate active bit). Same
+            // pointer-event family so they coexist with the pan
+            // listeners on the same canvas; routing happens in
+            // pointerdown via ev.shiftKey.
+            if (brushEnabled) {
+                let brushActive = false;
+                let brushStartX = 0, brushStartY = 0;
+                let brushCurrentX = 0, brushCurrentY = 0;
+
+                const onBrushDown = (ev) => {
+                    if (ev.button != null && ev.button > 0) return;
+                    if (!ev.shiftKey) return;       // bare drag = pan; shift = brush
+                    const p = _canvasPx(ev);
+                    if (!_inPlot(p.x, p.y)) return;
+                    brushActive = true;
+                    brushStartX = brushCurrentX = p.x;
+                    brushStartY = brushCurrentY = p.y;
+                    // Hide crosshair during brush (matches pan behavior).
+                    if (typeof hideCrosshair === 'function') hideCrosshair();
+                    if (typeof canvas.setPointerCapture === 'function' && ev.pointerId != null) {
+                        try { canvas.setPointerCapture(ev.pointerId); } catch (_) { /* swallow */ }
+                    }
+                    if (typeof ev.preventDefault === 'function') ev.preventDefault();
+                };
+
+                const _commitBrush = () => {
+                    // Compute data-space bounds from the current pixel
+                    // rect using the live scales. ids come from the
+                    // primary series (idx 0); multi-series filtering is
+                    // the caller's responsibility (the brush bounds are
+                    // the universal hook for that).
+                    const rect = _normalizeBrushRect(brushStartX, brushStartY, brushCurrentX, brushCurrentY);
+                    const dataBounds = _brushPxToData(rect, xScale, yScale);
+                    let ids = null;
+                    if (seriesStates.length > 0 && seriesStates[0].n > 0) {
+                        ids = _computeBrushIds(
+                            seriesStates[0].xs,
+                            seriesStates[0].ys,
+                            seriesStates[0].n,
+                            dataBounds.xMin, dataBounds.xMax,
+                            dataBounds.yMin, dataBounds.yMax,
+                        );
+                    }
+                    brushSig.set({
+                        xMin: dataBounds.xMin,
+                        xMax: dataBounds.xMax,
+                        yMin: dataBounds.yMin,
+                        yMax: dataBounds.yMax,
+                        ids,
+                    });
+                };
+
+                const onBrushMove = (ev) => {
+                    if (!brushActive) return;
+                    const p = _canvasPx(ev);
+                    brushCurrentX = p.x;
+                    brushCurrentY = p.y;
+                    _commitBrush();
+                };
+
+                const onBrushUp = (ev) => {
+                    if (!brushActive) return;
+                    brushActive = false;
+                    // Click-to-clear: if total drag distance is below
+                    // threshold, treat as a click and clear the brush.
+                    const dx = brushCurrentX - brushStartX;
+                    const dy = brushCurrentY - brushStartY;
+                    const dist2 = dx * dx + dy * dy;
+                    if (dist2 < brushClickThreshold * brushClickThreshold) {
+                        brushSig.set(null);
+                    } else {
+                        // Final commit (in case the last move was missed).
+                        _commitBrush();
+                    }
+                    if (typeof canvas.releasePointerCapture === 'function' && ev && ev.pointerId != null) {
+                        try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* swallow */ }
+                    }
+                };
+
+                canvas.addEventListener('pointerdown', onBrushDown);
+                canvas.addEventListener('pointermove', onBrushMove);
+                canvas.addEventListener('pointerup', onBrushUp);
+                canvas.addEventListener('pointercancel', onBrushUp);
+                canvas.addEventListener('pointerleave', onBrushUp);
+                disposers.push(() => {
+                    canvas.removeEventListener('pointerdown', onBrushDown);
+                    canvas.removeEventListener('pointermove', onBrushMove);
+                    canvas.removeEventListener('pointerup', onBrushUp);
+                    canvas.removeEventListener('pointercancel', onBrushUp);
+                    canvas.removeEventListener('pointerleave', onBrushUp);
+                });
+            }
+        }
+
         // -- Legend (DOM) --
         // Built only when (a) the chart owns its canvas (mounted into an
         // element, not a bare canvas), (b) `document` is available, and
@@ -4141,7 +4681,7 @@ const createBaseAxisChart = (config, renderer) => {
             const fontResolved = config.font != null ? config.font : DEFAULT_FONT;
             const labelColorResolved = resolveColor(config.labelColor || DEFAULT_LABEL_COLOR, container);
             legendEl = buildLegendDOM(
-                {position: legendPosition, container: legendContainer},
+                { position: legendPosition, container: legendContainer },
                 normalized,
                 seriesVisibility,
                 seriesRefs,
@@ -4173,10 +4713,7 @@ const createBaseAxisChart = (config, renderer) => {
     const unmount = () => {
         if (!mounted) return;
         for (let i = 0; i < disposers.length; i++) {
-            try {
-                disposers[i]();
-            } catch (_) { /* swallow */
-            }
+            try { disposers[i](); } catch (_) { /* swallow */ }
         }
         disposers.length = 0;
         // v1.2.0-alpha.0: per-renderer state cleanup hook. Bubble uses it to
@@ -4185,16 +4722,10 @@ const createBaseAxisChart = (config, renderer) => {
         // hook here -- vs an unconditional loop -- keeps the spatial-index
         // helper out of line / area / bar bundles entirely.
         if (renderer.cleanup) {
-            try {
-                renderer.cleanup(seriesStates);
-            } catch (_) { /* swallow */
-            }
+            try { renderer.cleanup(seriesStates); } catch (_) { /* swallow */ }
         }
         if (scene) {
-            try {
-                scene.dispose();
-            } catch (_) { /* swallow */
-            }
+            try { scene.dispose(); } catch (_) { /* swallow */ }
             scene = null;
         }
         // Legend tear-down: remove whichever DOM we owned.
@@ -4224,10 +4755,7 @@ const createBaseAxisChart = (config, renderer) => {
         if (destroyed) return;
         if (mounted) unmount();
         for (let i = 0; i < _ownedSignals.length; i++) {
-            try {
-                dispose(_ownedSignals[i]);
-            } catch (_) { /* swallow */
-            }
+            try { dispose(_ownedSignals[i]); } catch (_) { /* swallow */ }
         }
         _ownedSignals.length = 0;
         destroyed = true;
@@ -4245,7 +4773,7 @@ const createBaseAxisChart = (config, renderer) => {
         return canvas.toDataURL(mime, quality);
     };
 
-    // v1.2.0: SVG export. Resolution-independent, embeddable in PDFs and
+    // v1.3.0: SVG export. Resolution-independent, embeddable in PDFs and
     // static HTML. Walks the live scene tree through a Canvas2D-shim;
     // the chart code doesn't need to know it's rendering to SVG.
     const exportSVG = (opts) => {
@@ -4410,8 +4938,8 @@ const createBaseAxisChart = (config, renderer) => {
         // tooltips pass it; line/area pass null. Use the header text the
         // renderer produced as the default when the formatter doesn't supply one.
         const barCategoryName = renderer.forceXType === 'band'
-        && state.snapIdx >= 0
-        && state.snapIdx < categoriesRef.value.length
+            && state.snapIdx >= 0
+            && state.snapIdx < categoriesRef.value.length
             ? categoriesRef.value[state.snapIdx]
             : null;
         let headerText;
@@ -4531,26 +5059,29 @@ const createBaseAxisChart = (config, renderer) => {
         hideCrosshair,
         setSeriesVisible,
         refreshTheme,
-        get scene() {
-            return scene;
-        },
-        get canvas() {
-            return canvas;
-        },
-        get xScale() {
-            return xScale;
-        },
-        get yScale() {
-            return yScale;
-        },
-        get xScaleType() {
-            return resolvedXType;
-        },
-        get legend() {
-            return legendEl;
-        },
+        get scene() { return scene; },
+        get canvas() { return canvas; },
+        get xScale() { return xScale; },
+        get yScale() { return yScale; },
+        get xScaleType() { return resolvedXType; },
+        get legend() { return legendEl; },
         plotBounds: plotBoundsSignal,
         crosshair: crosshairFacade,
+        // v1.4.0-alpha.2: pan/zoom view accessor. `chart.view()` reads
+        // reactively (tracks); `chart.view.peek()` reads untracked;
+        // `chart.view.set(v)` and `chart.view.reset()` write.
+        // `chart.setView` / `chart.resetView` are convenience aliases.
+        // All three throw if neither `pan: true` nor `zoom: true` was
+        // set at construction (signals the user they need to opt in).
+        view: viewFacade,
+        setView: viewFacade.set,
+        resetView: viewFacade.reset,
+        // v1.4.0-alpha.3: brush reactive accessor + imperative aliases.
+        // brushFacade always exists; calls into set/clear throw if
+        // `brush: true` was not in config (matches view's pattern).
+        brush: brushFacade,
+        setBrush: brushFacade.set,
+        clearBrush: brushFacade.clear,
         seriesVisibility,
         // Test/debug introspection -- per-chart state ONLY. Pure helpers
         // (decimateMinMax, makeBandScale, etc.) used to live here for white-
@@ -4659,7 +5190,7 @@ const extractSliceData = (state, input) => {
         return;
     }
 
-    state.values = ensureFloat32(state.values, n);
+    state.values      = ensureFloat32(state.values,      n);
 
     // Angles need Float64 precision: Float32(PI/2) = 1.5707963705..., which
     // is SLIGHTLY larger than the Float64 PI/2 = 1.5707963267... that
@@ -4814,7 +5345,7 @@ const makeSliceDrawFn = (state, geometry, colorsRef, sliceStrokeRef, sliceStroke
         ctx.fillStyle = fill;
         ctx.beginPath();
         if (rInner > 0) {
-            ctx.arc(cx, cy, ro, a0, a1);
+            ctx.arc(cx, cy, ro,     a0, a1);
             ctx.arc(cx, cy, rInner, a1, a0, true);
             ctx.closePath();
         } else {
@@ -4881,7 +5412,7 @@ const buildPolarLegendDOM = (state, sliceVisibility, font, labelColor, disposers
     legendEl.style.color = labelColor;
     legendEl.style.lineHeight = '1.4';
     legendEl.style.alignItems = 'center';
-    return {legendEl, refresh: null}; // populated below; refresh defined in mount
+    return { legendEl, refresh: null }; // populated below; refresh defined in mount
 };
 
 // Populate the legend element with one row per slice. Called after the
@@ -4958,7 +5489,7 @@ const SLICE_RENDERER = {
 // createBasePolarChart -- the shared scaffold for slice-based polar charts
 // ===========================================================================
 
-const DEFAULT_PIE_MARGIN = {top: 16, right: 16, bottom: 16, left: 16};
+const DEFAULT_PIE_MARGIN = { top: 16, right: 16, bottom: 16, left: 16 };
 // Default palette for slices when the user doesn't supply per-slice colors.
 // Eight-slot tableau-style cycle; resolvable as raw hex (no CSS-var lookup).
 const DEFAULT_SLICE_PALETTE = [
@@ -5001,27 +5532,24 @@ const createBasePolarChart = (config, renderer) => {
     // v1.2.0: track signals lite-charts creates so `chart.destroy()` can
     // dispose them. See axis kernel for the rationale.
     const _ownedSignals = [];
-    const _own = (s) => {
-        _ownedSignals.push(s);
-        return s;
-    };
+    const _own = (s) => { _ownedSignals.push(s); return s; };
     const widthAutoSig = widthExplicit ? null : _own(signal(400));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthSig = widthExplicit ? asAccessor(config.width) : widthAutoSig;
     const heightSig = heightExplicit ? asAccessor(config.height) : heightAutoSig;
 
     const margin = config.margin || DEFAULT_PIE_MARGIN;
-    const marginTop = margin.top != null ? margin.top : DEFAULT_PIE_MARGIN.top;
-    const marginRight = margin.right != null ? margin.right : DEFAULT_PIE_MARGIN.right;
+    const marginTop    = margin.top    != null ? margin.top    : DEFAULT_PIE_MARGIN.top;
+    const marginRight  = margin.right  != null ? margin.right  : DEFAULT_PIE_MARGIN.right;
     const marginBottom = margin.bottom != null ? margin.bottom : DEFAULT_PIE_MARGIN.bottom;
-    const marginLeft = margin.left != null ? margin.left : DEFAULT_PIE_MARGIN.left;
+    const marginLeft   = margin.left   != null ? margin.left   : DEFAULT_PIE_MARGIN.left;
 
     const innerRadiusConfig = config.innerRadius != null ? config.innerRadius : 0;
 
     // ---- Chart state --------------------------------------------------
     const state = makePolarState();
-    const geometry = {cx: 0, cy: 0, rOuter: 0, rInner: 0};
-    const plotBoundsBox = {x: 0, y: 0, w: 0, h: 0};
+    const geometry = { cx: 0, cy: 0, rOuter: 0, rInner: 0 };
+    const plotBoundsBox = { x: 0, y: 0, w: 0, h: 0 };
     const plotBoundsSignal = _own(signal(0));
     const dataVersion = _own(signal(0));            // bumps on data / visibility change
 
@@ -5043,15 +5571,15 @@ const createBasePolarChart = (config, renderer) => {
     };
 
     // ---- Style refs (theme-reactive) ----------------------------------
-    const sliceStrokeRef = {value: '#ffffff'};
-    const sliceStrokeWidthRef = {value: config.sliceStrokeWidth != null ? +config.sliceStrokeWidth : 1};
-    const labelColorRef = {value: '#444444'};
-    const fontRef = {value: config.font != null ? config.font : '11px sans-serif'};
-    const tooltipBgRef = {value: 'rgba(255,255,255,0.96)'};
-    const tooltipBorderRef = {value: '#cccccc'};
+    const sliceStrokeRef      = { value: '#ffffff' };
+    const sliceStrokeWidthRef = { value: config.sliceStrokeWidth != null ? +config.sliceStrokeWidth : 1 };
+    const labelColorRef       = { value: '#444444' };
+    const fontRef             = { value: config.font != null ? config.font : '11px sans-serif' };
+    const tooltipBgRef        = { value: 'rgba(255,255,255,0.96)' };
+    const tooltipBorderRef    = { value: '#cccccc' };
     // Highlight: index of slice under cursor; -1 = none. Read on every
     // draw; mutated by mouse handler.
-    const highlightRef = {value: -1};
+    const highlightRef        = { value: -1 };
 
     // ---- Crosshair facade (highlight + tooltip) -----------------------
     // For polar charts the "crosshair" is just a slice highlight + tooltip.
@@ -5064,10 +5592,7 @@ const createBasePolarChart = (config, renderer) => {
         mousePixelY: 0,
     };
     const crosshairVersion = _own(signal(0));
-    const crosshairFacade = function () {
-        crosshairVersion();
-        return crosshairData;
-    };
+    const crosshairFacade = function () { crosshairVersion(); return crosshairData; };
     crosshairFacade.peek = () => crosshairData;
     crosshairFacade.set = (s) => {
         if (!s || typeof s !== 'object') return;
@@ -5160,10 +5685,10 @@ const createBasePolarChart = (config, renderer) => {
         canvas.height = h0;
 
         // Resolve theme colors first so the first draw is correct.
-        sliceStrokeRef.value = resolveColor(config.sliceStroke != null ? config.sliceStroke : '#ffffff', container);
-        labelColorRef.value = resolveColor(config.labelColor != null ? config.labelColor : '#444444', container);
-        tooltipBgRef.value = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
-        tooltipBorderRef.value = resolveColor(tooltipOpts && tooltipOpts.border ? tooltipOpts.border : '#cccccc', container);
+        sliceStrokeRef.value      = resolveColor(config.sliceStroke != null ? config.sliceStroke : '#ffffff', container);
+        labelColorRef.value       = resolveColor(config.labelColor != null ? config.labelColor : '#444444', container);
+        tooltipBgRef.value        = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
+        tooltipBorderRef.value    = resolveColor(tooltipOpts && tooltipOpts.border ? tooltipOpts.border : '#cccccc', container);
 
         const schedule = config.schedule || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => cb());
         scene = createScene(canvas, {
@@ -5181,10 +5706,10 @@ const createBasePolarChart = (config, renderer) => {
             const h = +heightSig() | 0 || 400;
             const wBacking = Math.max(1, Math.round(w * resolvedDpr));
             const hBacking = Math.max(1, Math.round(h * resolvedDpr));
-            if (canvas.width !== wBacking) canvas.width = wBacking;
+            if (canvas.width  !== wBacking) canvas.width  = wBacking;
             if (canvas.height !== hBacking) canvas.height = hBacking;
             if (typeof canvas.style !== 'undefined') {
-                canvas.style.width = w + 'px';
+                canvas.style.width  = w + 'px';
                 canvas.style.height = h + 'px';
             }
             plotBoundsBox.x = marginLeft;
@@ -5235,7 +5760,7 @@ const createBasePolarChart = (config, renderer) => {
 
         // ---- Slice draw node -------------------------------------------
         const sliceDrawFn = renderer.makeDrawFn(state, geometry, resolvedColors, sliceStrokeRef, sliceStrokeWidthRef, highlightRef);
-        const sliceNode = scene.root.add(pathNode({draw: (ctx) => sliceDrawFn(ctx)}));
+        const sliceNode = scene.root.add(pathNode({ draw: (ctx) => sliceDrawFn(ctx) }));
 
         // Effect 4: dirty bridge for data/geometry changes
         disposers.push(effect(() => {
@@ -5246,7 +5771,7 @@ const createBasePolarChart = (config, renderer) => {
 
         // ---- Crosshair / tooltip (slice highlight + box) --------------
         if (interactionEnabled) {
-            const crosshairNode = scene.root.add(pathNode({draw: (ctx) => drawCrosshair(ctx)}));
+            const crosshairNode = scene.root.add(pathNode({ draw: (ctx) => drawCrosshair(ctx) }));
             disposers.push(effect(() => {
                 crosshairVersion();
                 if (scene) scene.markDirty();
@@ -5256,7 +5781,7 @@ const createBasePolarChart = (config, renderer) => {
                 const onMove = (e) => {
                     const rect = typeof canvas.getBoundingClientRect === 'function'
                         ? canvas.getBoundingClientRect()
-                        : {left: 0, top: 0, width: canvas.width, height: canvas.height};
+                        : { left: 0, top: 0, width: canvas.width, height: canvas.height };
                     moveCrosshair(e.clientX - rect.left, e.clientY - rect.top);
                 };
                 const onLeave = () => hideCrosshair();
@@ -5295,17 +5820,11 @@ const createBasePolarChart = (config, renderer) => {
     const unmount = () => {
         if (!mounted) return;
         for (let i = 0; i < disposers.length; i++) {
-            try {
-                disposers[i]();
-            } catch (e) { /* swallow */
-            }
+            try { disposers[i](); } catch (e) { /* swallow */ }
         }
         disposers.length = 0;
         if (scene) {
-            try {
-                scene.dispose();
-            } catch (e) { /* swallow */
-            }
+            try { scene.dispose(); } catch (e) { /* swallow */ }
             scene = null;
         }
         if (legendWrapper && legendWrapper.parentNode) {
@@ -5328,10 +5847,7 @@ const createBasePolarChart = (config, renderer) => {
         if (destroyed) return;
         if (mounted) unmount();
         for (let i = 0; i < _ownedSignals.length; i++) {
-            try {
-                dispose(_ownedSignals[i]);
-            } catch (_) { /* swallow */
-            }
+            try { dispose(_ownedSignals[i]); } catch (_) { /* swallow */ }
         }
         _ownedSignals.length = 0;
         destroyed = true;
@@ -5401,10 +5917,8 @@ const createBasePolarChart = (config, renderer) => {
                 total: state.total,
                 percent: pct,
             });
-            if (typeof out === 'string') {
-                header = out;
-                rowText = '';
-            } else if (out && typeof out === 'object') {
+            if (typeof out === 'string') { header = out; rowText = ''; }
+            else if (out && typeof out === 'object') {
                 if (out.header != null) header = out.header;
                 if (out.value != null) rowText = out.value;
             }
@@ -5471,9 +5985,7 @@ const createBasePolarChart = (config, renderer) => {
                 : (config.background != null ? config.background : null);
             return _exportSceneToSVG(scene, w, h, bg);
         },
-        redraw: () => {
-            if (scene) scene.markDirty();
-        },
+        redraw: () => { if (scene) scene.markDirty(); },
         moveCrosshair,
         hideCrosshair,
         setSliceVisible: (idx, visible) => {
@@ -5482,10 +5994,10 @@ const createBasePolarChart = (config, renderer) => {
         },
         refreshTheme: () => {
             if (!mounted) return;
-            sliceStrokeRef.value = resolveColor(config.sliceStroke != null ? config.sliceStroke : '#ffffff', container);
-            labelColorRef.value = resolveColor(config.labelColor != null ? config.labelColor : '#444444', container);
-            tooltipBgRef.value = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
-            tooltipBorderRef.value = resolveColor(tooltipOpts && tooltipOpts.border ? tooltipOpts.border : '#cccccc', container);
+            sliceStrokeRef.value   = resolveColor(config.sliceStroke != null ? config.sliceStroke : '#ffffff', container);
+            labelColorRef.value    = resolveColor(config.labelColor  != null ? config.labelColor  : '#444444', container);
+            tooltipBgRef.value     = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
+            tooltipBorderRef.value = resolveColor(tooltipOpts && tooltipOpts.border     ? tooltipOpts.border     : '#cccccc', container);
             refreshResolvedColors();
             // Re-paint legend swatches
             if (legendEl) {
@@ -5496,18 +6008,10 @@ const createBasePolarChart = (config, renderer) => {
             }
             if (scene) scene.markDirty();
         },
-        get scene() {
-            return scene;
-        },
-        get canvas() {
-            return canvas;
-        },
-        get geometry() {
-            return geometry;
-        },
-        get legend() {
-            return legendEl;
-        },
+        get scene() { return scene; },
+        get canvas() { return canvas; },
+        get geometry() { return geometry; },
+        get legend() { return legendEl; },
         plotBounds: plotBoundsSignal,
         crosshair: crosshairFacade,
         sliceVisibility,
@@ -5800,7 +6304,7 @@ const radarHitTest = (canvasX, canvasY, states, geometry, domainRef) => {
 // createRadarChart -- the kernel + factory in one
 // ===========================================================================
 
-const DEFAULT_RADAR_MARGIN = {top: 24, right: 24, bottom: 24, left: 24};
+const DEFAULT_RADAR_MARGIN = { top: 24, right: 24, bottom: 24, left: 24 };
 
 export const createRadarChart = (config) => {
     if (!config || typeof config !== 'object') {
@@ -5813,7 +6317,7 @@ export const createRadarChart = (config) => {
         throw new Error('lite-charts: createRadarChart requires at least 3 axes');
     }
     const axisCount = axisLabelsInitial.length;
-    const axisLabelsRef = {value: axisLabelsInitial};
+    const axisLabelsRef = { value: axisLabelsInitial };
 
     // Series input: either a function returning array (reactive) or an
     // array directly. Each series: { name, color, values: [N] }.
@@ -5833,20 +6337,17 @@ export const createRadarChart = (config) => {
     // v1.2.0: track signals lite-charts creates so `chart.destroy()` can
     // dispose them. See axis kernel for the rationale.
     const _ownedSignals = [];
-    const _own = (s) => {
-        _ownedSignals.push(s);
-        return s;
-    };
+    const _own = (s) => { _ownedSignals.push(s); return s; };
     const widthAutoSig = widthExplicit ? null : _own(signal(400));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthSig = widthExplicit ? asAccessor(config.width) : widthAutoSig;
     const heightSig = heightExplicit ? asAccessor(config.height) : heightAutoSig;
 
     const margin = config.margin || DEFAULT_RADAR_MARGIN;
-    const marginTop = margin.top != null ? margin.top : DEFAULT_RADAR_MARGIN.top;
-    const marginRight = margin.right != null ? margin.right : DEFAULT_RADAR_MARGIN.right;
+    const marginTop    = margin.top    != null ? margin.top    : DEFAULT_RADAR_MARGIN.top;
+    const marginRight  = margin.right  != null ? margin.right  : DEFAULT_RADAR_MARGIN.right;
     const marginBottom = margin.bottom != null ? margin.bottom : DEFAULT_RADAR_MARGIN.bottom;
-    const marginLeft = margin.left != null ? margin.left : DEFAULT_RADAR_MARGIN.left;
+    const marginLeft   = margin.left   != null ? margin.left   : DEFAULT_RADAR_MARGIN.left;
 
     const gridTicks = config.gridTicks != null ? Math.max(1, +config.gridTicks | 0) : 4;
 
@@ -5854,7 +6355,7 @@ export const createRadarChart = (config) => {
     // domainRef is a stable object reference; mutated in place by the data
     // effect so draw fns always see fresh values.
     const explicitDomain = Array.isArray(config.domain) ? [+config.domain[0], +config.domain[1]] : null;
-    const domainRef = {value: explicitDomain ? explicitDomain : [0, 1]};
+    const domainRef = { value: explicitDomain ? explicitDomain : [0, 1] };
 
     // ---- State (per-series) ------------------------------------------
     const seriesStates = [];               // array of RadarSeriesState
@@ -5872,19 +6373,19 @@ export const createRadarChart = (config) => {
         cosA: new Float64Array(Math.max(axisCount, 4)),
         sinA: new Float64Array(Math.max(axisCount, 4)),
     };
-    const plotBoundsBox = {x: 0, y: 0, w: 0, h: 0};
+    const plotBoundsBox = { x: 0, y: 0, w: 0, h: 0 };
     const plotBoundsSignal = _own(signal(0));
     const dataVersion = _own(signal(0));
 
     // ---- Style refs --------------------------------------------------
-    const axisColorRef = {value: '#cccccc'};
-    const gridColorRef = {value: '#e6e6e6'};
-    const labelColorRef = {value: '#444444'};
-    const fontRef = {value: config.font != null ? config.font : '11px sans-serif'};
-    const fillOpacityRef = {value: config.fillOpacity != null ? +config.fillOpacity : 0.2};
-    const strokeWidthRef = {value: config.strokeWidth != null ? +config.strokeWidth : 2};
-    const tooltipBgRef = {value: 'rgba(255,255,255,0.96)'};
-    const tooltipBorderRef = {value: '#cccccc'};
+    const axisColorRef       = { value: '#cccccc' };
+    const gridColorRef       = { value: '#e6e6e6' };
+    const labelColorRef      = { value: '#444444' };
+    const fontRef            = { value: config.font != null ? config.font : '11px sans-serif' };
+    const fillOpacityRef     = { value: config.fillOpacity != null ? +config.fillOpacity : 0.2 };
+    const strokeWidthRef     = { value: config.strokeWidth != null ? +config.strokeWidth : 2 };
+    const tooltipBgRef       = { value: 'rgba(255,255,255,0.96)' };
+    const tooltipBorderRef   = { value: '#cccccc' };
 
     // ---- Crosshair facade --------------------------------------------
     const crosshairData = {
@@ -5896,10 +6397,7 @@ export const createRadarChart = (config) => {
         mousePixelY: 0,
     };
     const crosshairVersion = _own(signal(0));
-    const crosshairFacade = function () {
-        crosshairVersion();
-        return crosshairData;
-    };
+    const crosshairFacade = function () { crosshairVersion(); return crosshairData; };
     crosshairFacade.peek = () => crosshairData;
     crosshairFacade.subscribe = (cb) => crosshairVersion.subscribe(() => cb(crosshairData));
 
@@ -5972,11 +6470,11 @@ export const createRadarChart = (config) => {
         canvas.width = w0;
         canvas.height = h0;
 
-        axisColorRef.value = resolveColor(config.axisColor != null ? config.axisColor : '#cccccc', container);
-        gridColorRef.value = resolveColor(config.gridColor != null ? config.gridColor : '#e6e6e6', container);
-        labelColorRef.value = resolveColor(config.labelColor != null ? config.labelColor : '#444444', container);
-        tooltipBgRef.value = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
-        tooltipBorderRef.value = resolveColor(tooltipOpts && tooltipOpts.border ? tooltipOpts.border : '#cccccc', container);
+        axisColorRef.value      = resolveColor(config.axisColor   != null ? config.axisColor   : '#cccccc', container);
+        gridColorRef.value      = resolveColor(config.gridColor   != null ? config.gridColor   : '#e6e6e6', container);
+        labelColorRef.value     = resolveColor(config.labelColor  != null ? config.labelColor  : '#444444', container);
+        tooltipBgRef.value      = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
+        tooltipBorderRef.value  = resolveColor(tooltipOpts && tooltipOpts.border     ? tooltipOpts.border     : '#cccccc', container);
 
         const schedule = config.schedule || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => cb());
         scene = createScene(canvas, {
@@ -5993,10 +6491,10 @@ export const createRadarChart = (config) => {
             const h = +heightSig() | 0 || 400;
             const wBacking = Math.max(1, Math.round(w * resolvedDpr));
             const hBacking = Math.max(1, Math.round(h * resolvedDpr));
-            if (canvas.width !== wBacking) canvas.width = wBacking;
+            if (canvas.width  !== wBacking) canvas.width  = wBacking;
             if (canvas.height !== hBacking) canvas.height = hBacking;
             if (typeof canvas.style !== 'undefined') {
-                canvas.style.width = w + 'px';
+                canvas.style.width  = w + 'px';
                 canvas.style.height = h + 'px';
             }
             plotBoundsBox.x = marginLeft;
@@ -6039,10 +6537,7 @@ export const createRadarChart = (config) => {
                         anyData = true;
                     }
                 }
-                if (!anyData) {
-                    vMin = 0;
-                    vMax = 1;
-                }
+                if (!anyData) { vMin = 0; vMax = 1; }
                 if (vMin === vMax) vMax = vMin + 1;
                 // Anchor at 0 if everything's non-negative (the conventional radar look).
                 if (vMin > 0 && vMin / vMax < 0.5) vMin = 0;
@@ -6067,13 +6562,13 @@ export const createRadarChart = (config) => {
         }));
 
         // Scene nodes (z-ordered): grid -> polygons -> spokes+labels -> crosshair
-        const gridDrawFn = makeRadarGridDrawFn(geometry, gridTicks, gridColorRef);
-        const polygonDrawFn = makeRadarPolygonDrawFn(seriesStates, resolvedColors, geometry, domainRef, fillOpacityRef, strokeWidthRef);
-        const spokesDrawFn = makeRadarSpokesDrawFn(geometry, axisLabelsRef, axisColorRef, labelColorRef, fontRef);
+        const gridDrawFn     = makeRadarGridDrawFn(geometry, gridTicks, gridColorRef);
+        const polygonDrawFn  = makeRadarPolygonDrawFn(seriesStates, resolvedColors, geometry, domainRef, fillOpacityRef, strokeWidthRef);
+        const spokesDrawFn   = makeRadarSpokesDrawFn(geometry, axisLabelsRef, axisColorRef, labelColorRef, fontRef);
 
-        scene.root.add(pathNode({draw: (ctx) => gridDrawFn(ctx)}));
-        scene.root.add(pathNode({draw: (ctx) => polygonDrawFn(ctx)}));
-        scene.root.add(pathNode({draw: (ctx) => spokesDrawFn(ctx)}));
+        scene.root.add(pathNode({ draw: (ctx) => gridDrawFn(ctx) }));
+        scene.root.add(pathNode({ draw: (ctx) => polygonDrawFn(ctx) }));
+        scene.root.add(pathNode({ draw: (ctx) => spokesDrawFn(ctx) }));
 
         // Dirty bridge: data + plotBounds -> markDirty
         disposers.push(effect(() => {
@@ -6084,7 +6579,7 @@ export const createRadarChart = (config) => {
 
         // Crosshair / tooltip
         if (interactionEnabled) {
-            scene.root.add(pathNode({draw: (ctx) => drawCrosshair(ctx)}));
+            scene.root.add(pathNode({ draw: (ctx) => drawCrosshair(ctx) }));
             disposers.push(effect(() => {
                 crosshairVersion();
                 if (scene) scene.markDirty();
@@ -6093,7 +6588,7 @@ export const createRadarChart = (config) => {
                 const onMove = (e) => {
                     const rect = typeof canvas.getBoundingClientRect === 'function'
                         ? canvas.getBoundingClientRect()
-                        : {left: 0, top: 0, width: canvas.width, height: canvas.height};
+                        : { left: 0, top: 0, width: canvas.width, height: canvas.height };
                     moveCrosshair(e.clientX - rect.left, e.clientY - rect.top);
                 };
                 const onLeave = () => hideCrosshair();
@@ -6181,17 +6676,11 @@ export const createRadarChart = (config) => {
     const unmount = () => {
         if (!mounted) return;
         for (let i = 0; i < disposers.length; i++) {
-            try {
-                disposers[i]();
-            } catch (e) { /* swallow */
-            }
+            try { disposers[i](); } catch (e) { /* swallow */ }
         }
         disposers.length = 0;
         if (scene) {
-            try {
-                scene.dispose();
-            } catch (e) { /* swallow */
-            }
+            try { scene.dispose(); } catch (e) { /* swallow */ }
             scene = null;
         }
         if (legendWrapper && legendWrapper.parentNode) {
@@ -6214,10 +6703,7 @@ export const createRadarChart = (config) => {
         if (destroyed) return;
         if (mounted) unmount();
         for (let i = 0; i < _ownedSignals.length; i++) {
-            try {
-                dispose(_ownedSignals[i]);
-            } catch (_) { /* swallow */
-            }
+            try { dispose(_ownedSignals[i]); } catch (_) { /* swallow */ }
         }
         _ownedSignals.length = 0;
         destroyed = true;
@@ -6227,10 +6713,7 @@ export const createRadarChart = (config) => {
     const moveCrosshair = (canvasX, canvasY) => {
         if (!interactionEnabled || !mounted) return;
         const hit = radarHitTest(canvasX, canvasY, seriesStates, geometry, domainRef);
-        if (!hit) {
-            hideCrosshair();
-            return;
-        }
+        if (!hit) { hideCrosshair(); return; }
         if (crosshairData.visible
             && crosshairData.seriesIdx === hit.seriesIdx
             && crosshairData.axisIdx === hit.axisIdx
@@ -6289,15 +6772,10 @@ export const createRadarChart = (config) => {
                 value: crosshairData.value,
                 rows,
             });
-            if (typeof out === 'string') {
-                header = out;
-                rows.length = 0;
-            } else if (out && typeof out === 'object') {
+            if (typeof out === 'string') { header = out; rows.length = 0; }
+            else if (out && typeof out === 'object') {
                 if (out.header != null) header = out.header;
-                if (Array.isArray(out.rows)) {
-                    rows.length = 0;
-                    for (let i = 0; i < out.rows.length; i++) rows.push(out.rows[i]);
-                }
+                if (Array.isArray(out.rows)) { rows.length = 0; for (let i = 0; i < out.rows.length; i++) rows.push(out.rows[i]); }
             }
         }
 
@@ -6366,9 +6844,7 @@ export const createRadarChart = (config) => {
                 : (config.background != null ? config.background : null);
             return _exportSceneToSVG(scene, w, h, bg);
         },
-        redraw: () => {
-            if (scene) scene.markDirty();
-        },
+        redraw: () => { if (scene) scene.markDirty(); },
         moveCrosshair,
         hideCrosshair,
         setSeriesVisible: (idx, visible) => {
@@ -6377,30 +6853,20 @@ export const createRadarChart = (config) => {
         },
         refreshTheme: () => {
             if (!mounted) return;
-            axisColorRef.value = resolveColor(config.axisColor != null ? config.axisColor : '#cccccc', container);
-            gridColorRef.value = resolveColor(config.gridColor != null ? config.gridColor : '#e6e6e6', container);
-            labelColorRef.value = resolveColor(config.labelColor != null ? config.labelColor : '#444444', container);
-            tooltipBgRef.value = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
-            tooltipBorderRef.value = resolveColor(tooltipOpts && tooltipOpts.border ? tooltipOpts.border : '#cccccc', container);
+            axisColorRef.value     = resolveColor(config.axisColor   != null ? config.axisColor   : '#cccccc', container);
+            gridColorRef.value     = resolveColor(config.gridColor   != null ? config.gridColor   : '#e6e6e6', container);
+            labelColorRef.value    = resolveColor(config.labelColor  != null ? config.labelColor  : '#444444', container);
+            tooltipBgRef.value     = resolveColor(tooltipOpts && tooltipOpts.background ? tooltipOpts.background : 'rgba(255,255,255,0.96)', container);
+            tooltipBorderRef.value = resolveColor(tooltipOpts && tooltipOpts.border     ? tooltipOpts.border     : '#cccccc', container);
             refreshResolvedColors();
             if (legendEl) populateRadarLegend();
             if (scene) scene.markDirty();
         },
-        get scene() {
-            return scene;
-        },
-        get canvas() {
-            return canvas;
-        },
-        get geometry() {
-            return geometry;
-        },
-        get domain() {
-            return domainRef.value.slice();
-        },
-        get legend() {
-            return legendEl;
-        },
+        get scene() { return scene; },
+        get canvas() { return canvas; },
+        get geometry() { return geometry; },
+        get domain() { return domainRef.value.slice(); },
+        get legend() { return legendEl; },
         plotBounds: plotBoundsSignal,
         crosshair: crosshairFacade,
         seriesVisibility,
@@ -6435,12 +6901,22 @@ export const _testHelpers = {
     extractBarSeriesData,
     scaleSeriesToPixels,
     makeLinearScale,
+    makeLogScale,
+    updateLogScale,
     makeBandScale,
     updateBandScale,
     buildAccessor,
     buildRawAccessor,
     niceYDomain,
     inferXScaleType,
+    // v1.4.0-alpha.2 pan/zoom math helpers
+    _applyPan,
+    _applyZoom,
+    _clampToBounds,
+    // v1.4.0-alpha.3 brush math helpers
+    _normalizeBrushRect,
+    _brushPxToData,
+    _computeBrushIds,
     resolveColor,
     bisectNearest,
     // Bubble-specific (axis kernel + size dimension)
@@ -6482,10 +6958,10 @@ export const createBubbleChart = (config) => createBaseAxisChart(config, BUBBLE_
 // code: xScale/yScale/axes/grid/decimation/bisect/interp/bar helpers).
 
 export const createPieChart = (config) =>
-    createBasePolarChart({innerRadius: 0, ...(config || {})}, SLICE_RENDERER);
+    createBasePolarChart({ innerRadius: 0, ...(config || {}) }, SLICE_RENDERER);
 
 export const createDonutChart = (config) =>
-    createBasePolarChart({innerRadius: 0.5, ...(config || {})}, SLICE_RENDERER);
+    createBasePolarChart({ innerRadius: 0.5, ...(config || {}) }, SLICE_RENDERER);
 
 // v1.2.0-alpha.1: scatter is bubble's simpler sibling on the axis kernel.
 // Same kernel, simpler renderer (no size dimension, constant marker).
@@ -6519,7 +6995,7 @@ export const createScatterChart = (config) => createBaseAxisChart(config, SCATTE
 //     hex colors at extract time; `colorFn` overrides for custom (OKLCH,
 //     quantile, diverging) mappings.
 
-const _DEFAULT_GRID_MARGIN = {top: 20, right: 24, bottom: 56, left: 80};
+const _DEFAULT_GRID_MARGIN = { top: 20, right: 24, bottom: 56, left: 80 };
 
 // Parse '#rgb' or '#rrggbb'. Returns [r, g, b] or null.
 const _parseHexColor = (hex) => {
@@ -6545,9 +7021,10 @@ const _makeGridState = () => ({
     presentMask: null,      // Uint8Array | null
     cellColors: null,       // Array<string|null> | null
     cellLabelColors: null,  // Array<string|null> | null  (only for showValues + auto-contrast)
-    presentSorted: null,    // v1.2.0: Float32Array | null; pooled scratch buffer for
-                            // quantile boundary computation. Grows monotonically as nx*ny
-                            // climbs; subarray() slices a view for in-place sort, no alloc.
+    presentSorted: null,    // v1.4.0-alpha.1: Float32Array | null; pooled
+                            // scratch buffer for quantile boundary computation.
+                            // Grows monotonically as nx*ny climbs; subarray()
+                            // slices a view for in-place sort without alloc.
     xCategories: [],        // string[]
     yCategories: [],        // string[]
     nx: 0,
@@ -6583,14 +7060,8 @@ const _extractGridData = (state, data, opts) => {
         const row = data[i];
         const xv = String(xAcc(row, i));
         const yv = String(yAcc(row, i));
-        if (!xMap.has(xv)) {
-            xMap.set(xv, xCats.length);
-            xCats.push(xv);
-        }
-        if (!yMap.has(yv)) {
-            yMap.set(yv, yCats.length);
-            yCats.push(yv);
-        }
+        if (!xMap.has(xv)) { xMap.set(xv, xCats.length); xCats.push(xv); }
+        if (!yMap.has(yv)) { yMap.set(yv, yCats.length); yCats.push(yv); }
     }
     const nx = xCats.length;
     const ny = yCats.length;
@@ -6649,12 +7120,17 @@ const _pickContrastColor = (rgb) => {
 // anything more exotic (named colors, oklch(), rgba(), CSS-vars after
 // resolve). Used only by the auto-label-color path so colorFn outputs that
 // can't be parsed simply fall through to the configured label color.
+//
+// v1.4.0-alpha.1 (audit fix): was `css.slice(open+1, close).split(',')`
+// which on a 10k-cell heatmap allocates 10k Arrays + 30k substring
+// objects at extract time. The indexOf scan below uses three substring
+// slices total (V8 may sliced-string them; even if materialized they're
+// tiny) and never instantiates an intermediate array.
 const _parseRGBLike = (css) => {
     if (typeof css !== 'string' || css.length === 0) return null;
     if (css.charCodeAt(0) === 35) return _parseHexColor(css);
     // 'rgb(r,g,b)' or 'rgb(r, g, b)' -- scan commas manually to avoid
-    // `split(',')`'s array allocation (v1.2.0 GC audit fix; this path runs
-    // once per cell under valueLabelColor:'auto' + a custom colorFn).
+    // `split(',')`'s array allocation.
     if (css.length > 4 && css.charCodeAt(0) === 114 && css.charCodeAt(1) === 103 && css.charCodeAt(2) === 98) {
         const open = css.indexOf('(');
         const close = css.indexOf(')', open + 1);
@@ -6715,7 +7191,7 @@ const _computeGridColors = (state, opts) => {
         return;
     }
 
-    const lo = _parseHexColor(opts.colorLow) || [219, 234, 254];  // blue-100
+    const lo = _parseHexColor(opts.colorLow)  || [219, 234, 254];  // blue-100
     const hi = _parseHexColor(opts.colorHigh) || [30, 58, 138];    // blue-900
 
     // ---- Quantile path -------------------------------------------------
@@ -6726,15 +7202,15 @@ const _computeGridColors = (state, opts) => {
     // washing out the rest of the chart.
     if (opts.colorScale === 'quantile' && total > 0) {
         const binCount = Math.max(2, Math.min(20, opts.colorBins | 0 || 5));
-        // Collect present values.
-        // v1.2.0 (GC audit fix): the naive `const present = []; ...push();
-        // present.sort((a,b)=>a-b)` allocates a fresh JS Array on every data
-        // update (40k elements for a dense 200x200 grid), then discards it after
-        // finding the boundaries. Pool a Float32Array on state, pack present
-        // values into a prefix, sort a subarray view in place. The pool grows
-        // monotonically with chart size; steady state is zero-alloc.
-        // `Float32Array.prototype.sort()` without args sorts numerically (no
-        // string-coercion trap, no comparator allocation).
+
+        // v1.4.0-alpha.1 (audit fix): was `const present = []; ... .push(); ... .sort(cmp)`
+        // which on a 200x200 dense heatmap allocates a 40k-element JS
+        // Array on every data update, then throws it away after finding
+        // the boundaries. Pool a Float32Array on state, pack present
+        // values into a prefix, sort a subarray view in place. The pool
+        // grows monotonically with chart size; steady state is zero-alloc.
+        // `Float32Array.prototype.sort()` without args sorts numerically
+        // (no string-coercion trap, no comparator allocation).
         if (!state.presentSorted || state.presentSorted.length < total) {
             state.presentSorted = new Float32Array(total);
         }
@@ -6856,7 +7332,7 @@ const _gridHitTest = (canvasX, canvasY, xBand, yBand, state, pb) => {
     if (xi < 0 || yi < 0 || xi >= state.nx || yi >= state.ny) return null;
     const idx = yi * state.nx + xi;
     if (!state.presentMask[idx]) return null;
-    return {xi, yi, value: state.cells[idx]};
+    return { xi, yi, value: state.cells[idx] };
 };
 
 // ---- HEATMAP_RENDERER ----------------------------------------------------
@@ -6939,10 +7415,7 @@ const createBaseGridChart = (config, renderer) => {
     // v1.2.0: track signals lite-charts creates so `chart.destroy()` can
     // dispose them. See axis kernel for the rationale.
     const _ownedSignals = [];
-    const _own = (s) => {
-        _ownedSignals.push(s);
-        return s;
-    };
+    const _own = (s) => { _ownedSignals.push(s); return s; };
     const widthAutoSig = widthExplicit ? null : _own(signal(600));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthSig = widthExplicit ? asAccessor(config.width) : widthAutoSig;
@@ -6950,21 +7423,21 @@ const createBaseGridChart = (config, renderer) => {
 
     // -- Margins --
     const m = config.margin || _DEFAULT_GRID_MARGIN;
-    const marginTop = m.top != null ? m.top : _DEFAULT_GRID_MARGIN.top;
-    const marginRight = m.right != null ? m.right : _DEFAULT_GRID_MARGIN.right;
+    const marginTop    = m.top    != null ? m.top    : _DEFAULT_GRID_MARGIN.top;
+    const marginRight  = m.right  != null ? m.right  : _DEFAULT_GRID_MARGIN.right;
     const marginBottom = m.bottom != null ? m.bottom : _DEFAULT_GRID_MARGIN.bottom;
-    const marginLeft = m.left != null ? m.left : _DEFAULT_GRID_MARGIN.left;
+    const marginLeft   = m.left   != null ? m.left   : _DEFAULT_GRID_MARGIN.left;
 
     // -- State + scales + opts --
     const state = _makeGridState();
     const opts = renderer.initOpts(config);
     const xBand = makeBandScale();
     const yBand = makeBandScale();
-    const plotBoundsBox = {x: 0, y: 0, w: 0, h: 0};
+    const plotBoundsBox = { x: 0, y: 0, w: 0, h: 0 };
     const plotBoundsSignal = _own(signal(0));
 
     // -- Crosshair / hover state --
-    const hoverData = {visible: false, xi: -1, yi: -1, value: 0, mouseX: 0, mouseY: 0};
+    const hoverData = { visible: false, xi: -1, yi: -1, value: 0, mouseX: 0, mouseY: 0 };
     const hoverVersion = _own(signal(0));
 
     // -- Mount-time resources --
@@ -6979,24 +7452,14 @@ const createBaseGridChart = (config, renderer) => {
     const chart = {
         mount: null,         // assigned below
         unmount: null,
-        redraw: () => {
-            if (scene) scene.markDirty();
-        },
+        redraw: () => { if (scene) scene.markDirty(); },
         // Read-only state introspection for tests / debug. _internal NOT
         // public API; do not depend on shape across minor versions.
-        _internal: {state, xBand, yBand, plotBoundsBox},
-        get xCategories() {
-            return state.xCategories.slice();
-        },
-        get yCategories() {
-            return state.yCategories.slice();
-        },
-        get vMin() {
-            return state.vMin;
-        },
-        get vMax() {
-            return state.vMax;
-        },
+        _internal: { state, xBand, yBand, plotBoundsBox },
+        get xCategories() { return state.xCategories.slice(); },
+        get yCategories() { return state.yCategories.slice(); },
+        get vMin() { return state.vMin; },
+        get vMax() { return state.vMax; },
         // moveCrosshair / hover info, useful from tests + custom interactivity.
         moveHover(canvasX, canvasY) {
             const hit = renderer.hitTest(canvasX, canvasY, xBand, yBand, state, plotBoundsBox);
@@ -7028,10 +7491,7 @@ const createBaseGridChart = (config, renderer) => {
             hoverData.yi = -1;
             hoverVersion.update((v) => (v + 1) | 0);
         },
-        hover: Object.assign(() => {
-            hoverVersion();
-            return hoverData;
-        }, {
+        hover: Object.assign(() => { hoverVersion(); return hoverData; }, {
             peek: () => hoverData,
         }),
     };
@@ -7066,12 +7526,12 @@ const createBaseGridChart = (config, renderer) => {
         }
 
         // Resolve theme-affected colors (CSS-vars -> concrete strings).
-        opts.colorLow = resolveColor(opts.colorLow, container);
-        opts.colorHigh = resolveColor(opts.colorHigh, container);
-        opts.labelColor = resolveColor(opts.labelColor, container);
-        opts.highlightStroke = resolveColor(opts.highlightStroke, container);
-        opts.rowColumnHighlightFill = resolveColor(opts.rowColumnHighlightFill, container);
-        opts.valueLabelColor = resolveColor(opts.valueLabelColor, container);
+        opts.colorLow              = resolveColor(opts.colorLow, container);
+        opts.colorHigh             = resolveColor(opts.colorHigh, container);
+        opts.labelColor            = resolveColor(opts.labelColor, container);
+        opts.highlightStroke       = resolveColor(opts.highlightStroke, container);
+        opts.rowColumnHighlightFill= resolveColor(opts.rowColumnHighlightFill, container);
+        opts.valueLabelColor       = resolveColor(opts.valueLabelColor, container);
 
         const schedule = config.schedule || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => cb());
         scene = createScene(canvas, {
@@ -7088,10 +7548,10 @@ const createBaseGridChart = (config, renderer) => {
             const h = +heightSig() | 0 || 400;
             const wBacking = Math.max(1, Math.round(w * resolvedDpr));
             const hBacking = Math.max(1, Math.round(h * resolvedDpr));
-            if (canvas.width !== wBacking) canvas.width = wBacking;
+            if (canvas.width  !== wBacking) canvas.width  = wBacking;
             if (canvas.height !== hBacking) canvas.height = hBacking;
             if (typeof canvas.style !== 'undefined') {
-                canvas.style.width = w + 'px';
+                canvas.style.width  = w + 'px';
                 canvas.style.height = h + 'px';
             }
             plotBoundsBox.x = marginLeft;
@@ -7123,105 +7583,101 @@ const createBaseGridChart = (config, renderer) => {
 
         // --- Scene nodes (drawn in this order) ---
         const cellsDrawFn = renderer.makeDrawFn(state, xBand, yBand, opts);
-        scene.root.add(pathNode({draw: (ctx) => cellsDrawFn(ctx)}));
+        scene.root.add(pathNode({ draw: (ctx) => cellsDrawFn(ctx) }));
 
         // Axis labels (x below, y to the left). Inline -- no lite-axis dep
         // since heatmap categories are arbitrary strings, not numeric ticks.
-        scene.root.add(pathNode({
-            draw: (ctx) => {
-                const nx = state.nx;
-                const ny = state.ny;
-                if (nx === 0 && ny === 0) return;
-                ctx.fillStyle = opts.labelColor;
-                ctx.font = opts.labelFont;
+        scene.root.add(pathNode({ draw: (ctx) => {
+            const nx = state.nx;
+            const ny = state.ny;
+            if (nx === 0 && ny === 0) return;
+            ctx.fillStyle = opts.labelColor;
+            ctx.font = opts.labelFont;
 
-                // X labels (bottom).
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                const xLabelsY = plotBoundsBox.y + plotBoundsBox.h + 8;
-                for (let xi = 0; xi < nx; xi++) {
-                    ctx.fillText(state.xCategories[xi], xBand.map(xi), xLabelsY);
-                }
-
-                // Y labels (left).
-                ctx.textAlign = 'right';
-                ctx.textBaseline = 'middle';
-                const yLabelsX = plotBoundsBox.x - 8;
-                for (let yi = 0; yi < ny; yi++) {
-                    ctx.fillText(state.yCategories[yi], yLabelsX, yBand.map(yi));
-                }
+            // X labels (bottom).
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            const xLabelsY = plotBoundsBox.y + plotBoundsBox.h + 8;
+            for (let xi = 0; xi < nx; xi++) {
+                ctx.fillText(state.xCategories[xi], xBand.map(xi), xLabelsY);
             }
-        }));
+
+            // Y labels (left).
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            const yLabelsX = plotBoundsBox.x - 8;
+            for (let yi = 0; yi < ny; yi++) {
+                ctx.fillText(state.yCategories[yi], yLabelsX, yBand.map(yi));
+            }
+        }}));
 
         // Hover highlight + tooltip.
-        scene.root.add(pathNode({
-            draw: (ctx) => {
-                if (!hoverData.visible) return;
-                const {xi, yi, value, mouseX, mouseY} = hoverData;
+        scene.root.add(pathNode({ draw: (ctx) => {
+            if (!hoverData.visible) return;
+            const { xi, yi, value, mouseX, mouseY } = hoverData;
 
-                // v1.2.0: per-row + per-column highlight stripes. Each is a
-                // translucent rect spanning the plot in one axis and the
-                // hovered cell's band in the other. Drawn BEFORE the cell
-                // stroke so the stroke sits on top.
-                if (opts.rowHighlight) {
-                    ctx.fillStyle = opts.rowColumnHighlightFill;
-                    ctx.fillRect(
-                        plotBoundsBox.x,
-                        yBand.leftEdge(yi),
-                        plotBoundsBox.w,
-                        yBand.bandWidth,
-                    );
-                }
-                if (opts.columnHighlight) {
-                    ctx.fillStyle = opts.rowColumnHighlightFill;
-                    ctx.fillRect(
-                        xBand.leftEdge(xi),
-                        plotBoundsBox.y,
-                        xBand.bandWidth,
-                        plotBoundsBox.h,
-                    );
-                }
-
-                // Stroke the hovered cell on top of the stripes.
-                ctx.strokeStyle = opts.highlightStroke;
-                ctx.lineWidth = opts.highlightStrokeWidth;
-                ctx.strokeRect(
-                    xBand.leftEdge(xi),
+            // v1.2.0: per-row + per-column highlight stripes. Each is a
+            // translucent rect spanning the plot in one axis and the
+            // hovered cell's band in the other. Drawn BEFORE the cell
+            // stroke so the stroke sits on top.
+            if (opts.rowHighlight) {
+                ctx.fillStyle = opts.rowColumnHighlightFill;
+                ctx.fillRect(
+                    plotBoundsBox.x,
                     yBand.leftEdge(yi),
-                    xBand.bandWidth,
+                    plotBoundsBox.w,
                     yBand.bandWidth,
                 );
-
-                // Tooltip: simple label "xLabel x yLabel: value" near the cursor.
-                const fmt = opts.tooltipFormat;
-                const text = fmt
-                    ? fmt({xi, yi, value, xLabel: state.xCategories[xi], yLabel: state.yCategories[yi]})
-                    : (state.xCategories[xi] + ' \u00d7 ' + state.yCategories[yi] + ': ' + (Math.round(value * 100) / 100));
-                ctx.font = opts.labelFont;
-                const metrics = ctx.measureText(text);
-                const tw = (metrics && metrics.width) || (text.length * 7);
-                const th = 18;
-                const pad = 6;
-                // Anchor above-right of the cursor; clamp inside plot rect.
-                let tx = mouseX + 12;
-                let ty = mouseY - th - 6;
-                if (tx + tw + pad * 2 > plotBoundsBox.x + plotBoundsBox.w) {
-                    tx = mouseX - tw - pad * 2 - 12;
-                }
-                if (ty < plotBoundsBox.y) ty = mouseY + 12;
-                ctx.fillStyle = 'rgba(20, 20, 20, 0.92)';
-                ctx.fillRect(tx, ty, tw + pad * 2, th);
-                ctx.fillStyle = '#ffffff';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(text, tx + pad, ty + th / 2);
             }
-        }));
+            if (opts.columnHighlight) {
+                ctx.fillStyle = opts.rowColumnHighlightFill;
+                ctx.fillRect(
+                    xBand.leftEdge(xi),
+                    plotBoundsBox.y,
+                    xBand.bandWidth,
+                    plotBoundsBox.h,
+                );
+            }
+
+            // Stroke the hovered cell on top of the stripes.
+            ctx.strokeStyle = opts.highlightStroke;
+            ctx.lineWidth = opts.highlightStrokeWidth;
+            ctx.strokeRect(
+                xBand.leftEdge(xi),
+                yBand.leftEdge(yi),
+                xBand.bandWidth,
+                yBand.bandWidth,
+            );
+
+            // Tooltip: simple label "xLabel x yLabel: value" near the cursor.
+            const fmt = opts.tooltipFormat;
+            const text = fmt
+                ? fmt({ xi, yi, value, xLabel: state.xCategories[xi], yLabel: state.yCategories[yi] })
+                : (state.xCategories[xi] + ' \u00d7 ' + state.yCategories[yi] + ': ' + (Math.round(value * 100) / 100));
+            ctx.font = opts.labelFont;
+            const metrics = ctx.measureText(text);
+            const tw = (metrics && metrics.width) || (text.length * 7);
+            const th = 18;
+            const pad = 6;
+            // Anchor above-right of the cursor; clamp inside plot rect.
+            let tx = mouseX + 12;
+            let ty = mouseY - th - 6;
+            if (tx + tw + pad * 2 > plotBoundsBox.x + plotBoundsBox.w) {
+                tx = mouseX - tw - pad * 2 - 12;
+            }
+            if (ty < plotBoundsBox.y) ty = mouseY + 12;
+            ctx.fillStyle = 'rgba(20, 20, 20, 0.92)';
+            ctx.fillRect(tx, ty, tw + pad * 2, th);
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, tx + pad, ty + th / 2);
+        }}));
 
         // Mouse listeners (if mounted to a real canvas).
         if (canvas && typeof canvas.addEventListener === 'function') {
             const onMove = (ev) => {
-                const rect = canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : {left: 0, top: 0};
+                const rect = canvas.getBoundingClientRect ? canvas.getBoundingClientRect() : { left: 0, top: 0 };
                 const cx = ev.clientX - rect.left;
                 const cy = ev.clientY - rect.top;
                 chart.moveHover(cx, cy);
@@ -7240,17 +7696,11 @@ const createBaseGridChart = (config, renderer) => {
     const unmount = () => {
         if (!mounted) return;
         for (let i = 0; i < disposers.length; i++) {
-            try {
-                disposers[i]();
-            } catch (_) { /* swallow */
-            }
+            try { disposers[i](); } catch (_) { /* swallow */ }
         }
         disposers.length = 0;
         if (scene) {
-            try {
-                scene.dispose();
-            } catch (_) { /* swallow */
-            }
+            try { scene.dispose(); } catch (_) { /* swallow */ }
             scene = null;
         }
         if (ownedCanvas && container && canvas && canvas.parentNode === container) {
@@ -7268,16 +7718,13 @@ const createBaseGridChart = (config, renderer) => {
         if (destroyed) return;
         if (mounted) unmount();
         for (let i = 0; i < _ownedSignals.length; i++) {
-            try {
-                dispose(_ownedSignals[i]);
-            } catch (_) { /* swallow */
-            }
+            try { dispose(_ownedSignals[i]); } catch (_) { /* swallow */ }
         }
         _ownedSignals.length = 0;
         destroyed = true;
     };
 
-    // v1.2.0: SVG export -- see axis kernel for rationale.
+    // v1.3.0: SVG export -- see axis kernel for rationale.
     const exportSVG = (opts) => {
         if (!mounted || !scene) {
             throw new Error('lite-charts: exportSVG() requires mount() first');

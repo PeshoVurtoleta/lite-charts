@@ -5,28 +5,670 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] -- 2026-06-29
+## [1.4.0] -- 2026-06
 
-### Fixed -- zero-GC audit (4 allocation traps)
+The v1.4 release. Three new interaction primitives on axis-kernel
+charts (log scale, pan + zoom, brushing) plus four pre-existing
+allocation traps closed during a bare-metal audit. No public API
+breaks vs v1.3.0; the new features are all opt-in.
 
-A bare-metal pass over the heatmap, axis, and SVG-export hot paths removed four
-allocation traps. All four preserve output exactly (the prior tests are unchanged)
-and are covered by `test/gc-audit-fixes.test.js`.
+Same code as v1.4.0-alpha.3 -- this is the curated rollup. The four
+alpha entries below remain as the detailed historical record.
 
-- **Heatmap quantile binning is pooled.** `_computeGridColors` no longer allocates
-  a fresh `present = []` Array (40k elements for a dense 200x200 grid) per data
-  update. A `presentSorted` Float32Array on the grid state is packed and a
-  `subarray(0, nPresent)` view is sorted in place; the pool grows monotonically.
-- **`_parseRGBLike` scans commas with `indexOf`** instead of `split(',')`,
-  removing a per-cell array allocation on the `valueLabelColor: 'auto'` path.
-- **`charBufToString` collapses the byte buffer in one call** --
-  `String.fromCharCode.apply(null, buf.subarray(0, n))` -- instead of `+=` in a
-  loop (which allocated N intermediate rope-string nodes per axis label).
-- **SVG export accumulates path commands in an array.** `_pathChunks` is joined
-  once by `_pathD()` at stroke/fill/clip, replacing `_currentPath += chunk`,
-  avoiding the rope-string flatten that froze / threw `RangeError` near 100k
-  points. `beginPath()` truncates with `length = 0`; the rotated `fillRect` /
-  `strokeRect` fallback swaps the chunks array.
+### Added -- interaction primitives
+
+- **Log scale on the y-axis.** Opt in with
+  `yScale: { type: 'log' }` on any axis-kernel chart (line, area,
+  bar, bubble, scatter). Base-10 log; ticks route through
+  `@zakkster/lite-axis`'s `logTicks` (decade boundaries 1, 10, 100,
+  ...). `map(v <= 0)` returns NaN -- line / area break the segment,
+  markers skip. Polymorphic `s.map()` in tick projection handles
+  linear and log uniformly without a parallel code path.
+- **Pan + zoom.** Opt in with `pan: true` and/or `zoom: true`.
+  Pointer-drag pans (cursor-anchor convention, d3-zoom / Plotly /
+  Google Maps style: the data point under the cursor stays under
+  the cursor). Wheel zooms around the cursor. `chart.view` is a
+  reactive accessor mirroring the crosshair facade: `view()`
+  reads (tracked), `.peek()` reads untracked, `.set(v)` writes,
+  `.reset()` clears. Imperative aliases `chart.setView(v)` and
+  `chart.resetView()`. View shape `{ xMin, xMax, yMin, yMax }`
+  (each field nullable for "fall back to data domain") is
+  intentionally symmetric with `lite-camera-max`'s camera signal
+  so the same value drops into a lite-gl `project()` function
+  unchanged when the `@zakkster/lite-charts-gl` companion package
+  lands. Configuration: `panBounds: 'data' | 'free'` (default
+  'data' clamps to data domain; 'free' allows past), `zoomMin` /
+  `zoomMax` as visible-span / data-span ratios (defaults
+  0.01 / 1000), `zoomStep` wheel ratio per tick (default 1.15).
+- **Brushing.** Opt in with `brush: true`. Shift+drag selects a
+  rectangle; `chart.brush` emits
+  `BrushSelection { xMin, xMax, yMin, yMax, ids }` -- data-space
+  bounds plus indices into the primary series. Same reactive facade
+  shape as `chart.view`. Modifier routing: bare drag = pan (when
+  `pan: true`), shift+drag = brush (when `brush: true`), wheel = zoom
+  regardless of modifier. Click-to-clear: shift+click with total
+  drag distance under 3 px clears the brush (matches d3-brush).
+  Live updates per pointermove so cross-chart linking via `effect()`
+  reflects the drag in real time. Visual: translucent rect overlay
+  rendered after the crosshair node so it sits on top; defaults to
+  indigo accent fill + dashed outline, overridable via
+  `brushStyle: { fill, stroke, lineDash, lineWidth }`.
+
+### Fixed -- four allocation traps closed (audit)
+
+A bare-metal review surfaced four allocation traps inherited from
+v1.2-1.3 code. All four are fixed without any public API change.
+
+- **Heatmap quantile gather/sort.** Was `const present = []` +
+  `push()` + `sort(cmp)` -- on a 200x200 dense heatmap that's a
+  40k-element JS Array allocated per data update. Now: pooled
+  `Float32Array` on `state.presentSorted`, pack values into a
+  prefix, sort an in-place `subarray(0, n)` view via
+  `Float32Array.prototype.sort()` (no comparator, sorts numerically,
+  zero alloc).
+- **`_parseRGBLike` per-cell split.** `css.slice(...).split(',')`
+  per cell at extract -- 10k cells = 10k Arrays + 30k substrings.
+  Now: `indexOf` scan with three substring slices total.
+- **`charBufToString` rope walk.** `let s = ''; for (...) s +=
+  String.fromCharCode(buf[i])` allocated N intermediate strings
+  via V8's rope walk. Now: `String.fromCharCode.apply(null,
+  buf.subarray(0, n))` -- one call, one allocation.
+- **SVG-export rope-string limit (most consequential).**
+  `this._currentPath += chunk` on every path command could hit
+  V8's max rope length at 100k+ points and throw `RangeError:
+  Invalid string length`, or stall the main thread for seconds
+  during the rope flatten. Now: array-of-chunks; every path
+  command pushes into `this._pathChunks`, `_pathD()` joins
+  exactly once at stroke/fill/clip. 50,000-point scatter chart
+  now exports to a 5.2 MB SVG with 50,021 path elements in
+  165 ms; pre-fix this would have either crashed or stalled.
+
+### Tests
+
+320 tests (vs 1.3.0's 259, +61 across the alpha line). New suites:
+log scale math + end-to-end (alpha.0); audit-fix regressions
+(alpha.1); pan/zoom math + view-facade + integration (alpha.2);
+brush math + facade + integration (alpha.3).
+
+### Performance
+
+- **Bench unchanged through the entire alpha line.** All four
+  features target paths that fire on data-update, gesture, or
+  export -- not on the per-frame draw. Steady-state bench is in
+  the same 161-167 bytes/cycle noise band as v1.3.0's 161.
+- **Bundle deltas vs v1.3.0** (axis-kernel charts grew; non-axis
+  kernels essentially unchanged):
+
+  | Chart | v1.3.0 | v1.4.0 | Delta |
+  |---|---|---|---|
+  | line | 32.5 KB | 39.9 KB | +7.4 |
+  | area | 33.8 KB | 41.2 KB | +7.4 |
+  | bar | 33.8 KB | 41.2 KB | +7.4 |
+  | bubble | 33.6 KB | 41.0 KB | +7.4 |
+  | scatter | 30.8 KB | 38.2 KB | +7.4 |
+  | pie | 22.1 KB | 22.3 KB | +0.2 |
+  | donut | 22.1 KB | 22.3 KB | +0.2 |
+  | radar | 22.0 KB | 22.2 KB | +0.2 |
+  | heatmap | 21.6 KB | 22.0 KB | +0.4 |
+  | **all-nine** | **82.4 KB** | **90.2 KB** | **+7.8** |
+
+  ~7.4 KB per axis-kernel chart: ~0.7 from log scale, ~0.1 from
+  audit fixes, ~3.7 from pan/zoom, ~2.9 from brushing. Heatmap's
+  +0.4 KB is the new `presentSorted` state field from the quantile
+  audit fix. Cross-kernel isolation verified at every alpha:
+  heatmap, pie, donut, radar bundles contain none of the
+  axis-kernel interaction code.
+
+### Types
+
+Three new interfaces in Charts.d.ts: `View`, `PanZoomConfig`,
+`BrushConfig` + supporting `BrushSelection`, `BrushStyleConfig`.
+`LineChartConfig`, `BubbleChartConfig`, `ScatterChartConfig` extend
+`PanZoomConfig` and `BrushConfig`. Bar inherits via the existing
+`Omit<LineChartConfig, ...>` chain. `Chart` interface gains `view`,
+`setView`, `resetView`, `brush`, `setBrush`, `clearBrush`.
+`yScale.type` accepts `'linear' | 'log'` (was `'linear'` only).
+
+### Scope of the interaction primitives
+
+- **Axis-kernel charts** (line, area, bubble, scatter) are the
+  primary targets and get full support.
+- **Bar** inherits typing for pan/zoom/brush but its band x-axis
+  isn't ideal -- panning a band domain produces visually weird
+  results. Not documented as supported in v1.4.
+- **Polar (pie/donut), radar, heatmap** don't get pan/zoom/brush.
+  Different interaction models (pie has no x/y space; heatmap
+  uses band scales on both axes).
+- **Log + pan/zoom**: linear arithmetic is used on the data domain
+  regardless of scale type. The chart still renders, but pan
+  magnitude on a log chart won't feel right and zoom centered on
+  log will skew. Log-aware pan/zoom math is a future enhancement.
+
+### Forward plan
+
+The view-signal shape `{ xMin, xMax, yMin, yMax }` was chosen
+specifically to drop unchanged into a future `@zakkster/lite-charts-gl`
+companion package (separate npm package built on `@zakkster/lite-gl`).
+That work is the post-v1.4 track; lite-charts core stays canvas-only
+and node-testable. See ROADMAP.md for the full picture.
+
+### License
+
+MIT (c) Zahary Shinikchiev
+
+
+## [1.4.0-alpha.3] -- 2026-06
+
+Brushing lands as the final v1.4 alpha. Shift+drag selects a
+rectangular region; the chart emits the data-space bounds plus
+indices into the primary series via `chart.brush`. Coexists with
+pan/zoom: no modifier routes to pan, shift routes to brush, wheel
+zooms regardless. A `v1.4.0` combined release follows next.
+
+### Added -- shift+drag brushing
+
+- **`brush: true`** -- enables shift+drag rectangle selection on any
+  axis-kernel chart (line, area, bubble, scatter; bar inherits typing
+  but the band x-axis caveat from alpha.2 applies). When neither
+  `pan`, `zoom`, nor `brush` is set, no listeners attach and no
+  signal is allocated -- zero cost. Setting any one of the three
+  enables the listener cluster.
+- **`chart.brush`** -- reactive facade mirroring `chart.view`. Reads
+  `BrushSelection | null` (with tracking), `.peek()` reads untracked,
+  `.set(v)` writes (null clears), `.clear()` clears. Imperative
+  aliases `chart.setBrush(v)` and `chart.clearBrush()` available too.
+  All three throw if `brush: true` was not in config -- intentional,
+  signals the opt-in requirement.
+- **`BrushSelection`** shape `{ xMin, xMax, yMin, yMax, ids }` --
+  data-space bounds plus indices into the primary series. `ids` is
+  freshly allocated on every gesture commit (not pooled; brushing is
+  sub-Hz so the allocation is acceptable; pooling would alias across
+  brushes). Programmatic `setBrush()` leaves `ids` as null unless
+  you pass them yourself -- the API never recomputes ids on your
+  behalf when you set the brush imperatively.
+- **`brushStyle: { fill, stroke, lineDash, lineWidth }`** -- visual
+  override for the rect overlay. Defaults to translucent accent fill
+  (`rgba(99, 102, 241, 0.15)`) with a dashed accent outline
+  (`rgba(99, 102, 241, 0.7)`, `[4, 4]` dash, 1px). Pass `lineDash: []`
+  for a solid outline.
+
+### Interaction model
+
+- **Modifier routing.** Pointerdown checks `ev.shiftKey`. If brush is
+  enabled AND shift is held, the pan listener returns early -- the
+  brush listener takes the gesture. If brush is enabled but shift is
+  NOT held, pan handles the drag (when pan is enabled) or nothing
+  happens. If brush is NOT enabled, the modifier is ignored.
+- **Click-to-clear.** A shift+click with total drag distance under
+  3 pixels is treated as a click and clears the existing brush.
+  Matches d3-brush's default behavior.
+- **Live updates.** Brush signal updates on every `pointermove`
+  while the gesture is active -- cross-chart linking via `effect()`
+  reflects the user's drag in real time. Final commit fires on
+  `pointerup`. Subscribers can debounce in user code if needed.
+- **Crosshair suppression.** Pointerdown hides the crosshair once;
+  it resumes naturally on next mousemove after pointerup (same
+  pattern as pan).
+- **Visual.** A translucent rect overlay renders on top of the
+  crosshair (added to scene root after the crosshair node) when a
+  brush is set. The overlay reads brush data untracked; a dirty
+  bridge effect tracks `brushSig()` and marks the scene dirty.
+
+### Architecture
+
+- **Math helpers are pure module-level.** `_normalizeBrushRect(px0,
+  py0, px1, py1)` orders a drag rect into min/max corners.
+  `_brushPxToData(rect, xScale, yScale)` converts pixel space to
+  data space via the live scales (y-axis flipped so `pyMin` -> `yMax`,
+  `pyMax` -> `yMin`). `_computeBrushIds(xs, ys, n, xMin, xMax, yMin,
+  yMax)` scans a series for points inside the rect. All three
+  exported via `_testHelpers`; tree-shaken away in builds that don't
+  use brush.
+- **Coexistence with pan/zoom.** The brush state machine
+  (`brushActive`, `brushStartX/Y`, `brushCurrentX/Y`) is fully
+  independent of pan's drag state. Both can be in-flight only if
+  the user starts a gesture with shift held; otherwise the modifier
+  routing in pointerdown ensures exclusivity. The pointer-event
+  family used by pan and brush is identical (pointerdown/move/up/
+  cancel/leave), so they share the same setPointerCapture flow.
+- **IDs from primary series.** `seriesStates[0]` -- the first series
+  in `series[]`, or the single-series `data` when that shorthand is
+  used. Multi-series filtering is the caller's responsibility; the
+  brush bounds are the universal hook (they can compute their own
+  per-series ids from the bounds).
+
+### Tests
+
+320 tests (+16 over alpha.2), 69 describe blocks.
+
+- `brush math (v1.4.0-alpha.3)` -- 6 tests.
+  `_normalizeBrushRect` orders corners regardless of drag direction
+  (top-left -> bottom-right, bottom-right -> top-left, mixed).
+  `_brushPxToData` correctly inverts the rect through linear scales
+  with y-flip (pyMin pixel -> yMax data, pyMax pixel -> yMin data).
+  `_computeBrushIds` returns indices inside the rect, inclusive at
+  boundaries, handles empty selection, handles zero-length input.
+- `brush facade (v1.4.0-alpha.3)` -- 5 tests. Chart without
+  `brush: true` returns null and throws on set/clear (matches view's
+  pattern). Opting in exposes a working facade. setBrush rejects
+  malformed input. Brush is reactive -- a `lite-signal` `effect()`
+  fires on every set/clear. Pan + brush coexist (both enabled, both
+  facades work independently).
+- `brush integration -- shift-drag (v1.4.0-alpha.3)` -- 5 tests
+  using the extended mock canvas from alpha.2. shift+drag commits
+  a brush; bare drag (no shift) does NOT initiate brush when pan
+  is off; shift+drag is brush even when pan is enabled (modifier
+  routing); shift+click without movement clears existing brush
+  (sub-3px threshold); programmatic setBrush leaves ids as null
+  (documented behavior).
+
+### Performance
+
+- **Bench unchanged**: 164.0 bytes/cycle (vs alpha.2's 164.7 --
+  noise band). Brush listeners only fire on pointer events; the
+  per-frame draw budget is untouched.
+- **Bundle deltas vs alpha.2**: line +2.9 KB, bar +2.9 KB, bubble
+  +2.8 KB, scatter +2.9 KB. Heatmap, pie, radar UNCHANGED (kernel
+  isolation verified -- no `_normalizeBrushRect` / `_brushPxToData`
+  / `_computeBrushIds` / `brushFacade` strings in those bundles).
+  All-nine bundle: 87.3 -> 90.2 KB (+2.9 KB; the brush helpers are
+  shared module-level, deduplicated by the bundler).
+
+### Documentation
+
+- Charts.d.ts: `BrushSelection`, `BrushStyleConfig`, `BrushConfig`
+  interfaces; `Chart` gains `brush`, `setBrush`, `clearBrush`;
+  `LineChartConfig`, `BubbleChartConfig`, `ScatterChartConfig`
+  extend `BrushConfig`. Bar inherits via the existing Omit chain.
+
+### Scope (unchanged from alpha.2)
+
+- **Axis-kernel charts only.** Polar (pie/donut), radar, and grid
+  (heatmap) kernels don't get brushing. Different interaction
+  models -- pie has no x/y rect to select; heatmap selection
+  would be cell-based, not bounds-based.
+- **Linear math.** For `yScale: { type: 'log' }` charts, brush
+  bounds are still in data space (the chart's invert handles log
+  internally) -- the brush rect maps correctly. But points "inside"
+  a log-brushed region are still computed via simple bound checks
+  on the data values, which is correct in either scale type.
+- **No keyboard modifiers other than shift.** alpha.3 ships with
+  fixed shift binding; configurable modifier is a follow-up.
+
+### v1.4.0 next
+
+The v1.4 alpha line is complete: alpha.0 log scale, alpha.1 audit
+fixes, alpha.2 pan + zoom, alpha.3 brushing. The combined v1.4.0
+release follows -- same code as alpha.3 plus a clean release-notes
+rollup, no further API or behavior changes.
+
+### License
+
+MIT (c) Zahary Shinikchiev
+
+
+## [1.4.0-alpha.2] -- 2026-06
+
+Pan + zoom on axis-kernel charts. Opt-in via `pan: true` and/or
+`zoom: true`. View signal `{ xMin, xMax, yMin, yMax }` is intentionally
+symmetric with `lite-camera-max`'s camera signal so the same value
+drops into a lite-gl `project()` function unchanged when the
+`@zakkster/lite-charts-gl` companion package lands. Brushing
+(originally alpha.2) shifts to alpha.3.
+
+### Added -- mouse-drag pan + wheel zoom
+
+- **`pan: true`** -- pointer-drag (left button) pans the visible
+  domain. The data point under the cursor at pointerdown stays
+  under the cursor as it moves -- the cursor-anchor convention used
+  by d3-zoom, Plotly, and Google Maps. Drag right shifts view LEFT
+  in data space (you see more leftward data); drag up shifts view
+  DOWN in data space (content rolls up with the cursor). pointer
+  events (`pointerdown`/`move`/`up`/`cancel`/`leave`) are used
+  uniformly so pen, touch, and mouse all work. Uses
+  `setPointerCapture` when available so a drag that escapes the
+  canvas still completes correctly.
+- **`zoom: true`** -- mouse wheel zooms around the cursor. The data
+  point under the cursor stays at the same screen pixel; range
+  scales by `zoomStep` per wheel notch (default 1.15 = 15% per
+  tick). `wheel` listener is registered with `passive: false` and
+  calls `preventDefault()` so page-scroll doesn't fight the zoom.
+- **`chart.view`** -- reactive view accessor mirroring the
+  crosshair-facade pattern: `chart.view()` reads (tracks), `.peek()`
+  reads untracked, `.set(v)` writes, `.reset()` clears.
+  `chart.setView(v)` and `chart.resetView()` are imperative
+  aliases. Setting `null` (or passing `null` to setView) returns
+  the chart to following the data-derived domain. Partial views
+  work: `setView({ xMin: 0, xMax: 100 })` overrides x and leaves y
+  to auto-fit from data. View shape symmetric with
+  `lite-camera-max`'s camera signal for future lite-gl drop-in.
+- **`panBounds: 'data' | 'free'`** -- bounds policy. Default
+  `'data'` clamps the view to the data domain; if a zoom would
+  make the view wider than data, it snaps to the full domain.
+  `'free'` allows any view (extends past data, useful for
+  showing context around the data range).
+- **`zoomMin`, `zoomMax`** -- minimum and maximum zoom factor
+  expressed as a ratio of visible-span to data-span. Defaults
+  `0.01` and `1000` (zoom in until visible is 1% of data; zoom
+  out until visible is 1000x of data). Setting both equal
+  disables wheel zoom while keeping the math configuration
+  consistent.
+- **`zoomStep`** -- wheel ratio per tick. Default `1.15`; clamped
+  to `>= 1.001`.
+
+### Architecture
+
+- **Opt-in is zero-cost.** When neither `pan` nor `zoom` is set,
+  no view signal is allocated and no listeners attach. Charts that
+  don't want interactions pay exactly nothing extra over v1.4.0-
+  alpha.1.
+- **View-override layer.** Sits between data-domain extraction and
+  the scale-update calls. Reads `viewSig()` (tracked) and
+  overrides `dxMin/dxMax/yBase[0]/yBase[1]` with the view's
+  non-null fields. The scale-update effect already runs whenever
+  data, plot bounds, or visibility change; adding view as a
+  dependency means a single `chart.setView()` triggers a full
+  re-project + redraw via the existing reactive plumbing.
+- **`_dataDomain` snapshot.** Plain object (not a signal) populated
+  by the scale-update effect every time it runs. Listeners read
+  it inside event handlers for bounds clamping without touching
+  the reactive graph. Allocated only when `interactionsEnabled`.
+- **Math helpers are module-level + pure.** `_applyPan`,
+  `_applyZoom`, `_clampToBounds` are exported via `_testHelpers`
+  so scale math can be unit-tested without standing up a full
+  chart. Pulling them out of the kernel closure also means tree-
+  shaking can drop them in builds that don't use pan/zoom (they
+  reach the chart only through the listener closures, which are
+  only constructed when `interactionsEnabled`).
+- **Crosshair suppression.** During an active drag the listener
+  calls `hideCrosshair()` once on pointerdown. Resumes naturally
+  on next mousemove after pointerup. The pan and crosshair
+  systems share the canvas but don't share state.
+
+### Scope
+
+- **Axis-kernel charts only**: line, area, bubble, scatter inherit
+  the typing via `LineChartConfig extends PanZoomConfig` (and
+  bubble/scatter directly). Bar inherits via the existing
+  `Omit<LineChartConfig, ...>` chain but its band x-axis is
+  best-effort -- the math assumes a linear/time x and panning a
+  band domain produces visually weird results. Bar pan/zoom is
+  a future-proper-fix cut.
+- **Linear arithmetic.** alpha.2 implements linear pan + zoom math.
+  For `yScale: { type: 'log' }` (from alpha.0) the math is
+  technically wrong (it adds and scales in data space rather than
+  log space) -- the chart still renders, but pan magnitude won't
+  feel right and zoom centered on a log scale will skew. A log-
+  aware path is a small follow-up; we wanted the API and the
+  linear-case behavior stable first.
+- **Polar / radar / heatmap** kernels don't get pan/zoom in
+  alpha.2 (different interaction models -- pie has no x/y space;
+  heatmap uses band scales on both axes).
+
+### Tests
+
+304 tests (+24 over alpha.1), 63 describe blocks. New suites:
+
+- `pan + zoom math (v1.4.0-alpha.2)` -- 10 tests. `_applyPan`:
+  drag-right shifts view left (cursor convention), drag-up shifts
+  view down (y-flip), zero drag is identity. `_applyZoom`: zoom-in
+  centered on plot middle halves the range, zoom-in preserves the
+  cursor's data anchor at the same pixel, zoom-out widens, y
+  anchor is flipped (top of plot = yMax). `_clampToBounds`: view
+  inside data is unchanged; view extending past xMin shifts right;
+  view extending past xMax shifts left; view wider than data snaps
+  to full domain; x and y clamp independently.
+- `view facade + scale integration (v1.4.0-alpha.2)` -- 5 tests.
+  Charts without pan/zoom return `view() === null` and throw on
+  set/reset (signals the opt-in requirement). Opting in exposes a
+  working facade. setView rejects non-object inputs. View changes
+  flow through to `xScale.dMin` / `dMax` and partial views fall
+  back to data on unset axes. View is reactive -- a `lite-signal`
+  `effect()` subscribed to `chart.view()` fires on every set/reset.
+- `pan + zoom integration (v1.4.0-alpha.2)` -- 7 tests using an
+  extended mock canvas with `addEventListener`. pointerdown +
+  move + up updates view in the expected direction. wheel down
+  zooms out, wheel up zooms in (cumulative wheel events compound).
+  `panBounds: 'data'` clamps a far drag to the data domain;
+  `panBounds: 'free'` lets it extend past. Right-click drag does
+  not initiate pan (`button > 0` is rejected). Pointerdown in
+  the chart margin (outside the plot rect) is rejected.
+  `chart.destroy()` removes all listeners (post-destroy dispatch
+  doesn't throw or mutate).
+
+### Performance
+
+- **Bench unchanged**: pan/zoom doesn't touch the per-frame draw
+  path. View overrides happen once per scale update (the same
+  cadence as data changes and resizes), and the math helpers are
+  invoked only on pointer/wheel events (sub-Hz under normal use).
+- **Bundle deltas**: line +3.7 KB, area +3.9 KB, bar +3.7 KB, bubble
+  +3.9 KB, scatter +3.7 KB vs alpha.1 -- the listener cluster
+  (pointerdown/move/up/cancel/leave + wheel + their disposers), the
+  viewFacade construction, and the closure-captured math helpers
+  together add up. Larger than the "~1.2 KB" I'd estimated mid-build;
+  reporting actuals here. Heatmap unchanged (grid kernel doesn't pull
+  pan/zoom code); pie/donut +0.1 KB and radar +0.2 KB (shared module-
+  level code touched). All-nine bundle: 83.1 -> 87.3 KB (+4.2 KB).
+  Cross-kernel isolation verified: heatmap, pie, donut, and radar
+  bundles contain no `_applyPan` / `_applyZoom` / `_clampToBounds` /
+  `viewFacade` strings.
+- **Allocations per gesture**: pointerdown allocates one stable
+  refs object (`dragStartView`, `dragPlotBounds`) and one
+  `_dataDomain` read into a stack `start` object on wheel; per-
+  move allocates the new view object passed to `viewSig.set()`.
+  This is the natural cost of a value-signal API (set takes a
+  fresh object); not on a per-frame budget.
+
+### Documentation
+
+- Charts.d.ts gains `View` and `PanZoomConfig` interfaces;
+  `LineChartConfig`, `BubbleChartConfig`, `ScatterChartConfig`
+  extend `PanZoomConfig`. `Chart` interface gains `view`,
+  `setView`, `resetView`.
+
+### Roadmap shift
+
+- v1.4.0-alpha.3 = brushing (was alpha.2). Modifier-key drag
+  emits `brushSignal` for cross-chart filtering. Will coexist
+  with pan/zoom (no modifier = pan, shift = brush).
+- v1.4.0 = combined release.
+
+### License
+
+MIT (c) Zahary Shinikchiev
+
+
+## [1.4.0-alpha.1] -- 2026-06
+
+Audit-fix-only release. Four allocation traps inherited from v1.2-1.3
+code surfaced in a bare-metal review; all four are fixed here without
+changing any public API. The v1.4 interaction-primitives work
+(pan + zoom in alpha.2; brushing in alpha.3) is shifted one alpha slot
+forward to keep this cut tightly scoped.
+
+### Fixed -- four allocation traps on the data-update + export paths
+
+- **Heatmap quantile JS Array.** `_computeGridColors` collected present
+  cell values into `const present = []` then `present.push(...)` then
+  `present.sort(cmp)`. On a 200x200 dense heatmap that was a 40k-element
+  JS Array allocated and thrown away on every data update. Replaced with
+  a `Float32Array` pooled on `state.presentSorted` -- pack values into
+  a prefix, sort an in-place `subarray(0, n)` view via
+  `Float32Array.prototype.sort()` (which without args sorts numerically
+  and allocates nothing). Pool grows monotonically with chart size;
+  steady-state is zero-alloc.
+- **Heatmap `_parseRGBLike` per-cell split.** When `colorFn` returned an
+  `rgb(...)` string and `valueLabelColor === 'auto'`, the parse called
+  `css.slice(open + 1, close).split(',')` -- per cell, at extract time.
+  10k cells = 10k Arrays + 30k substring objects allocated and tossed.
+  Replaced with an `indexOf` scan: three substring slices total, no
+  intermediate array. V8 may sliced-string the substrings (zero-alloc);
+  even if materialized they're tiny (3-4 chars each).
+- **`charBufToString` rope walk.** The axis-formatting helper built its
+  label string by `let s = ''; for (...) s += String.fromCharCode(buf[i])`,
+  which allocates N intermediate strings as V8 walks the rope. For an
+  axis with ~20 ticks at ~10 chars each that's ~200 string allocations
+  per axis update. Replaced with
+  `String.fromCharCode.apply(null, buf.subarray(0, n))` -- one call,
+  one allocation, well within V8's arg-count limit at our buffer size.
+- **SVG export rope-string limit.** This was the most consequential.
+  `_SVGRenderingContext2D` accumulated path commands by
+  `this._currentPath += chunk` for every `moveTo` / `lineTo` / etc.
+  At 100k points the rope walk on the `<path d="...">` attribute read
+  in `stroke()` / `fill()` could hit `RangeError: Invalid string length`
+  or stall the main thread for seconds during the rope flatten.
+  Replaced with an array-of-chunks: every path command pushes into
+  `this._pathChunks`; `_pathD()` does `this._pathChunks.join('')`
+  once when stroke/fill/clip needs the d-attribute. Arrays grow
+  amortized O(1); join flattens to a single contiguous string exactly
+  once. `beginPath()` truncates by `length = 0` (no realloc); the
+  `fillRect` / `strokeRect` rotated-fallback path saves and restores
+  the chunks array (rare branch -- chart code only hits it on pie
+  slice transforms).
+
+### Verified
+
+- **272 + 8 = 280 tests pass.** New regression suite
+  `audit-fix regressions (v1.4.0-alpha.1)` covers: 10k-point line
+  export produces valid SVG; path d-attribute starts with `M<num>`
+  and contains `L<num>` (no rope-flatten artifacts); two consecutive
+  exports produce byte-identical output (catches begin/end path
+  bookkeeping leaks); pie chart rotated-rect fallback still works;
+  50x50 quantile-binned heatmap doesn't throw; quantile output is
+  stable on a fixed dataset (Float32Array sort numerically equivalent
+  to JS Array sort); auto-label color survives custom `colorFn`
+  returning `rgb(...)`; axis labels render correctly after the
+  `charBufToString` rewrite.
+- **Real-world stress test:** 50,000-point scatter chart exports to
+  a 5.2 MB SVG with 50,021 `<path>` elements in 165 ms. No error,
+  no main-thread stall. Pre-alpha.1 this would have either crashed
+  with `RangeError: Invalid string length` or eaten gobs of memory
+  during the rope walk.
+- **Bench unchanged**: 166 bytes/cycle (within the natural variance
+  of the 161 baseline from alpha.0). All four fixes target paths
+  that fire on data-update or export, not on the per-frame draw.
+- **Bundles**: line +0.1 KB, bar +0.2 KB, scatter +0.1 KB,
+  heatmap +0.4 KB vs alpha.0. The heatmap delta is the new
+  `presentSorted: null` field on grid state plus the chunk-style
+  comments; everything else is comments and minor structural
+  changes.
+- **ASCII clean** across all source files (whitelisted U+00D7 only).
+
+### Credits
+
+The audit was provided by the user; the fixes match the recommended
+patterns exactly (Float32Array pool + in-place sort, `indexOf` scan,
+`String.fromCharCode.apply`, array-of-chunks + `join`). Each fix
+landed with a code comment naming the trap it closes so future
+readers don't accidentally reintroduce the pattern.
+
+### License
+
+MIT (c) Zahary Shinikchiev
+
+
+## [1.4.0-alpha.0] -- 2026-06
+
+First alpha of the v1.4 interaction-primitives line. Pan + zoom (alpha.1)
+and brushing (alpha.2) follow before a combined v1.4.0 release.
+
+### Added -- log scale on the y-axis
+
+Opt in with `yScale: { type: 'log' }` on any axis-kernel chart (line,
+area, bar, bubble, scatter). Log scale is base-10; tick generation
+routes through `@zakkster/lite-axis`'s already-shipped `logTicks`
+(decade boundaries 1, 10, 100, ...).
+
+- **`makeLogScale()` + `updateLogScale(s, dMin, dMax, rMin, rMax)`** --
+  new scale builders alongside the linear and band ones. Same shape
+  as `makeLinearScale` (`type`, `dMin/dMax/rMin/rMax`, cached
+  `_slope/_intercept/_invSlope`) but `map(v)` does
+  `Math.log(v) * slope + intercept` and `invert(px)` does
+  `Math.exp((px - intercept) * invSlope)`.
+- **`map(v <= 0)` returns NaN.** Line and area draw fns already break
+  the segment on NaN; markers (bubble, scatter) skip non-finite
+  positions. Callers responsible for filtering non-positive values
+  from the upstream data if they want a different policy.
+- **`updateLogScale` clamps `dMin <= 0`** to `1e-10` as a safety net
+  so a degenerate domain doesn't break the chart -- ideally the
+  chart's domain extraction filters non-positive values first, but
+  this catches the case where it doesn't.
+- **`yScale.type` now accepts `'linear' | 'log'`** in `Charts.d.ts`
+  (was `'linear'` only). The existing `domain`, `nice`, `zero`
+  options remain.
+
+### Internals
+
+- **Polymorphic `s.map()` in tick projection.** Was an inlined
+  `tickBuf[i] * slope + intercept` in both the main axis builder and
+  the grid-extras builder. Switched to `s.map(tickBuf[i])` so the same
+  loop handles linear and log without a parallel code path. Cost: one
+  method call per tick. This is the once-per-resize tick projection,
+  ~12 calls per axis update, sub-Hz update rate -- perf-irrelevant
+  trade for code clarity. Hot draw paths (per-frame point projection)
+  remain untouched.
+- **Tick switch.** Both axis builders gained an `else if (s.type ===
+  'log')` branch alongside the existing `'time'` branch:
+  `count = logTicks(s.dMin, s.dMax, target, tickBuf, false)`. The
+  `minor` flag (5x/2x sub-ticks per decade) is off for v1.4.0-alpha.0;
+  may be exposed via `tickSubdivisions: 'major' | 'all'` in a later
+  cut.
+- **`_testHelpers` exports `makeLogScale` and `updateLogScale`** so
+  scale math can be unit-tested without standing up a full chart.
+
+### Tests
+
+272 tests (+13 over v1.3.0), 52 describe blocks. New under `log scale
+(v1.4.0-alpha.0)`:
+
+- `makeLogScale math` (7 tests): decade boundaries map to evenly-
+  spaced pixels; `invert(map(v))` round-trips to within 1e-9
+  relative error across [0.01, 1000]; `map(v <= 0)` returns NaN;
+  `updateLogScale` clamps non-positive bounds; degenerate domain
+  (`dMin === dMax`) collapses cleanly without throwing; swapped
+  bounds (`dMax < dMin`) are reversed; the scale object has the
+  same shape as the linear scale (same keys present).
+- `end-to-end -- yScale: { type: 'log' }` (6 tests): line chart
+  constructs and mounts; scatter chart constructs and mounts;
+  default remains `'linear'` when no opt-in (back-compat);
+  scale type survives data updates; SVG export works with log
+  y-scale; tick labels reflect decade boundaries.
+
+### Performance contract
+
+- **Bench unchanged**: 325 bytes/cycle on the line-100k full-update
+  bench. The log-scale path isn't on the per-frame draw; the
+  `s.map()` switch in tick projection is once-per-resize.
+- **Bundle deltas**: scale builders + tick switch + `logTicks` import
+  add ~600 bytes per axis-kernel chart. The grid kernel (heatmap) is
+  untouched -- heatmap uses band scales on both axes and doesn't
+  pull the linear/log code.
+
+### Demo
+
+- Side-by-side log-scale comparison section: same exponential dataset
+  (`y = 10^(x/8)`, x in [0, 40], y in [1, 1e5]) rendered with linear
+  y on the left and log y on the right. The linear panel crushes the
+  first ~80% of x against the axis; the log panel renders a clean
+  straight line (because `log(10^(x/8)) = x/8`).
+
+### Roadmap
+
+- ROADMAP.md, README.md, llms.txt updated with a refined v1.4 alpha
+  breakdown (alpha.0 log, alpha.1 pan+zoom, alpha.2 brushing) and a
+  new `@zakkster/lite-charts-gl` companion-package track for the
+  post-v1.4 timeline. lite-charts core stays canvas-only and node-
+  testable; the GPU sibling lives in its own package built on
+  `@zakkster/lite-gl`. v2.0 WebGPU speculation replaced with concrete
+  "renderer-agnostic kernel refactor if lite-charts-gl proves out".
+
+### License
+
+MIT (c) Zahary Shinikchiev
+
+
+## [1.3.0] -- 2026-06
 
 ### Added -- SVG export across all nine charts
 
@@ -53,7 +695,7 @@ independent).
   textBaseline); setLineDash/getLineDash; clip() emits a `<clipPath>`
   def then marks subsequent elements with `clip-path="url(#id)"`.
   Unsupported ops (drawImage, gradients, shadows) are silent no-ops --
-  none of the v1.2.0 chart code uses them.
+  none of the v1.3.0 chart code uses them.
 - **`_drawNodeToSVG` + `_drawSelfToSVG` walker** -- structural mirror of
   lite-scene's `drawNode`/`drawSelf` that walks `scene.root` recursively
   through the shim. Handles every node kind: `rect` (with `_radius` ->
@@ -82,7 +724,7 @@ and would drift from canvas behavior over time. The trade-off is less
 semantic SVG output (everything is `<path>` / `<rect>` / `<text>`
 instead of, say, one `<rect>` per heatmap cell with `data-row` /
 `data-col` attributes). A future v1.3.x or v1.4 may opt-in to richer
-per-chart semantics; for v1.2.0 the pixel-parity approach is the right
+per-chart semantics; for v1.3.0 the pixel-parity approach is the right
 call.
 
 ### Internals
@@ -119,7 +761,7 @@ call.
   the SVG helpers are shared module-level functions deduplicated by
   the bundler when more than one chart is imported.
 
-| Chart | v1.2.0 | v1.2.0 | Delta |
+| Chart | v1.2.0 | v1.3.0 | Delta |
 |---|---|---|---|
 | line     | 23.6 | 32.5 | +8.9 |
 | area     | 24.9 | 33.8 | +8.9 |
@@ -138,7 +780,7 @@ axis/polar/radar code; nothing else pulls grid-kernel code.
 ### Tests
 
 259 tests (+14 over v1.2.0), 49 describe blocks. New tests under
-`chart.exportSVG() (v1.2.0)`: valid SVG envelope per chart type (line,
+`chart.exportSVG() (v1.3.0)`: valid SVG envelope per chart type (line,
 area, bar, bubble, scatter, pie, donut, radar, heatmap); rounded-corner
 arcs on bars (verifies `roundRect` -> SVG arc commands); fixed
 `text-anchor="middle"` on bar category labels (regression guard for the
@@ -162,6 +804,8 @@ before mount; throws after destroy.
 
 MIT (c) Zahary Shinikchiev
 
+
+## [1.2.0] -- 2026-06
 
 ### Added -- `chart.destroy()` + heatmap polish
 

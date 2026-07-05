@@ -1,624 +1,802 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>@zakkster/lite-charts -- v1.3.0</title>
-
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-
-<style>
-/* =========================================================================
- * Design tokens. Switching `data-theme` on <html> swaps every color.
- * Library colors (--c-primary etc.) are also exposed so the chart code
- * can read them via CSS-var tokens and refreshTheme() picks up changes.
- * ========================================================================= */
-
-:root[data-theme="dark"] {
-    --bg-base:        #07090f;
-    --bg-elev:        #0d1119;
-    --bg-card:        #131826;
-    --bg-card-hover:  #161c2c;
-    --border:         #1f2740;
-    --border-bright:  #2d3654;
-    --grid-line:      rgba(180, 200, 240, 0.05);
-
-    --text-primary:   #e8ecf5;
-    --text-secondary: #94a3b8;
-    --text-muted:     #5b6478;
-    --text-faint:     #3a4258;
-
-    --c-primary:      #4ade80;        /* phosphor green -- the live signal */
-    --c-cyan:         #22d3ee;
-    --c-amber:        #f59e0b;
-    --c-pink:         #fb7185;
-    --c-violet:       #a78bfa;
-    --c-blue:         #60a5fa;
-
-    --tooltip-bg:     rgba(15, 21, 35, 0.96);
-    --tooltip-border: #2d3654;
-
-    --glow-primary:   0 0 24px rgba(74, 222, 128, 0.18);
-    --shadow-card:    0 1px 0 rgba(255,255,255,0.02), 0 8px 24px rgba(0,0,0,0.4);
-}
-
-:root[data-theme="light"] {
-    --bg-base:        #fafaf7;
-    --bg-elev:        #f5f5f1;
-    --bg-card:        #ffffff;
-    --bg-card-hover:  #fafaf7;
-    --border:         #e5e3dd;
-    --border-bright:  #d4d2cc;
-    --grid-line:      rgba(20, 30, 50, 0.07);
-
-    --text-primary:   #1c1c1a;
-    --text-secondary: #57534e;
-    --text-muted:     #8a8580;
-    --text-faint:     #b8b3ad;
-
-    --c-primary:      #16a34a;
-    --c-cyan:         #0891b2;
-    --c-amber:        #d97706;
-    --c-pink:         #e11d48;
-    --c-violet:       #7c3aed;
-    --c-blue:         #2563eb;
-
-    --tooltip-bg:     rgba(255, 255, 255, 0.98);
-    --tooltip-border: #d4d2cc;
-
-    --glow-primary:   0 0 24px rgba(22, 163, 74, 0.12);
-    --shadow-card:    0 1px 0 rgba(0,0,0,0.02), 0 4px 16px rgba(20,30,50,0.06);
-}
-
-/* =========================================================================
- * Reset + base
- * ========================================================================= */
-
-*, *::before, *::after { box-sizing: border-box; }
-
-html, body {
-    margin: 0;
-    padding: 0;
-    background: var(--bg-base);
-    color: var(--text-primary);
-    font-family: 'Geist', system-ui, sans-serif;
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    transition: background-color 0.3s ease, color 0.3s ease;
-}
-
-body { min-height: 100vh; }
-
-/* Block accidental horizontal page scroll. If a chart canvas or its
- * legend ever measures wider than the viewport (e.g. a 100+ series
- * legend that hasn't been virtualized yet), it stays inside its card
- * instead of pushing the page wide. */
-html, body { overflow-x: hidden; max-width: 100vw; }
-
-/* Subtle ambient background pattern -- dot grid behind everything */
-body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
-    background-size: 32px 32px;
-    background-position: -8px -8px;
-    opacity: 0.5;
-    pointer-events: none;
-    z-index: 0;
-}
-
-main { position: relative; z-index: 1; }
-
-a { color: var(--c-cyan); text-decoration: none; }
-a:hover { text-decoration: underline; text-underline-offset: 3px; }
-
-button {
-    font-family: inherit;
-    font-size: inherit;
-    cursor: pointer;
-}
-
-::selection { background: var(--c-primary); color: var(--bg-base); }
-
-/* =========================================================================
- * Typography
- * ========================================================================= */
-
-.mono { font-family: 'Geist Mono', ui-monospace, monospace; font-feature-settings: 'tnum' 1, 'ss01' 1; }
-
-h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -0.02em; line-height: 1.15; }
-h1 { font-size: clamp(1.75rem, 4vw, 2.5rem); font-weight: 600; }
-h2 { font-size: 1.5rem; }
-h3 { font-size: 1rem; font-weight: 500; letter-spacing: 0; }
-
-.eyebrow {
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.6875rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.18em;
-    color: var(--text-muted);
-}
-
-.eyebrow .accent { color: var(--c-primary); }
-
-/* =========================================================================
- * Layout
- * ========================================================================= */
-
-.container {
-    max-width: 1320px;
-    margin: 0 auto;
-    padding: 0 32px;
-}
-
-header.site {
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    background: color-mix(in srgb, var(--bg-base) 92%, transparent);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--border);
-    padding: 16px 0;
-}
-
-header.site .row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-}
-
-.brand {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    min-width: 0;
-}
-
-.brand-logo {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    background: var(--c-primary);
-    border-radius: 2px;
-    box-shadow: var(--glow-primary);
-    animation: pulse 2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50%      { opacity: 0.5; }
-}
-
-.brand-name {
-    font-family: 'Geist Mono', monospace;
-    font-weight: 600;
-    font-size: 0.9375rem;
-    letter-spacing: -0.01em;
-}
-
-.brand-version {
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.6875rem;
-    color: var(--text-muted);
-    padding: 2px 6px;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-}
-
-.theme-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-secondary);
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    transition: all 0.2s;
-}
-
-.theme-toggle:hover {
-    border-color: var(--border-bright);
-    color: var(--text-primary);
-}
-
-.theme-toggle .indicator {
-    width: 6px;
-    height: 6px;
-    background: var(--c-primary);
-    border-radius: 50%;
-}
-
-section {
-    padding: 80px 0;
-    border-bottom: 1px solid var(--border);
-}
-
-section:first-of-type {
-    padding-top: 64px;
-}
-
-.section-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 24px;
-    margin-bottom: 32px;
-}
-
-.section-head .titles {
-    min-width: 0;
-}
-
-.section-head .titles .eyebrow {
-    margin-bottom: 12px;
-    display: block;
-}
-
-.section-head .titles p {
-    margin: 8px 0 0;
-    color: var(--text-secondary);
-    font-size: 0.9375rem;
-    line-height: 1.5;
-    max-width: 56ch;
-}
-
-.hero-intro {
-    margin-bottom: 64px;
-}
-
-.hero-intro h1 {
-    margin-bottom: 16px;
-}
-
-.hero-intro p {
-    color: var(--text-secondary);
-    font-size: 1.0625rem;
-    line-height: 1.55;
-    max-width: 60ch;
-    margin: 0;
-}
-
-.hero-intro p .num {
-    color: var(--c-primary);
-    font-family: 'Geist Mono', monospace;
-    font-weight: 600;
-}
-
-/* =========================================================================
- * Cards
- * ========================================================================= */
-
-.card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 24px;
-    transition: border-color 0.2s, background-color 0.3s;
-    box-shadow: var(--shadow-card);
-}
-
-.card-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-    gap: 16px;
-    flex-wrap: wrap;
-}
-
-.card h3 {
-    margin: 0;
-}
-
-/* =========================================================================
- * Hero -- Live Telemetry
- * ========================================================================= */
-
-.hero-card {
-    display: grid;
-    grid-template-columns: 1fr 240px;
-    gap: 32px;
-    padding: 32px;
-}
-
-@media (max-width: 960px) {
-    .hero-card { grid-template-columns: 1fr; }
-}
-
-/* =========================================================================
- * Mobile / narrow viewport adjustments
- * =========================================================================
- *
- * Below ~720px the desktop padding (32px on .container + 32px on each
- * .card + 32px on .dashboard-card) consumes ~128px horizontally per
- * card edge, leaving < 200px of plot area on a 375px viewport. Compact
- * the chrome so canvases get most of the width, and shrink chart-area
- * heights so a card fits on one viewport without scrolling. Also pin
- * chart-area to min-width: 0 so flex/grid children can shrink instead
- * of overflowing the card.
- */
-@media (max-width: 720px) {
-    .container { padding: 0 16px; }
-    .card { padding: 18px; }
-    .dashboard-card { padding: 18px; }
-    .density-card { padding: 18px; }
-    .hero-card { padding: 18px; gap: 18px; }
-    .dashboard-card .chart-area { height: 280px; }
-    .density-card .chart-area { height: 320px; }
-    .hero-chart { min-height: 260px; }
-    .section-head { margin-bottom: 16px; }
-    h1 { letter-spacing: -0.01em; }
-    h2 { font-size: 1.25rem; }
-    .chart-area, .hero-chart { min-width: 0; }
-    /* Pie + donut sit in a flex row of two charts; on mobile stack them
-     * and let each child shrink past its inline min-width: 320px. */
-    .dashboard-card > .chart-area[style*="flex"] {
-        flex-direction: column;
-        min-height: 0 !important;
-        height: auto !important;
-    }
-    .dashboard-card > .chart-area[style*="flex"] > div {
-        min-width: 0 !important;
-        width: 100%;
-        height: 280px;
-    }
-}
-
-@media (max-width: 480px) {
-    .container { padding: 0 12px; }
-    .card { padding: 14px; }
-    .dashboard-card { padding: 14px; }
-    .density-card { padding: 14px; }
-    .dashboard-card .chart-area { height: 240px; }
-    .density-card .chart-area { height: 280px; }
-}
-
-.hero-chart {
-    min-height: 360px;
-    position: relative;
-}
-
-.hero-side {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.metric {
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 12px 14px;
-    background: var(--bg-elev);
-}
-
-.metric .lbl {
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.625rem;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--text-muted);
-    margin-bottom: 4px;
-}
-
-.metric .val {
-    font-family: 'Geist Mono', monospace;
-    font-size: 1.375rem;
-    font-weight: 500;
-    letter-spacing: -0.02em;
-    color: var(--text-primary);
-    font-feature-settings: 'tnum' 1;
-}
-
-.metric .val .unit {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    margin-left: 4px;
-}
-
-.controls {
-    display: flex;
-    gap: 8px;
-    margin-top: auto;
-}
-
-.btn {
-    padding: 8px 14px;
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    transition: all 0.15s;
-}
-
-.btn:hover {
-    background: var(--bg-card-hover);
-    border-color: var(--border-bright);
-}
-
-.btn:active {
-    transform: translateY(1px);
-}
-
-.btn.primary {
-    background: var(--c-primary);
-    border-color: var(--c-primary);
-    color: var(--bg-base);
-    font-weight: 600;
-}
-
-.btn.primary:hover {
-    filter: brightness(1.1);
-}
-
-/* =========================================================================
- * Interpolation gallery
- * ========================================================================= */
-
-.gallery {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 16px;
-}
-
-.gallery .cell {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    transition: all 0.2s;
-}
-
-.gallery .cell:hover {
-    border-color: var(--c-primary);
-    box-shadow: var(--glow-primary);
-}
-
-.gallery .cell .label {
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-}
-
-.gallery .cell .chart {
-    height: 140px;
-}
-
-/* =========================================================================
- * Multi-series
- * ========================================================================= */
-
-.dashboard-card {
-    padding: 32px;
-}
-
-.dashboard-card .chart-area {
-    height: 380px;
-    margin-bottom: 8px;
-}
-
-.lite-charts-legend button:hover {
-    background: var(--bg-card-hover) !important;
-}
-
-/* =========================================================================
- * High density
- * ========================================================================= */
-
-.density-card {
-    padding: 32px;
-}
-
-.density-card .chart-area {
-    height: 420px;
-}
-
-.density-meta {
-    display: flex;
-    gap: 24px;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
-}
-
-.density-meta .item .lbl {
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.625rem;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--text-muted);
-}
-
-.density-meta .item .val {
-    font-family: 'Geist Mono', monospace;
-    font-weight: 500;
-    color: var(--c-primary);
-    font-size: 0.875rem;
-}
-
-/* =========================================================================
- * Footer
- * ========================================================================= */
-
-footer.site {
-    padding: 32px 0 48px;
-    border-top: 1px solid var(--border);
-    color: var(--text-muted);
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.75rem;
-    text-align: center;
-}
-
-footer.site .deps {
-    margin-top: 8px;
-    font-size: 0.6875rem;
-    color: var(--text-faint);
-}
-
-/* =========================================================================
- * Status pill
- * ========================================================================= */
-
-.pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 10px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    font-family: 'Geist Mono', monospace;
-    font-size: 0.6875rem;
-    color: var(--text-secondary);
-}
-
-.pill .dot {
-    width: 6px;
-    height: 6px;
-    background: var(--c-primary);
-    border-radius: 50%;
-    box-shadow: 0 0 6px var(--c-primary);
-    animation: pulse 1.4s ease-in-out infinite;
-}
-
-.pill.paused .dot {
-    background: var(--c-amber);
-    box-shadow: 0 0 6px var(--c-amber);
-    animation: none;
-}
-
-/* Animation entrance: stagger reveal on load */
-section { animation: rise 0.6s ease-out both; }
-section:nth-of-type(1) { animation-delay: 0.05s; }
-section:nth-of-type(2) { animation-delay: 0.15s; }
-section:nth-of-type(3) { animation-delay: 0.25s; }
-section:nth-of-type(4) { animation-delay: 0.35s; }
-section:nth-of-type(5) { animation-delay: 0.45s; }
-
-@keyframes rise {
-    from { opacity: 0; transform: translateY(12px); }
-    to   { opacity: 1; transform: translateY(0); }
-}
-
-</style>
-
-<script type="importmap">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>@zakkster/lite-charts -- v1.4.0</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap"
+          rel="stylesheet">
+
+    <style>
+        /* =========================================================================
+         * Design tokens. Switching `data-theme` on <html> swaps every color.
+         * Library colors (--c-primary etc.) are also exposed so the chart code
+         * can read them via CSS-var tokens and refreshTheme() picks up changes.
+         * ========================================================================= */
+
+        :root[data-theme="dark"] {
+            --bg-base: #07090f;
+            --bg-elev: #0d1119;
+            --bg-card: #131826;
+            --bg-card-hover: #161c2c;
+            --border: #1f2740;
+            --border-bright: #2d3654;
+            --grid-line: rgba(180, 200, 240, 0.05);
+
+            --text-primary: #e8ecf5;
+            --text-secondary: #94a3b8;
+            --text-muted: #5b6478;
+            --text-faint: #3a4258;
+
+            --c-primary: #4ade80; /* phosphor green -- the live signal */
+            --c-cyan: #22d3ee;
+            --c-amber: #f59e0b;
+            --c-pink: #fb7185;
+            --c-violet: #a78bfa;
+            --c-blue: #60a5fa;
+
+            --tooltip-bg: rgba(15, 21, 35, 0.96);
+            --tooltip-border: #2d3654;
+
+            --glow-primary: 0 0 24px rgba(74, 222, 128, 0.18);
+            --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.02), 0 8px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        :root[data-theme="light"] {
+            --bg-base: #fafaf7;
+            --bg-elev: #f5f5f1;
+            --bg-card: #ffffff;
+            --bg-card-hover: #fafaf7;
+            --border: #e5e3dd;
+            --border-bright: #d4d2cc;
+            --grid-line: rgba(20, 30, 50, 0.07);
+
+            --text-primary: #1c1c1a;
+            --text-secondary: #57534e;
+            --text-muted: #8a8580;
+            --text-faint: #b8b3ad;
+
+            --c-primary: #16a34a;
+            --c-cyan: #0891b2;
+            --c-amber: #d97706;
+            --c-pink: #e11d48;
+            --c-violet: #7c3aed;
+            --c-blue: #2563eb;
+
+            --tooltip-bg: rgba(255, 255, 255, 0.98);
+            --tooltip-border: #d4d2cc;
+
+            --glow-primary: 0 0 24px rgba(22, 163, 74, 0.12);
+            --shadow-card: 0 1px 0 rgba(0, 0, 0, 0.02), 0 4px 16px rgba(20, 30, 50, 0.06);
+        }
+
+        /* =========================================================================
+         * Reset + base
+         * ========================================================================= */
+
+        *, *::before, *::after {
+            box-sizing: border-box;
+        }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: var(--bg-base);
+            color: var(--text-primary);
+            font-family: 'Geist', system-ui, sans-serif;
+            font-weight: 400;
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+
+        body {
+            min-height: 100vh;
+        }
+
+        /* Block accidental horizontal page scroll. If a chart canvas or its
+         * legend ever measures wider than the viewport (e.g. a 100+ series
+         * legend that hasn't been virtualized yet), it stays inside its card
+         * instead of pushing the page wide. */
+        html, body {
+            overflow-x: hidden;
+            max-width: 100vw;
+        }
+
+        /* Subtle ambient background pattern -- dot grid behind everything */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+            background-size: 32px 32px;
+            background-position: -8px -8px;
+            opacity: 0.5;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        main {
+            position: relative;
+            z-index: 1;
+        }
+
+        a {
+            color: var(--c-cyan);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+            text-underline-offset: 3px;
+        }
+
+        button {
+            font-family: inherit;
+            font-size: inherit;
+            cursor: pointer;
+        }
+
+        ::selection {
+            background: var(--c-primary);
+            color: var(--bg-base);
+        }
+
+        /* =========================================================================
+         * Typography
+         * ========================================================================= */
+
+        .mono {
+            font-family: 'Geist Mono', ui-monospace, monospace;
+            font-feature-settings: 'tnum' 1, 'ss01' 1;
+        }
+
+        h1, h2, h3 {
+            margin: 0;
+            font-weight: 500;
+            letter-spacing: -0.02em;
+            line-height: 1.15;
+        }
+
+        h1 {
+            font-size: clamp(1.75rem, 4vw, 2.5rem);
+            font-weight: 600;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+        }
+
+        h3 {
+            font-size: 1rem;
+            font-weight: 500;
+            letter-spacing: 0;
+        }
+
+        .eyebrow {
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.6875rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.18em;
+            color: var(--text-muted);
+        }
+
+        .eyebrow .accent {
+            color: var(--c-primary);
+        }
+
+        /* =========================================================================
+         * Layout
+         * ========================================================================= */
+
+        .container {
+            max-width: 1320px;
+            margin: 0 auto;
+            padding: 0 32px;
+        }
+
+        header.site {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: color-mix(in srgb, var(--bg-base) 92%, transparent);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 0;
+        }
+
+        header.site .row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .brand-logo {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: var(--c-primary);
+            border-radius: 2px;
+            box-shadow: var(--glow-primary);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .brand-name {
+            font-family: 'Geist Mono', monospace;
+            font-weight: 600;
+            font-size: 0.9375rem;
+            letter-spacing: -0.01em;
+        }
+
+        .brand-version {
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.6875rem;
+            color: var(--text-muted);
+            padding: 2px 6px;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+        }
+
+        .theme-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.6875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            transition: all 0.2s;
+        }
+
+        .theme-toggle:hover {
+            border-color: var(--border-bright);
+            color: var(--text-primary);
+        }
+
+        .theme-toggle .indicator {
+            width: 6px;
+            height: 6px;
+            background: var(--c-primary);
+            border-radius: 50%;
+        }
+
+        section {
+            padding: 80px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        section:first-of-type {
+            padding-top: 64px;
+        }
+
+        .section-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+
+        .section-head .titles {
+            min-width: 0;
+        }
+
+        .section-head .titles .eyebrow {
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .section-head .titles p {
+            margin: 8px 0 0;
+            color: var(--text-secondary);
+            font-size: 0.9375rem;
+            line-height: 1.5;
+            max-width: 56ch;
+        }
+
+        .hero-intro {
+            margin-bottom: 64px;
+        }
+
+        .hero-intro h1 {
+            margin-bottom: 16px;
+        }
+
+        .hero-intro p {
+            color: var(--text-secondary);
+            font-size: 1.0625rem;
+            line-height: 1.55;
+            max-width: 60ch;
+            margin: 0;
+        }
+
+        .hero-intro p .num {
+            color: var(--c-primary);
+            font-family: 'Geist Mono', monospace;
+            font-weight: 600;
+        }
+
+        /* =========================================================================
+         * Cards
+         * ========================================================================= */
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            transition: border-color 0.2s, background-color 0.3s;
+            box-shadow: var(--shadow-card);
+        }
+
+        .card-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .card h3 {
+            margin: 0;
+        }
+
+        /* =========================================================================
+         * Hero -- Live Telemetry
+         * ========================================================================= */
+
+        .hero-card {
+            display: grid;
+            grid-template-columns: 1fr 240px;
+            gap: 32px;
+            padding: 32px;
+        }
+
+        @media (max-width: 960px) {
+            .hero-card {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* =========================================================================
+         * Mobile / narrow viewport adjustments
+         * =========================================================================
+         *
+         * Below ~720px the desktop padding (32px on .container + 32px on each
+         * .card + 32px on .dashboard-card) consumes ~128px horizontally per
+         * card edge, leaving < 200px of plot area on a 375px viewport. Compact
+         * the chrome so canvases get most of the width, and shrink chart-area
+         * heights so a card fits on one viewport without scrolling. Also pin
+         * chart-area to min-width: 0 so flex/grid children can shrink instead
+         * of overflowing the card.
+         */
+        @media (max-width: 720px) {
+            .container {
+                padding: 0 16px;
+            }
+
+            .card {
+                padding: 18px;
+            }
+
+            .dashboard-card {
+                padding: 18px;
+            }
+
+            .density-card {
+                padding: 18px;
+            }
+
+            .hero-card {
+                padding: 18px;
+                gap: 18px;
+            }
+
+            .dashboard-card .chart-area {
+                height: 280px;
+            }
+
+            .density-card .chart-area {
+                height: 320px;
+            }
+
+            .hero-chart {
+                min-height: 260px;
+            }
+
+            .section-head {
+                margin-bottom: 16px;
+            }
+
+            h1 {
+                letter-spacing: -0.01em;
+            }
+
+            h2 {
+                font-size: 1.25rem;
+            }
+
+            .chart-area, .hero-chart {
+                min-width: 0;
+            }
+
+            /* Pie + donut sit in a flex row of two charts; on mobile stack them
+             * and let each child shrink past its inline min-width: 320px. */
+            .dashboard-card > .chart-area[style*="flex"] {
+                flex-direction: column;
+                min-height: 0 !important;
+                height: auto !important;
+            }
+
+            .dashboard-card > .chart-area[style*="flex"] > div {
+                min-width: 0 !important;
+                width: 100%;
+                height: 280px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                padding: 0 12px;
+            }
+
+            .card {
+                padding: 14px;
+            }
+
+            .dashboard-card {
+                padding: 14px;
+            }
+
+            .density-card {
+                padding: 14px;
+            }
+
+            .dashboard-card .chart-area {
+                height: 240px;
+            }
+
+            .density-card .chart-area {
+                height: 280px;
+            }
+        }
+
+        .hero-chart {
+            min-height: 360px;
+            position: relative;
+        }
+
+        .hero-side {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .metric {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px 14px;
+            background: var(--bg-elev);
+        }
+
+        .metric .lbl {
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.625rem;
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .metric .val {
+            font-family: 'Geist Mono', monospace;
+            font-size: 1.375rem;
+            font-weight: 500;
+            letter-spacing: -0.02em;
+            color: var(--text-primary);
+            font-feature-settings: 'tnum' 1;
+        }
+
+        .metric .val .unit {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-left: 4px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-top: auto;
+        }
+
+        .btn {
+            padding: 8px 14px;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.6875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            transition: all 0.15s;
+        }
+
+        .btn:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-bright);
+        }
+
+        .btn:active {
+            transform: translateY(1px);
+        }
+
+        .btn.primary {
+            background: var(--c-primary);
+            border-color: var(--c-primary);
+            color: var(--bg-base);
+            font-weight: 600;
+        }
+
+        .btn.primary:hover {
+            filter: brightness(1.1);
+        }
+
+        /* =========================================================================
+         * Interpolation gallery
+         * ========================================================================= */
+
+        .gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+        }
+
+        .gallery .cell {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            transition: all 0.2s;
+        }
+
+        .gallery .cell:hover {
+            border-color: var(--c-primary);
+            box-shadow: var(--glow-primary);
+        }
+
+        .gallery .cell .label {
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.6875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .gallery .cell .chart {
+            height: 140px;
+        }
+
+        /* =========================================================================
+         * Multi-series
+         * ========================================================================= */
+
+        .dashboard-card {
+            padding: 32px;
+        }
+
+        .dashboard-card .chart-area {
+            height: 380px;
+            margin-bottom: 8px;
+        }
+
+        .lite-charts-legend button:hover {
+            background: var(--bg-card-hover) !important;
+        }
+
+        /* =========================================================================
+         * High density
+         * ========================================================================= */
+
+        .density-card {
+            padding: 32px;
+        }
+
+        .density-card .chart-area {
+            height: 420px;
+        }
+
+        .density-meta {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .density-meta .item .lbl {
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.625rem;
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            color: var(--text-muted);
+        }
+
+        .density-meta .item .val {
+            font-family: 'Geist Mono', monospace;
+            font-weight: 500;
+            color: var(--c-primary);
+            font-size: 0.875rem;
+        }
+
+        /* =========================================================================
+         * Footer
+         * ========================================================================= */
+
+        footer.site {
+            padding: 32px 0 48px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.75rem;
+            text-align: center;
+        }
+
+        footer.site .deps {
+            margin-top: 8px;
+            font-size: 0.6875rem;
+            color: var(--text-faint);
+        }
+
+        /* =========================================================================
+         * Status pill
+         * ========================================================================= */
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            font-family: 'Geist Mono', monospace;
+            font-size: 0.6875rem;
+            color: var(--text-secondary);
+        }
+
+        .pill .dot {
+            width: 6px;
+            height: 6px;
+            background: var(--c-primary);
+            border-radius: 50%;
+            box-shadow: 0 0 6px var(--c-primary);
+            animation: pulse 1.4s ease-in-out infinite;
+        }
+
+        .pill.paused .dot {
+            background: var(--c-amber);
+            box-shadow: 0 0 6px var(--c-amber);
+            animation: none;
+        }
+
+        /* Animation entrance: stagger reveal on load */
+        section {
+            animation: rise 0.6s ease-out both;
+        }
+
+        section:nth-of-type(1) {
+            animation-delay: 0.05s;
+        }
+
+        section:nth-of-type(2) {
+            animation-delay: 0.15s;
+        }
+
+        section:nth-of-type(3) {
+            animation-delay: 0.25s;
+        }
+
+        section:nth-of-type(4) {
+            animation-delay: 0.35s;
+        }
+
+        section:nth-of-type(5) {
+            animation-delay: 0.45s;
+        }
+
+        @keyframes rise {
+            from {
+                opacity: 0;
+                transform: translateY(12px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* v1.4 interaction-demo utilities. These replaced ~16 inline style
+           attributes in the log/pan-zoom/brush sections. Same visual result,
+           no ad-hoc `style="..."` on markup. */
+        .two-col-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .caption {
+            font: 0.75rem ui-monospace, monospace;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .caption.centered {
+            text-align: center;
+        }
+
+        .control-row {
+            margin-top: 10px;
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+        }
+
+        .status-row {
+            margin-top: 12px;
+            font: 0.6875rem ui-monospace, monospace;
+            color: var(--text-secondary);
+            text-align: center;
+        }
+
+        .status-row .sep {
+            margin: 0 12px;
+            opacity: 0.4;
+        }
+
+        .brush-controls {
+            margin-top: 10px;
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .brush-controls .status {
+            font: 0.6875rem ui-monospace, monospace;
+            color: var(--text-secondary);
+        }
+
+    </style>
+
+    <script type="importmap">
 {
     "imports": {
         "@zakkster/lite-signal": "https://cdn.jsdelivr.net/npm/@zakkster/lite-signal@1.1.5/Signal.js",
@@ -627,7 +805,8 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
         "@zakkster/lite-charts": "../Charts.js"
     }
 }
-</script>
+
+    </script>
 </head>
 <body>
 
@@ -636,7 +815,7 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
         <div class="brand">
             <span class="brand-logo"></span>
             <span class="brand-name">@zakkster/lite-charts</span>
-            <span class="brand-version">v1.0.0</span>
+            <span class="brand-version">v1.4.0</span>
         </div>
         <button class="theme-toggle" id="theme-toggle">
             <span class="indicator"></span>
@@ -652,7 +831,7 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
          ================================================================= -->
     <section>
         <div class="hero-intro">
-            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.0.0</span>
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.4.0</span>
             <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
             <p>
                 Single-file ESM. Three peer deps. Signal-native data, dimensions, theme,
@@ -720,7 +899,8 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
                     the polish lift that surfaces detail when you need it.
                 </p>
             </div>
-            <span class="pill" id="series-status"><span class="dot"></span><span id="visible-count">4</span> visible</span>
+            <span class="pill" id="series-status"><span class="dot"></span><span
+                    id="visible-count">4</span> visible</span>
         </div>
         <div class="card dashboard-card">
             <div class="chart-area" id="dashboard-chart"></div>
@@ -1008,6 +1188,176 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
     </section>
 
     <!-- =================================================================
+         Log scale -- v1.4.0-alpha.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// log scale -- v1.4.0-alpha.0</span>
+                <h2>When linear flattens the small.</h2>
+                <p>
+                    Opt in with
+                    <span class="mono">yScale: { type: 'log' }</span>.
+                    The same data plotted twice below: linear on the left
+                    crushes the first three orders of magnitude against
+                    the axis; log on the right spreads them evenly so
+                    every decade gets the same vertical space.
+                </p>
+                <p>
+                    Tick generation routes through
+                    <span class="mono">lite-axis.logTicks</span> (decade
+                    boundaries 1, 10, 100, ...); the
+                    <span class="mono">map</span> /
+                    <span class="mono">invert</span> path uses
+                    <span class="mono">Math.log</span> /
+                    <span class="mono">Math.exp</span> with cached
+                    slope + intercept so per-point projection stays a
+                    single multiply-add after one log call.
+                    Non-positive values return
+                    <span class="mono">NaN</span> from
+                    <span class="mono">map</span>; line / area break the
+                    segment, markers skip.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card two-col-grid">
+            <div>
+                <div class="caption centered">linear y</div>
+                <div class="chart-area" id="log-linear-chart"></div>
+            </div>
+            <div>
+                <div class="caption centered">log y (decades evenly spaced)</div>
+                <div class="chart-area" id="log-log-chart"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Pan + zoom -- v1.4.0-alpha.2
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// pan + zoom -- v1.4.0-alpha.2</span>
+                <h2>Drag to pan. Wheel to zoom.</h2>
+                <p>
+                    Opt in with <span class="mono">pan: true</span> and/or
+                    <span class="mono">zoom: true</span>. Either flag
+                    allocates the view signal and attaches the listener
+                    cluster; neither set = no view, no listeners,
+                    zero cost. Cursor-anchor convention throughout:
+                    the data point under the cursor at gesture start
+                    stays under the cursor as you drag.
+                </p>
+                <p>
+                    <span class="mono">chart.view</span> is a reactive
+                    facade mirroring
+                    <span class="mono">chart.crosshair</span> --
+                    <span class="mono">chart.view()</span> reads
+                    (tracks), <span class="mono">.peek()</span> reads
+                    untracked, <span class="mono">.set(v)</span> writes
+                    a view object
+                    (<span class="mono">{ xMin, xMax, yMin, yMax }</span>
+                    with any field nullable to fall back to data
+                    domain), <span class="mono">.reset()</span> clears
+                    back to null. The view shape is intentionally
+                    symmetric with
+                    <span class="mono">lite-camera-max</span>'s camera
+                    signal so the same value drops into a future
+                    <span class="mono">lite-gl</span> project function
+                    unchanged.
+                </p>
+                <p>
+                    Below, the same signal-sourced dataset rendered
+                    two ways. Left chart has
+                    <span class="mono">pan: true, zoom: true,
+                    panBounds: 'data'</span> (default) -- pan and zoom
+                    stay within the data domain. Right chart has
+                    <span class="mono">panBounds: 'free'</span> --
+                    you can pan past the data on either axis.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card two-col-grid">
+            <div>
+                <div class="caption centered">
+                    panBounds: 'data' (default) -- clamped to data
+                </div>
+                <div class="chart-area" id="panzoom-bounded-chart"></div>
+                <div class="control-row">
+                    <button class="btn" id="panzoom-bounded-reset">reset view</button>
+                </div>
+            </div>
+            <div>
+                <div class="caption centered">
+                    panBounds: 'free' -- can extend past data
+                </div>
+                <div class="chart-area" id="panzoom-free-chart"></div>
+                <div class="control-row">
+                    <button class="btn" id="panzoom-free-reset">reset view</button>
+                </div>
+            </div>
+        </div>
+        <div class="status-row">
+            <span id="panzoom-bounded-status">view: null (following data)</span>
+            <span class="sep">|</span>
+            <span id="panzoom-free-status">view: null (following data)</span>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Brushing + cross-chart linking -- v1.4.0-alpha.3
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// brushing -- v1.4.0-alpha.3</span>
+                <h2>Shift+drag selects. Other charts react.</h2>
+                <p>
+                    Opt in with <span class="mono">brush: true</span>.
+                    Shift+drag selects a rectangle on the top chart;
+                    <span class="mono">chart.brush</span> emits
+                    <span class="mono">{ xMin, xMax, yMin, yMax, ids }</span>.
+                    Below it, two follower charts subscribe to that
+                    signal through <span class="mono">effect()</span>
+                    -- the bar chart shows distribution within the
+                    brushed range, and the second line chart highlights
+                    only the brushed points. Shift+click (without
+                    movement) clears the selection. Coexists with
+                    pan/zoom; bare drag still pans.
+                </p>
+                <p>
+                    The cross-chart linking pattern: any
+                    <span class="mono">effect()</span> that reads
+                    <span class="mono">chart.brush()</span> re-runs
+                    live during the drag, so follower charts update
+                    in real time. The
+                    <span class="mono">ids</span> array is freshly
+                    allocated per commit -- no aliasing across brushes.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="caption">source (shift+drag to brush)</div>
+            <div class="chart-area" id="brush-source-chart"></div>
+            <div class="two-col-grid" style="margin-top: 12px;">
+                <div>
+                    <div class="caption">follower 1 -- count in brush</div>
+                    <div class="chart-area" id="brush-follower-bars"></div>
+                </div>
+                <div>
+                    <div class="caption">follower 2 -- highlight brushed points</div>
+                    <div class="chart-area" id="brush-follower-scatter"></div>
+                </div>
+            </div>
+            <div class="brush-controls">
+                <button class="btn" id="brush-clear">clear brush</button>
+                <span id="brush-status" class="status">brush: null</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
          SVG export -- v1.3.0
          ================================================================= -->
     <section>
@@ -1078,6 +1428,7 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
             cursor: pointer;
             transition: background 0.15s, border-color 0.15s;
         }
+
         .svg-export-btn:hover {
             background: var(--surface-3, #232323);
             border-color: var(--text-secondary, #555);
@@ -1158,7 +1509,9 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
         <div>built on <a href="https://www.npmjs.com/package/@zakkster/lite-signal">lite-signal</a>
             &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-scene">lite-scene</a>
             &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-axis">lite-axis</a></div>
-        <div class="deps">MIT &copy; 2026 Zahary Shinikchiev &middot; sub-frame at 100k pts &middot; 326 B/cycle p50 heap</div>
+        <div class="deps">MIT &copy; 2026 Zahary Shinikchiev &middot; sub-frame at 100k pts &middot; 326 B/cycle p50
+            heap
+        </div>
     </div>
 </footer>
 
@@ -1166,1068 +1519,1381 @@ section:nth-of-type(5) { animation-delay: 0.45s; }
      Demo logic. All bare specifiers are resolved by the import-map above.
      ===================================================================== -->
 <script type="module">
-import { signal, effect, createRegistry, setDefaultRegistry } from '@zakkster/lite-signal';
+    import {signal, effect, createRegistry, setDefaultRegistry} from '@zakkster/lite-signal';
 
-// lite-signal's default node-arena capacity is 1024, comfortable for a few
-// charts but easy to exhaust on a page like this with ~15 simultaneous
-// charts (each consumes ~45-60 nodes between signals, effects, and scene-
-// node-backing effects -- the per-axis tick pool alone is ~24 nodes per
-// axis at max tick count). Bumping to 32k is cheap (a few tens of KB of
-// arena memory) and gives plenty of headroom. Must run BEFORE any chart
-// is constructed, since charts pick up whichever registry is current at
-// the moment they're created.
-setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
-import {
-    createLineChart,
-    createAreaChart,
-    createBarChart,
-    createPieChart,
-    createDonutChart,
-    createBubbleChart,
-    createRadarChart,
-    createScatterChart,
-    createHeatmap,
-} from '@zakkster/lite-charts';
+    // lite-signal's default node-arena capacity is 1024, comfortable for a few
+    // charts but easy to exhaust on a page like this with ~15 simultaneous
+    // charts (each consumes ~45-60 nodes between signals, effects, and scene-
+    // node-backing effects -- the per-axis tick pool alone is ~24 nodes per
+    // axis at max tick count). Bumping to 32k is cheap (a few tens of KB of
+    // arena memory) and gives plenty of headroom. Must run BEFORE any chart
+    // is constructed, since charts pick up whichever registry is current at
+    // the moment they're created.
+    setDefaultRegistry(createRegistry({maxNodes: 32768}));
+    import {
+        createLineChart,
+        createAreaChart,
+        createBarChart,
+        createPieChart,
+        createDonutChart,
+        createBubbleChart,
+        createRadarChart,
+        createScatterChart,
+        createHeatmap,
+    } from '@zakkster/lite-charts';
 
-// ---------------------------------------------------------------------
-// Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
-// declared as CSS-var tokens ('--c-primary' etc.) re-resolve against the
-// new theme's computed style.
-// ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
+    // declared as CSS-var tokens ('--c-primary' etc.) re-resolve against the
+    // new theme's computed style.
+    // ---------------------------------------------------------------------
 
-const themeToggle = document.getElementById('theme-toggle');
-const themeLabel  = themeToggle.querySelector('.label');
-const ALL_CHARTS = [];
+    const themeToggle = document.getElementById('theme-toggle');
+    const themeLabel = themeToggle.querySelector('.label');
+    const ALL_CHARTS = [];
 
-// Responsive sizing helper. Wraps a container's clientWidth in a signal
-// that updates on ResizeObserver callbacks, so charts re-render their
-// scales/geometry when the viewport changes size. Without this, a chart
-// rendered at 1200px wide would keep its plot bounds when the viewport
-// drops to 800px, and lines would draw beyond the visible canvas edge.
-//
-// Following the pattern from the user-supplied snippet -- only ONE place
-// applies DPR (lite-scene handles it via the dpr config in createScene),
-// so this helper deliberately reports CSS pixels.
-const responsiveWidth = (containerId, fallback) => {
-    const sig = signal(fallback);
-    const update = () => {
+    // Responsive sizing helper. Wraps a container's clientWidth in a signal
+    // that updates on ResizeObserver callbacks, so charts re-render their
+    // scales/geometry when the viewport changes size. Without this, a chart
+    // rendered at 1200px wide would keep its plot bounds when the viewport
+    // drops to 800px, and lines would draw beyond the visible canvas edge.
+    //
+    // Following the pattern from the user-supplied snippet -- only ONE place
+    // applies DPR (lite-scene handles it via the dpr config in createScene),
+    // so this helper deliberately reports CSS pixels.
+    const responsiveWidth = (containerId, fallback) => {
+        const sig = signal(fallback);
+        const update = () => {
+            const el = document.getElementById(containerId);
+            const w = (el && el.clientWidth) || fallback;
+            if (sig.peek() !== w) sig.set(w);
+        };
+        // First update after layout settles so initial value isn't 0.
+        requestAnimationFrame(update);
+        let scheduled = false;
+        const ro = new ResizeObserver(() => {
+            if (scheduled) return;
+            scheduled = true;
+            requestAnimationFrame(() => {
+                scheduled = false;
+                update();
+            });
+        });
         const el = document.getElementById(containerId);
-        const w = (el && el.clientWidth) || fallback;
-        if (sig.peek() !== w) sig.set(w);
+        if (el) ro.observe(el.parentElement || el);
+        return sig;
     };
-    // First update after layout settles so initial value isn't 0.
-    requestAnimationFrame(update);
-    let scheduled = false;
-    const ro = new ResizeObserver(() => {
-        if (scheduled) return;
-        scheduled = true;
-        requestAnimationFrame(() => { scheduled = false; update(); });
+
+    const setTheme = (mode) => {
+        document.documentElement.setAttribute('data-theme', mode);
+        themeLabel.textContent = mode === 'dark' ? 'night' : 'day';
+        // Let the CSS transition settle one frame before re-resolving so the
+        // computed values are the new ones.
+        requestAnimationFrame(() => {
+            for (const c of ALL_CHARTS) c.refreshTheme();
+        });
+    };
+
+    themeToggle.addEventListener('click', () => {
+        const cur = document.documentElement.getAttribute('data-theme');
+        setTheme(cur === 'dark' ? 'light' : 'dark');
     });
-    const el = document.getElementById(containerId);
-    if (el) ro.observe(el.parentElement || el);
-    return sig;
-};
 
-const setTheme = (mode) => {
-    document.documentElement.setAttribute('data-theme', mode);
-    themeLabel.textContent = mode === 'dark' ? 'night' : 'day';
-    // Let the CSS transition settle one frame before re-resolving so the
-    // computed values are the new ones.
-    requestAnimationFrame(() => {
-        for (const c of ALL_CHARTS) c.refreshTheme();
+    // ---------------------------------------------------------------------
+    // Common chart options for visual consistency across the demo
+    // ---------------------------------------------------------------------
+    //
+    // Module-level constant, spread into each chart config at construction.
+    // Previously this was `sharedOpts = () => ({...})`, which allocated a
+    // fresh object literal (plus its `grid` sub-object) at each of 11 call
+    // sites -- 22 allocations at demo boot for something that never varies.
+    // Freeze prevents accidental writes; the spread pattern still lets each
+    // call site override individual keys.
+    const SHARED_GRID = Object.freeze({color: '--grid-line'});
+    const SHARED_OPTS = Object.freeze({
+        axisColor: '--text-faint',
+        labelColor: '--text-muted',
+        font: '11px "Geist Mono", monospace',
+        grid: SHARED_GRID,
     });
-};
 
-themeToggle.addEventListener('click', () => {
-    const cur = document.documentElement.getAttribute('data-theme');
-    setTheme(cur === 'dark' ? 'light' : 'dark');
-});
+    // ---------------------------------------------------------------------
+    // HERO: live streaming time-series, 30 Hz
+    // ---------------------------------------------------------------------
 
-// ---------------------------------------------------------------------
-// Common chart options for visual consistency across the demo
-// ---------------------------------------------------------------------
+    const HERO_BUFFER = 600;        // rolling window
+    const heroXs = new Float32Array(HERO_BUFFER);
+    const heroYs1 = new Float32Array(HERO_BUFFER);
+    const heroYs2 = new Float32Array(HERO_BUFFER);
+    let heroN = 0;
+    let heroT = 0;
+    // Stable SoA wrappers, allocated once. The chart's data accessor closes
+    // over heroVersion + these wrappers; the streaming loop mutates the
+    // Float32Arrays in place and bumps heroVersion (a primitive number, no
+    // allocation) to trigger re-extract. Previously this allocated two new
+    // {xs, ys} objects per 30Hz tick (60 obj/sec) just to defeat lite-signal's
+    // identity comparison; the version-signal pattern is allocation-free.
+    const heroData1Wrapper = {xs: heroXs, ys: heroYs1};
+    const heroData2Wrapper = {xs: heroXs, ys: heroYs2};
+    const heroVersion = signal(0);
 
-const sharedOpts = () => ({
-    axisColor:  '--text-faint',
-    labelColor: '--text-muted',
-    font: '11px "Geist Mono", monospace',
-    grid: { color: '--grid-line' },
-});
+    const heroChart = createLineChart({
+        series: [
+            {name: 'requests/s', data: () => (heroVersion(), heroData1Wrapper), color: '--c-primary', lineWidth: 1.75},
+            {name: 'latency p95', data: () => (heroVersion(), heroData2Wrapper), color: '--c-cyan', lineWidth: 1.75},
+        ],
+        width: responsiveWidth('hero-chart', 800),
+        height: 360,
+        ...SHARED_OPTS,
+        yScale: {nice: true},
+        crosshair: {color: '--text-secondary', dash: [4, 4]},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    heroChart.mount(document.getElementById('hero-chart'));
+    ALL_CHARTS.push(heroChart);
 
-// ---------------------------------------------------------------------
-// HERO: live streaming time-series, 30 Hz
-// ---------------------------------------------------------------------
+    // Streaming loop -- writes into the rolling Float32Arrays in place.
+    let heroRunning = true;
 
-const HERO_BUFFER = 600;        // rolling window
-const heroXs = new Float32Array(HERO_BUFFER);
-const heroYs1 = new Float32Array(HERO_BUFFER);
-const heroYs2 = new Float32Array(HERO_BUFFER);
-let heroN = 0;
-let heroT = 0;
-// Stable SoA wrappers, allocated once. The chart's data accessor closes
-// over heroVersion + these wrappers; the streaming loop mutates the
-// Float32Arrays in place and bumps heroVersion (a primitive number, no
-// allocation) to trigger re-extract. Previously this allocated two new
-// {xs, ys} objects per 30Hz tick (60 obj/sec) just to defeat lite-signal's
-// identity comparison; the version-signal pattern is allocation-free.
-const heroData1Wrapper = { xs: heroXs, ys: heroYs1 };
-const heroData2Wrapper = { xs: heroXs, ys: heroYs2 };
-const heroVersion = signal(0);
+    // Frame-latency ring: power-of-2 sized (64), indexed by `head & FRAME_MASK`.
+    // Push is O(1) with no allocation. Reader (below, in the 4Hz stats
+    // interval) sorts an in-place copy in a pre-allocated scratch buffer;
+    // Float64Array.prototype.sort() sorts numerically without a comparator,
+    // so p95 costs one shallow copy + one in-place typed sort per tick.
+    const FRAME_CAP = 64;
+    const FRAME_MASK = FRAME_CAP - 1;
+    const frameRing = new Float64Array(FRAME_CAP);
+    const frameScratch = new Float64Array(FRAME_CAP);
+    let frameHead = 0;    // total pushes; write index is head & MASK
+    let frameCount = 0;    // populated slots (caps at FRAME_CAP)
 
-const heroChart = createLineChart({
-    series: [
-        { name: 'requests/s',  data: () => (heroVersion(), heroData1Wrapper), color: '--c-primary', lineWidth: 1.75 },
-        { name: 'latency p95', data: () => (heroVersion(), heroData2Wrapper), color: '--c-cyan',    lineWidth: 1.75 },
-    ],
-    width: responsiveWidth('hero-chart', 800),
-    height: 360,
-    ...sharedOpts(),
-    yScale: { nice: true },
-    crosshair: { color: '--text-secondary', dash: [4, 4] },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-heroChart.mount(document.getElementById('hero-chart'));
-ALL_CHARTS.push(heroChart);
-
-// Streaming loop -- writes into the rolling Float32Arrays in place.
-let heroRunning = true;
-let frameSamples = [];
-let lastTick = performance.now();
-
-const pushHero = (spike = false) => {
-    if (heroN < HERO_BUFFER) {
-        heroXs[heroN] = heroT;
-        heroYs1[heroN] = 40 + 30 * Math.sin(heroT * 0.04) + 8 * Math.random();
-        heroYs2[heroN] = 60 + 15 * Math.cos(heroT * 0.07) + 5 * Math.random();
-        if (spike) heroYs1[heroN] += 50;
-        heroN++;
-    } else {
-        // Roll the window.
-        for (let i = 0; i < HERO_BUFFER - 1; i++) {
-            heroXs[i] = heroXs[i + 1];
-            heroYs1[i] = heroYs1[i + 1];
-            heroYs2[i] = heroYs2[i + 1];
+    const pushHero = (spike = false) => {
+        if (heroN < HERO_BUFFER) {
+            heroXs[heroN] = heroT;
+            heroYs1[heroN] = 40 + 30 * Math.sin(heroT * 0.04) + 8 * Math.random();
+            heroYs2[heroN] = 60 + 15 * Math.cos(heroT * 0.07) + 5 * Math.random();
+            if (spike) heroYs1[heroN] += 50;
+            heroN++;
+        } else {
+            // Roll the window. `TypedArray.copyWithin(0, 1)` is one memmove per
+            // buffer -- ~4x faster than the manual per-index loop it replaces,
+            // and idiomatic for a chart library that pitches zero-alloc / hot
+            // paths without hand-written shifts.
+            heroXs.copyWithin(0, 1);
+            heroYs1.copyWithin(0, 1);
+            heroYs2.copyWithin(0, 1);
+            const tail = HERO_BUFFER - 1;
+            heroXs[tail] = heroT;
+            heroYs1[tail] = 40 + 30 * Math.sin(heroT * 0.04) + 8 * Math.random();
+            heroYs2[tail] = 60 + 15 * Math.cos(heroT * 0.07) + 5 * Math.random();
+            if (spike) heroYs1[tail] += 50;
         }
-        heroXs[HERO_BUFFER - 1] = heroT;
-        heroYs1[HERO_BUFFER - 1] = 40 + 30 * Math.sin(heroT * 0.04) + 8 * Math.random();
-        heroYs2[HERO_BUFFER - 1] = 60 + 15 * Math.cos(heroT * 0.07) + 5 * Math.random();
-        if (spike) heroYs1[HERO_BUFFER - 1] += 50;
-    }
-    heroT++;
-    // Zero-alloc trigger: bump a primitive-number signal. The chart's data
-    // accessors close over heroVersion + the stable wrappers, so this fires
-    // the data effect without producing any garbage. Previously we allocated
-    // two {xs, ys} objects per tick (~60 obj/sec) just to defeat lite-
-    // signal's identity comparison.
-    heroVersion.update((v) => (v + 1) | 0);
-};
+        heroT++;
+        // Zero-alloc trigger: bump a primitive-number signal. The chart's data
+        // accessors close over heroVersion + the stable wrappers, so this fires
+        // the data effect without producing any garbage. Previously we allocated
+        // two {xs, ys} objects per tick (~60 obj/sec) just to defeat lite-
+        // signal's identity comparison.
+        heroVersion.update((v) => (v + 1) | 0);
+    };
 
-const heroLoop = () => {
-    if (heroRunning) {
-        const t0 = performance.now();
-        pushHero();
-        const dt = performance.now() - t0;
-        frameSamples.push(dt);
-        if (frameSamples.length > 60) frameSamples.shift();
-    }
-    setTimeout(heroLoop, 33);     // ~30 Hz; deliberately not rAF so the
-                                  //  rate doesn't dance with the display
-};
-heroLoop();
+    const heroLoop = () => {
+        if (heroRunning) {
+            const t0 = performance.now();
+            pushHero();
+            const dt = performance.now() - t0;
+            // Zero-alloc ring push (replaces frameSamples.push()/shift() on a
+            // JS Array, which grew + memmoved 60 slots each 30Hz tick).
+            frameRing[frameHead & FRAME_MASK] = dt;
+            frameHead++;
+            if (frameCount < FRAME_CAP) frameCount++;
+        }
+        setTimeout(heroLoop, 33);     // ~30 Hz; deliberately not rAF so the
+                                      //  rate doesn't dance with the display
+    };
+    heroLoop();
 
-// Stats refresh, decoupled from the data loop. DOM refs hoisted out of the
-// interval body -- getElementById inside a 4Hz interval is cheap but
-// pointless work (it traverses the live DOM index every tick). Same for
-// the visible-count effect and the density samples display below.
-const metricRateEl  = document.getElementById('m-rate');
-const metricTotalEl = document.getElementById('m-total');
-const metricFpsEl   = document.getElementById('m-fps');
-metricRateEl.textContent = '30';  // static after first paint
-setInterval(() => {
-    metricTotalEl.textContent = heroN.toLocaleString();
-    if (frameSamples.length > 5) {
-        const sorted = frameSamples.slice().sort((a, b) => a - b);
-        const p95 = sorted[Math.floor(sorted.length * 0.95)];
-        metricFpsEl.textContent = p95.toFixed(2);
-    }
-}, 250);
+    // Stats refresh, decoupled from the data loop. DOM refs hoisted out of the
+    // interval body -- getElementById inside a 4Hz interval is cheap but
+    // pointless work (it traverses the live DOM index every tick). Same for
+    // the visible-count effect and the density samples display below.
+    const metricRateEl = document.getElementById('m-rate');
+    const metricTotalEl = document.getElementById('m-total');
+    const metricFpsEl = document.getElementById('m-fps');
+    metricRateEl.textContent = '30';  // static after first paint
+    setInterval(() => {
+        metricTotalEl.textContent = heroN.toLocaleString();
+        if (frameCount > 5) {
+            // Copy populated portion into scratch, sort in place. TypedArray
+            // .sort() without a comparator sorts numerically (no string
+            // coercion trap, no comparator function allocated per tick).
+            for (let i = 0; i < frameCount; i++) frameScratch[i] = frameRing[i];
+            const view = frameScratch.subarray(0, frameCount);
+            view.sort();
+            const p95 = view[(frameCount * 0.95) | 0];
+            metricFpsEl.textContent = p95.toFixed(2);
+        }
+    }, 250);
 
-document.getElementById('hero-pause').addEventListener('click', (e) => {
-    heroRunning = !heroRunning;
-    e.target.textContent = heroRunning ? 'Pause' : 'Resume';
-});
-
-document.getElementById('hero-spike').addEventListener('click', () => {
-    pushHero(true);
-});
-
-// ---------------------------------------------------------------------
-// INTERPOLATION GALLERY -- 7 cells, same data, synced crosshairs
-// ---------------------------------------------------------------------
-
-const galEl = document.getElementById('gallery');
-const galModes = [
-    { id: 'linear',       label: 'linear',       color: '--c-primary' },
-    { id: 'step-after',   label: 'step-after',   color: '--c-cyan' },
-    { id: 'step-before',  label: 'step-before',  color: '--c-amber' },
-    { id: 'step-mid',     label: 'step-mid',     color: '--c-pink' },
-    { id: 'monotone',     label: 'monotone',     color: '--c-violet' },
-    { id: 'catmull-rom',  label: 'catmull-rom',  color: '--c-blue' },
-];
-
-// Synthetic but interesting data: low-frequency wobble + a couple of edges
-const galN = 18;
-const galData = [];
-for (let i = 0; i < galN; i++) {
-    galData.push({
-        x: i,
-        y: 50 + 25 * Math.sin(i * 0.6) + (i === 7 ? -15 : 0) + (i === 12 ? 18 : 0),
+    document.getElementById('hero-pause').addEventListener('click', (e) => {
+        heroRunning = !heroRunning;
+        e.target.textContent = heroRunning ? 'Pause' : 'Resume';
     });
-}
 
-const galCharts = [];
-for (const m of galModes) {
-    const cell = document.createElement('div');
-    cell.className = 'cell';
-    cell.innerHTML = `<div class="label">${m.label}</div><div class="chart" data-mode="${m.id}"></div>`;
-    galEl.appendChild(cell);
-    // Cache the gallery index natively on the DOM node. galHover is
-    // mousemove-rate (125-1000Hz on gaming mice); Array.from(galEl.children)
-    // would allocate a fresh JS array AND walk the live HTMLCollection on
-    // every event. Reading dataset and parseInt is O(1), zero-alloc.
-    cell.dataset.idx = String(galCharts.length);
+    document.getElementById('hero-spike').addEventListener('click', () => {
+        pushHero(true);
+    });
 
-    const chartEl = cell.querySelector('.chart');
-    const chart = createLineChart({
-        data: galData,
-        interpolation: m.id,
-        color: m.color,
-        lineWidth: 2,
-        width: () => chartEl.clientWidth || 250,
-        height: 140,
-        margin: { top: 12, right: 12, bottom: 22, left: 32 },
-        ...sharedOpts(),
-        markers: { size: 4, fill: m.color, stroke: '--bg-card', strokeWidth: 1.5 },
-        crosshair: { color: '--text-secondary', dash: [2, 4] },
+    // ---------------------------------------------------------------------
+    // INTERPOLATION GALLERY -- 7 cells, same data, synced crosshairs
+    // ---------------------------------------------------------------------
+
+    const galEl = document.getElementById('gallery');
+    const galModes = [
+        {id: 'linear', label: 'linear', color: '--c-primary'},
+        {id: 'step-after', label: 'step-after', color: '--c-cyan'},
+        {id: 'step-before', label: 'step-before', color: '--c-amber'},
+        {id: 'step-mid', label: 'step-mid', color: '--c-pink'},
+        {id: 'monotone', label: 'monotone', color: '--c-violet'},
+        {id: 'catmull-rom', label: 'catmull-rom', color: '--c-blue'},
+    ];
+
+    // Synthetic but interesting data: low-frequency wobble + a couple of edges
+    const galN = 18;
+    const galData = [];
+    for (let i = 0; i < galN; i++) {
+        galData.push({
+            x: i,
+            y: 50 + 25 * Math.sin(i * 0.6) + (i === 7 ? -15 : 0) + (i === 12 ? 18 : 0),
+        });
+    }
+
+    const galCharts = [];
+    for (const m of galModes) {
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        cell.innerHTML = `<div class="label">${m.label}</div><div class="chart" data-mode="${m.id}"></div>`;
+        galEl.appendChild(cell);
+        // Cache the gallery index natively on the DOM node. galHover is
+        // mousemove-rate (125-1000Hz on gaming mice); Array.from(galEl.children)
+        // would allocate a fresh JS array AND walk the live HTMLCollection on
+        // every event. Reading dataset and parseInt is O(1), zero-alloc.
+        cell.dataset.idx = String(galCharts.length);
+
+        const chartEl = cell.querySelector('.chart');
+        const chart = createLineChart({
+            data: galData,
+            interpolation: m.id,
+            color: m.color,
+            lineWidth: 2,
+            width: () => chartEl.clientWidth || 250,
+            height: 140,
+            margin: {top: 12, right: 12, bottom: 22, left: 32},
+            ...SHARED_OPTS,
+            markers: {size: 4, fill: m.color, stroke: '--bg-card', strokeWidth: 1.5},
+            crosshair: {color: '--text-secondary', dash: [2, 4]},
+            tooltip: false,
+            legend: false,
+        });
+        chart.mount(chartEl);
+        ALL_CHARTS.push(chart);
+        galCharts.push(chart);
+    }
+
+    // Synced crosshair across the gallery cells. Each cell can be a different
+    // width (responsive grid), so we can't just pass the source chart's local
+    // pixel to every chart -- we project through the domain x instead.
+    const galHover = (ev) => {
+        const cell = ev.target.closest('.cell');
+        if (!cell) return;
+        // Zero-alloc index lookup via the cached dataset.idx. Was previously
+        // Array.from(galEl.children).indexOf(cell), which allocated a new
+        // array and walked the live HTMLCollection on every mousemove event
+        // (60+ allocations/sec on a regular mouse, 1000+/sec on gaming mice).
+        const idx = +cell.dataset.idx | 0;
+        if (idx < 0 || idx >= galCharts.length) return;
+        const source = galCharts[idx];
+
+        // CSS pixels relative to the source canvas. The chart's logical coord
+        // system IS CSS pixels (lite-scene's per-draw setTransform(dpr) handles
+        // backing) -- no canvas.width/rect.width DPR scaling needed.
+        const canvas = source.canvas;
+        const rect = canvas.getBoundingClientRect();
+        const localX = ev.clientX - rect.left;
+        const localY = ev.clientY - rect.top;
+        source.moveCrosshair(localX, localY);
+
+        const state = source.crosshair.peek();
+        if (!state.visible) {
+            for (const c of galCharts) c.hideCrosshair();
+            return;
+        }
+
+        // Project source.snapDomainX to each peer's pixel space.
+        const dX = state.snapDomainX;
+        for (const c of galCharts) {
+            if (c === source) continue;
+            const peerPx = c.xScale.map(dX);
+            // y here is irrelevant for sync -- moveCrosshair only uses it for the
+            // dedup check on vertical mouse motion. Use the canvas-height midpoint
+            // in CSS pixels; canvas.height is in device px so divide by DPR.
+            c.moveCrosshair(peerPx, 70);
+        }
+    };
+    const galLeave = () => {
+        for (const c of galCharts) c.hideCrosshair();
+    };
+    galEl.addEventListener('mousemove', galHover);
+    galEl.addEventListener('mouseleave', galLeave);
+
+    // ---------------------------------------------------------------------
+    // DASHBOARD -- 4 series, click-toggle, auto-rescale
+    // ---------------------------------------------------------------------
+
+    const dashN = 80;
+    const dashSeries = [
+        {name: 'CPU %', color: '--c-primary', range: [10, 75], freq: 0.12},
+        {name: 'Memory %', color: '--c-cyan', range: [45, 65], freq: 0.18},
+        {name: 'Disk I/O', color: '--c-amber', range: [0, 35], freq: 0.25},
+        {name: 'Network', color: '--c-pink', range: [20, 90], freq: 0.09},
+    ];
+
+    const dashData = dashSeries.map((s, idx) => {
+        const arr = [];
+        for (let i = 0; i < dashN; i++) {
+            const t = i / (dashN - 1);
+            const phase = idx * Math.PI * 0.5;
+            const mid = (s.range[0] + s.range[1]) / 2;
+            const amp = (s.range[1] - s.range[0]) / 2;
+            arr.push({
+                x: i,
+                y: mid + amp * 0.7 * Math.sin(i * s.freq + phase) + (Math.random() - 0.5) * amp * 0.3,
+            });
+        }
+        return arr;
+    });
+
+    const dashChart = createLineChart({
+        series: dashSeries.map((s, i) => ({
+            name: s.name,
+            data: dashData[i],
+            color: s.color,
+            lineWidth: 1.75,
+        })),
+        width: responsiveWidth('dashboard-chart', 800),
+        height: 380,
+        ...SHARED_OPTS,
+        markers: {size: 4, stroke: '--bg-card', strokeWidth: 1},
+        interpolation: 'monotone',
+        crosshair: {color: '--text-secondary', dash: [3, 4]},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    dashChart.mount(document.getElementById('dashboard-chart'));
+    ALL_CHARTS.push(dashChart);
+
+    // Live visible count display. DOM ref hoisted out of the effect so toggling
+    // legend items doesn't traverse the document index on every click.
+    const visibleCountEl = document.getElementById('visible-count');
+    effect(() => {
+        let count = 0;
+        for (const sig of dashChart.seriesVisibility) if (sig()) count++;
+        visibleCountEl.textContent = count;
+    });
+
+    // ---------------------------------------------------------------------
+    // BAR CHART -- v1.1.0 (grouped multi-series)
+    // ---------------------------------------------------------------------
+
+    const barCategories = ['Q1', 'Q2', 'Q3', 'Q4'];
+    const barSeriesDefs = [
+        {name: 'Revenue', color: '--c-primary'},
+        {name: 'Expenses', color: '--c-amber'},
+        {name: 'Profit', color: '--c-cyan'},
+    ];
+
+    // Synthetic quarterly numbers; revenue trends up, expenses flat-ish, profit
+    // is revenue - expenses with a small fluctuation.
+    const barData = [
+        [42, 58, 65, 78],   // Revenue
+        [30, 35, 38, 45],   // Expenses
+        [12, 23, 27, 33],   // Profit
+    ];
+
+    const barChart = createBarChart({
+        series: barSeriesDefs.map((s, i) => ({
+            name: s.name,
+            color: s.color,
+            data: barCategories.map((cat, j) => ({x: cat, y: barData[i][j]})),
+        })),
+        width: responsiveWidth('bar-chart', 800),
+        height: 380,
+        ...SHARED_OPTS,
+        paddingInner: 0.15,
+        paddingOuter: 0.1,
+        // v1.1.0: rounded top corners + subtle hover-tint overlay. Both
+        // optional; setting cornerRadius: 0 or hoverTint: false opts out.
+        cornerRadius: 4,
+        hoverTint: 'rgba(255,255,255,0.18)',
+        crosshair: {color: '--text-secondary', dash: [3, 4]},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    barChart.mount(document.getElementById('bar-chart'));
+    ALL_CHARTS.push(barChart);
+
+    // ---------------------------------------------------------------------
+    // STACKED BAR -- v1.1.0 (same kernel, stack: true)
+    // ---------------------------------------------------------------------
+    //
+    // Synthetic "user acquisition by channel, weekly". Three channels stack
+    // per week to show the total + composition. The renderer's postExtract
+    // hook fills per-series stackBottoms/stackTops in data space; each series
+    // then draws its segment using the same makeBarDrawFn path, picking up
+    // stacking automatically from the state buffers.
+
+    const stackedSeriesDefs = [
+        {name: 'Organic', color: '--c-primary'},
+        {name: 'Referral', color: '--c-emerald'},
+        {name: 'Paid', color: '--c-amber'},
+    ];
+    const stackedCategories = ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8'];
+    const stackedData = [
+        [120, 150, 180, 200, 240, 280, 320, 380],   // Organic
+        [60, 80, 100, 110, 130, 150, 170, 190],   // Referral
+        [40, 50, 55, 60, 70, 85, 100, 120],   // Paid
+    ];
+
+    const stackedBarChart = createBarChart({
+        series: stackedSeriesDefs.map((s, i) => ({
+            name: s.name,
+            color: s.color,
+            data: stackedCategories.map((cat, j) => ({x: cat, y: stackedData[i][j]})),
+        })),
+        stack: true,
+        width: responsiveWidth('stacked-bar-chart', 800),
+        height: 380,
+        ...SHARED_OPTS,
+        paddingInner: 0.2,
+        paddingOuter: 0.1,
+        cornerRadius: 6,
+        hoverTint: 'rgba(255,255,255,0.22)',
+        crosshair: {color: '--text-secondary', dash: [3, 4]},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    stackedBarChart.mount(document.getElementById('stacked-bar-chart'));
+    ALL_CHARTS.push(stackedBarChart);
+
+    // ---------------------------------------------------------------------
+    // PIE + DONUT -- separate kernel (createBasePolarChart), no axes
+    // ---------------------------------------------------------------------
+
+    const pieData = signal([
+        {label: 'Search', value: 4200, color: '--c-primary'},
+        {label: 'Direct', value: 2800, color: '--c-emerald'},
+        {label: 'Social', value: 1400, color: '--c-amber'},
+        {label: 'Referral', value: 900, color: '--c-rose'},
+        {label: 'Email', value: 500, color: '--c-violet'},
+    ]);
+
+    const pieChart = createPieChart({
+        data: pieData,
+        width: responsiveWidth('pie-chart', 360),
+        height: 360,
+        sliceStroke: '--bg-card',
+        sliceStrokeWidth: 2,
+        labelColor: '--text-secondary',
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    pieChart.mount(document.getElementById('pie-chart'));
+    ALL_CHARTS.push(pieChart);
+
+    const donutChart = createDonutChart({
+        data: pieData,                          // shares the same signal -- both update together
+        width: responsiveWidth('donut-chart', 360),
+        height: 360,
+        innerRadius: 0.55,
+        sliceStroke: '--bg-card',
+        sliceStrokeWidth: 2,
+        labelColor: '--text-secondary',
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    donutChart.mount(document.getElementById('donut-chart'));
+    ALL_CHARTS.push(donutChart);
+
+    // ---------------------------------------------------------------------
+    // BUBBLE -- axis kernel with size dimension; one circle per data point
+    // ---------------------------------------------------------------------
+    //
+    // Synthetic "20 random products" -- x = launch year, y = retention score,
+    // size = monthly revenue. Reactive: a regenerate button shuffles the
+    // dataset, and the chart re-extracts + re-projects pixel radii without
+    // any allocation outside the resize-aware Float32 buffers.
+
+    // Synthetic "20 random products" -- x = launch year, y = retention score,
+    // size = monthly revenue. Reactive: a regenerate button shuffles the
+    // dataset, and the chart re-extracts + re-projects pixel radii without
+    // any allocation outside the resize-aware Float32 buffers.
+    //
+    // (Per-point color encoding is a v1.3 feature -- BUBBLE_RENDERER currently
+    // uses one fill colour per series. For this single-series demo the points
+    // share a colour with varying opacity.)
+
+    const makeBubbleDataset = () => {
+        const out = [];
+        for (let i = 0; i < 24; i++) {
+            out.push({
+                x: 2015 + Math.random() * 10,                 // launch year
+                y: 40 + Math.random() * 55,                   // retention score 40..95
+                value: 50 + Math.pow(Math.random(), 2) * 950, // skewed revenue, 50..1000
+                label: 'Product ' + (i + 1),
+            });
+        }
+        return out;
+    };
+
+    const bubbleData = signal(makeBubbleDataset());
+
+    const bubbleChart = createBubbleChart({
+        data: bubbleData,
+        size: 'value',
+        minRadius: 6,
+        maxRadius: 36,
+        sizeScale: 'sqrt',
+        // Bubble fills are the chart's top-level `color`. Per-point colour
+        // encoding lands in v1.3 alongside multi-series bubble.
+        color: '--c-primary',
+        fillOpacity: 0.55,
+        stroke: '--bg-card',
+        strokeWidth: 1.5,
+        width: responsiveWidth('bubble-chart', 800),
+        height: 400,
+        ...SHARED_OPTS,
+        grid: {y: true, x: false},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+            format: (info) => ({
+                // info.snapDomainX is the bubble's x value; rows[0].value is its y.
+                // Show year, retention, and revenue all on the header for compact
+                // single-bubble tooltips.
+                header: 'year ' + info.snapDomainX.toFixed(1),
+            }),
+        },
+        legend: false, // single-series; nothing to toggle
+    });
+    bubbleChart.mount(document.getElementById('bubble-chart'));
+    ALL_CHARTS.push(bubbleChart);
+
+    // ---------------------------------------------------------------------
+    // DENSE BUBBLE -- spatial-index integration (v1.2.0-alpha.0)
+    // ---------------------------------------------------------------------
+    //
+    // 2000 bubbles. Above the default threshold of 1000, lite-charts switches
+    // from O(n) linear-scan hit-test to O(log n) via a pluggable spatial
+    // index. The integration is interface-driven: lite-charts defines the
+    // `SpatialIndex` / `SpatialIndexFactory` contract, the consumer supplies
+    // the implementation. In production you'd pass `@zakkster/lite-delaunay`
+    // (Voronoi-dual nearest-neighbor walk); the demo below ships a small
+    // reference linear-scan implementation just to prove the integration
+    // wiring without adding a build dependency.
+    //
+    // Key design points:
+    //   - findNearest writes into CALLER-OWNED Int32Array / Float32Array
+    //     output buffers -- zero allocation per query
+    //   - k > 1 candidates returned so the renderer can post-filter for
+    //     disc containment + smallest-r tie-break (preserving v1.0.0
+    //     "visually-topmost wins on overlap" semantics)
+    //   - Index built lazily on the first hit-test after extract, cached
+    //     until the next data/scale change invalidates it
+    //   - dispose() called on data change AND chart unmount
+
+    // Reference SpatialIndex implementation. NOT a real Delaunay -- it's a
+    // linear scan that satisfies the interface so the demo can run without
+    // pulling in @zakkster/lite-delaunay. Production users plug in the real
+    // thing; lite-charts doesn't care which.
+    const makeReferenceSpatialIndex = (pxs, pys, n) => {
+        // Snapshot so callers can mutate pxs/pys without affecting the index.
+        const snapPxs = new Float32Array(n);
+        const snapPys = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            snapPxs[i] = pxs[i];
+            snapPys[i] = pys[i];
+        }
+        const snapN = n;
+        return {
+            findNearest(qx, qy, k, maxDistSq, outIndices, outDistSq) {
+                let count = 0;
+                for (let i = 0; i < snapN; i++) {
+                    const dx = qx - snapPxs[i];
+                    const dy = qy - snapPys[i];
+                    const d = dx * dx + dy * dy;
+                    if (d > maxDistSq) continue;
+                    // Insertion sort into the bounded k-sized output buffer.
+                    let at = count;
+                    while (at > 0 && outDistSq[at - 1] > d) at--;
+                    if (at < k) {
+                        const limit = count < k ? count : k - 1;
+                        for (let s = limit; s > at; s--) {
+                            outIndices[s] = outIndices[s - 1];
+                            outDistSq[s] = outDistSq[s - 1];
+                        }
+                        outIndices[at] = i;
+                        outDistSq[at] = d;
+                        if (count < k) count++;
+                    }
+                }
+                return count;
+            },
+            dispose() { /* nothing to free in this reference impl */
+            },
+        };
+    };
+
+    // 2000-point dataset: imagine "session events" plotted by time-of-day vs
+    // session-length, sized by interaction count.
+    const DENSE_N = 2000;
+    const denseBubbleData = (() => {
+        const out = [];
+        for (let i = 0; i < DENSE_N; i++) {
+            const tod = (i * 7919) % 24;          // hour 0..23 (pseudo-random spread)
+            const dur = 1 + (((i * 1481) % 100) * 0.6);
+            const interactions = 1 + ((i * 17) % 50);
+            out.push({x: tod, y: dur, value: interactions});
+        }
+        return out;
+    })();
+
+    const denseBubbleChart = createBubbleChart({
+        data: denseBubbleData,
+        size: 'value',
+        minRadius: 2,
+        maxRadius: 8,
+        color: '--c-cyan',
+        fillOpacity: 0.45,
+        stroke: '--bg-card',
+        strokeWidth: 0.75,
+        spatialIndex: makeReferenceSpatialIndex,
+        spatialIndexThreshold: 500,    // demo: lower so we hit the indexed path
+        width: responsiveWidth('dense-bubble-chart', 800),
+        height: 380,
+        ...SHARED_OPTS,
+        grid: {y: true, x: false},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+            format: (info) => ({
+                header: 'hour ' + info.snapDomainX.toFixed(0) + ':00',
+            }),
+        },
+        legend: false,
+    });
+    denseBubbleChart.mount(document.getElementById('dense-bubble-chart'));
+    ALL_CHARTS.push(denseBubbleChart);
+
+    // ---------------------------------------------------------------------
+    // SCATTER -- v1.2.0-alpha.1
+    // ---------------------------------------------------------------------
+    //
+    // Bubble's simpler sibling: no size dimension, every marker the same pixel
+    // radius. Same axis kernel; the spatial-index foundation from alpha.0
+    // works here too (with k = 1 since scatter has no overlap concerns).
+    // This demo plots a synthetic "two clusters" dataset to show that the
+    // hit-test correctly picks the nearest point even at high density.
+
+    const scatterData = (() => {
+        const out = [];
+        // Cluster A around (3, 7), cluster B around (8, 3).
+        for (let i = 0; i < 400; i++) {
+            const ax = 3 + (Math.random() - 0.5) * 2;
+            const ay = 7 + (Math.random() - 0.5) * 2;
+            out.push({x: ax, y: ay, cluster: 'A'});
+        }
+        for (let i = 0; i < 400; i++) {
+            const bx = 8 + (Math.random() - 0.5) * 2;
+            const by = 3 + (Math.random() - 0.5) * 2;
+            out.push({x: bx, y: by, cluster: 'B'});
+        }
+        return out;
+    })();
+
+    const scatterChart = createScatterChart({
+        data: scatterData,
+        markerSize: 3,
+        hitTolerance: 6,
+        color: '--c-primary',
+        fillOpacity: 0.55,
+        stroke: null,
+        strokeWidth: 0,
+        spatialIndex: makeReferenceSpatialIndex,   // reuse from dense-bubble
+        spatialIndexThreshold: 200,
+        width: responsiveWidth('scatter-chart', 800),
+        height: 380,
+        ...SHARED_OPTS,
+        grid: {x: true, y: true},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+            format: (info) => ({
+                header: 'point ' + info.snapIdx,
+            }),
+        },
+        legend: false,
+    });
+    scatterChart.mount(document.getElementById('scatter-chart'));
+    ALL_CHARTS.push(scatterChart);
+
+    // ---------------------------------------------------------------------
+    // MULTI-SERIES BUBBLE -- v1.2.0-alpha.2 (global size domain)
+    // ---------------------------------------------------------------------
+    //
+    // Three product lines, each plotted as its own bubble cloud. The size
+    // dimension uses a GLOBAL domain across visible series (computed by the
+    // bubble renderer's postExtract hook), so equal raw values render at
+    // equal pixel radii regardless of which series they belong to. Toggle
+    // any series via the legend -- the global domain recomputes from the
+    // surviving series and the bubbles resize accordingly.
+
+    const multiBubbleSeries = [
+        {
+            name: 'Q1', color: '--c-primary', data: [
+                {x: 5, y: 22, value: 18}, {x: 7, y: 38, value: 30},
+                {x: 9, y: 55, value: 24}, {x: 11, y: 41, value: 12},
+                {x: 13, y: 28, value: 8}, {x: 15, y: 19, value: 4},
+            ]
+        },
+        {
+            name: 'Q2', color: '--c-emerald', data: [
+                {x: 4, y: 48, value: 28}, {x: 6, y: 62, value: 40},
+                {x: 8, y: 71, value: 35}, {x: 10, y: 58, value: 20},
+                {x: 12, y: 44, value: 14}, {x: 14, y: 31, value: 9},
+            ]
+        },
+        {
+            name: 'Q3', color: '--c-amber', data: [
+                {x: 5, y: 70, value: 38}, {x: 7, y: 85, value: 50},
+                {x: 9, y: 92, value: 44}, {x: 11, y: 78, value: 26},
+                {x: 13, y: 60, value: 18}, {x: 15, y: 42, value: 11},
+            ]
+        },
+    ];
+
+    const multiBubbleChart = createBubbleChart({
+        series: multiBubbleSeries,
+        minRadius: 4,
+        maxRadius: 28,
+        fillOpacity: 0.55,
+        stroke: '--bg-card',
+        strokeWidth: 1.5,
+        width: responsiveWidth('multi-bubble-chart', 800),
+        height: 400,
+        ...SHARED_OPTS,
+        grid: {y: true, x: false},
+        crosshair: {color: '--text-secondary', dash: [3, 4]},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    multiBubbleChart.mount(document.getElementById('multi-bubble-chart'));
+    ALL_CHARTS.push(multiBubbleChart);
+
+    // ---------------------------------------------------------------------
+    // PER-POINT COLOR BUBBLE -- v1.2.0-alpha.2 (colorKey)
+    // ---------------------------------------------------------------------
+    //
+    // Same bubble renderer, but each row carries its own color via the
+    // `colorKey` config. CSS-var values (`'--c-emerald'`) work alongside
+    // raw colors -- the extract step resolves them to concrete CSS strings
+    // once, so the per-frame draw stays fast.
+
+    const colorBubbleData = [];
+    {
+        const palette = ['--c-primary', '--c-emerald', '--c-amber', '--c-cyan', '#ef4444', '#a855f7'];
+        for (let i = 0; i < 60; i++) {
+            colorBubbleData.push({
+                x: Math.random() * 100,
+                y: Math.random() * 100,
+                value: 5 + Math.random() * 25,
+                tone: palette[i % palette.length],
+            });
+        }
+    }
+
+    const colorBubbleChart = createBubbleChart({
+        data: colorBubbleData,
+        size: 'value',
+        colorKey: 'tone',
+        minRadius: 4,
+        maxRadius: 22,
+        fillOpacity: 0.7,
+        stroke: '--bg-card',
+        strokeWidth: 1,
+        width: responsiveWidth('color-bubble-chart', 800),
+        height: 360,
+        ...SHARED_OPTS,
+        grid: {y: true, x: false},
         tooltip: false,
         legend: false,
     });
-    chart.mount(chartEl);
-    ALL_CHARTS.push(chart);
-    galCharts.push(chart);
-}
+    colorBubbleChart.mount(document.getElementById('color-bubble-chart'));
+    ALL_CHARTS.push(colorBubbleChart);
 
-// Synced crosshair across the gallery cells. Each cell can be a different
-// width (responsive grid), so we can't just pass the source chart's local
-// pixel to every chart -- we project through the domain x instead.
-const galHover = (ev) => {
-    const cell = ev.target.closest('.cell');
-    if (!cell) return;
-    // Zero-alloc index lookup via the cached dataset.idx. Was previously
-    // Array.from(galEl.children).indexOf(cell), which allocated a new
-    // array and walked the live HTMLCollection on every mousemove event
-    // (60+ allocations/sec on a regular mouse, 1000+/sec on gaming mice).
-    const idx = +cell.dataset.idx | 0;
-    if (idx < 0 || idx >= galCharts.length) return;
-    const source = galCharts[idx];
+    // ---------------------------------------------------------------------
+    // HEATMAP -- v1.2.0 (fourth kernel)
+    // ---------------------------------------------------------------------
+    //
+    // "Active sessions by day-of-week and hour-of-day". 7 x 12 = 84 cells.
+    // The grid kernel is brand-new: no axes / scales / interpolation /
+    // decimation / markers / multi-series. Just two band scales, a flat
+    // Float32Array for cell values, a Uint8 presentMask for sparse rows,
+    // and a precomputed string array for cell colors so the draw loop
+    // stays allocation-free. ~11 KB minified -- the smallest of the nine
+    // chart bundles.
+    //
+    // v1.2.0 polish on display here:
+    //   - showValues: true with valueLabelColor: 'auto' (default)
+    //     -> per-cell NTSC luminance picks #000 / #fff so labels stay
+    //        readable across the whole ramp.
+    //   - row + column highlight stripes on hover (defaults on)
+    //   - tooltipFormat customizes the readout to "Mon 8:00 -- 42 sessions"
 
-    // CSS pixels relative to the source canvas. The chart's logical coord
-    // system IS CSS pixels (lite-scene's per-draw setTransform(dpr) handles
-    // backing) -- no canvas.width/rect.width DPR scaling needed.
-    const canvas = source.canvas;
-    const rect = canvas.getBoundingClientRect();
-    const localX = ev.clientX - rect.left;
-    const localY = ev.clientY - rect.top;
-    source.moveCrosshair(localX, localY);
-
-    const state = source.crosshair.peek();
-    if (!state.visible) {
-        for (const c of galCharts) c.hideCrosshair();
-        return;
-    }
-
-    // Project source.snapDomainX to each peer's pixel space.
-    const dX = state.snapDomainX;
-    for (const c of galCharts) {
-        if (c === source) continue;
-        const peerPx = c.xScale.map(dX);
-        // y here is irrelevant for sync -- moveCrosshair only uses it for the
-        // dedup check on vertical mouse motion. Use the canvas-height midpoint
-        // in CSS pixels; canvas.height is in device px so divide by DPR.
-        c.moveCrosshair(peerPx, 70);
-    }
-};
-const galLeave = () => {
-    for (const c of galCharts) c.hideCrosshair();
-};
-galEl.addEventListener('mousemove', galHover);
-galEl.addEventListener('mouseleave', galLeave);
-
-// ---------------------------------------------------------------------
-// DASHBOARD -- 4 series, click-toggle, auto-rescale
-// ---------------------------------------------------------------------
-
-const dashN = 80;
-const dashSeries = [
-    { name: 'CPU %',     color: '--c-primary', range: [10, 75],  freq: 0.12 },
-    { name: 'Memory %',  color: '--c-cyan',    range: [45, 65],  freq: 0.18 },
-    { name: 'Disk I/O',  color: '--c-amber',   range: [0,  35],  freq: 0.25 },
-    { name: 'Network',   color: '--c-pink',    range: [20, 90],  freq: 0.09 },
-];
-
-const dashData = dashSeries.map((s, idx) => {
-    const arr = [];
-    for (let i = 0; i < dashN; i++) {
-        const t = i / (dashN - 1);
-        const phase = idx * Math.PI * 0.5;
-        const mid = (s.range[0] + s.range[1]) / 2;
-        const amp = (s.range[1] - s.range[0]) / 2;
-        arr.push({
-            x: i,
-            y: mid + amp * 0.7 * Math.sin(i * s.freq + phase) + (Math.random() - 0.5) * amp * 0.3,
-        });
-    }
-    return arr;
-});
-
-const dashChart = createLineChart({
-    series: dashSeries.map((s, i) => ({
-        name: s.name,
-        data: dashData[i],
-        color: s.color,
-        lineWidth: 1.75,
-    })),
-    width: responsiveWidth('dashboard-chart', 800),
-    height: 380,
-    ...sharedOpts(),
-    markers: { size: 4, stroke: '--bg-card', strokeWidth: 1 },
-    interpolation: 'monotone',
-    crosshair: { color: '--text-secondary', dash: [3, 4] },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-dashChart.mount(document.getElementById('dashboard-chart'));
-ALL_CHARTS.push(dashChart);
-
-// Live visible count display. DOM ref hoisted out of the effect so toggling
-// legend items doesn't traverse the document index on every click.
-const visibleCountEl = document.getElementById('visible-count');
-effect(() => {
-    let count = 0;
-    for (const sig of dashChart.seriesVisibility) if (sig()) count++;
-    visibleCountEl.textContent = count;
-});
-
-// ---------------------------------------------------------------------
-// BAR CHART -- v1.1.0 (grouped multi-series)
-// ---------------------------------------------------------------------
-
-const barCategories = ['Q1', 'Q2', 'Q3', 'Q4'];
-const barSeriesDefs = [
-    { name: 'Revenue',  color: '--c-primary' },
-    { name: 'Expenses', color: '--c-amber' },
-    { name: 'Profit',   color: '--c-cyan' },
-];
-
-// Synthetic quarterly numbers; revenue trends up, expenses flat-ish, profit
-// is revenue - expenses with a small fluctuation.
-const barData = [
-    [42, 58, 65, 78],   // Revenue
-    [30, 35, 38, 45],   // Expenses
-    [12, 23, 27, 33],   // Profit
-];
-
-const barChart = createBarChart({
-    series: barSeriesDefs.map((s, i) => ({
-        name: s.name,
-        color: s.color,
-        data: barCategories.map((cat, j) => ({ x: cat, y: barData[i][j] })),
-    })),
-    width: responsiveWidth('bar-chart', 800),
-    height: 380,
-    ...sharedOpts(),
-    paddingInner: 0.15,
-    paddingOuter: 0.1,
-    // v1.1.0: rounded top corners + subtle hover-tint overlay. Both
-    // optional; setting cornerRadius: 0 or hoverTint: false opts out.
-    cornerRadius: 4,
-    hoverTint: 'rgba(255,255,255,0.18)',
-    crosshair: { color: '--text-secondary', dash: [3, 4] },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-barChart.mount(document.getElementById('bar-chart'));
-ALL_CHARTS.push(barChart);
-
-// ---------------------------------------------------------------------
-// STACKED BAR -- v1.1.0 (same kernel, stack: true)
-// ---------------------------------------------------------------------
-//
-// Synthetic "user acquisition by channel, weekly". Three channels stack
-// per week to show the total + composition. The renderer's postExtract
-// hook fills per-series stackBottoms/stackTops in data space; each series
-// then draws its segment using the same makeBarDrawFn path, picking up
-// stacking automatically from the state buffers.
-
-const stackedSeriesDefs = [
-    { name: 'Organic',  color: '--c-primary' },
-    { name: 'Referral', color: '--c-emerald' },
-    { name: 'Paid',     color: '--c-amber' },
-];
-const stackedCategories = ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8'];
-const stackedData = [
-    [120, 150, 180, 200, 240, 280, 320, 380],   // Organic
-    [60,  80,  100, 110, 130, 150, 170, 190],   // Referral
-    [40,  50,  55,  60,  70,  85,  100, 120],   // Paid
-];
-
-const stackedBarChart = createBarChart({
-    series: stackedSeriesDefs.map((s, i) => ({
-        name: s.name,
-        color: s.color,
-        data: stackedCategories.map((cat, j) => ({ x: cat, y: stackedData[i][j] })),
-    })),
-    stack: true,
-    width: responsiveWidth('stacked-bar-chart', 800),
-    height: 380,
-    ...sharedOpts(),
-    paddingInner: 0.2,
-    paddingOuter: 0.1,
-    cornerRadius: 6,
-    hoverTint: 'rgba(255,255,255,0.22)',
-    crosshair: { color: '--text-secondary', dash: [3, 4] },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-stackedBarChart.mount(document.getElementById('stacked-bar-chart'));
-ALL_CHARTS.push(stackedBarChart);
-
-// ---------------------------------------------------------------------
-// PIE + DONUT -- separate kernel (createBasePolarChart), no axes
-// ---------------------------------------------------------------------
-
-const pieData = signal([
-    { label: 'Search',      value: 4200, color: '--c-primary' },
-    { label: 'Direct',      value: 2800, color: '--c-emerald' },
-    { label: 'Social',      value: 1400, color: '--c-amber' },
-    { label: 'Referral',    value:  900, color: '--c-rose'   },
-    { label: 'Email',       value:  500, color: '--c-violet' },
-]);
-
-const pieChart = createPieChart({
-    data: pieData,
-    width: responsiveWidth('pie-chart', 360),
-    height: 360,
-    sliceStroke: '--bg-card',
-    sliceStrokeWidth: 2,
-    labelColor: '--text-secondary',
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-pieChart.mount(document.getElementById('pie-chart'));
-ALL_CHARTS.push(pieChart);
-
-const donutChart = createDonutChart({
-    data: pieData,                          // shares the same signal -- both update together
-    width: responsiveWidth('donut-chart', 360),
-    height: 360,
-    innerRadius: 0.55,
-    sliceStroke: '--bg-card',
-    sliceStrokeWidth: 2,
-    labelColor: '--text-secondary',
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-donutChart.mount(document.getElementById('donut-chart'));
-ALL_CHARTS.push(donutChart);
-
-// ---------------------------------------------------------------------
-// BUBBLE -- axis kernel with size dimension; one circle per data point
-// ---------------------------------------------------------------------
-//
-// Synthetic "20 random products" -- x = launch year, y = retention score,
-// size = monthly revenue. Reactive: a regenerate button shuffles the
-// dataset, and the chart re-extracts + re-projects pixel radii without
-// any allocation outside the resize-aware Float32 buffers.
-
-// Synthetic "20 random products" -- x = launch year, y = retention score,
-// size = monthly revenue. Reactive: a regenerate button shuffles the
-// dataset, and the chart re-extracts + re-projects pixel radii without
-// any allocation outside the resize-aware Float32 buffers.
-//
-// (Per-point color encoding is a v1.3 feature -- BUBBLE_RENDERER currently
-// uses one fill colour per series. For this single-series demo the points
-// share a colour with varying opacity.)
-
-const makeBubbleDataset = () => {
-    const out = [];
-    for (let i = 0; i < 24; i++) {
-        out.push({
-            x: 2015 + Math.random() * 10,                 // launch year
-            y: 40 + Math.random() * 55,                   // retention score 40..95
-            value: 50 + Math.pow(Math.random(), 2) * 950, // skewed revenue, 50..1000
-            label: 'Product ' + (i + 1),
-        });
-    }
-    return out;
-};
-
-const bubbleData = signal(makeBubbleDataset());
-
-const bubbleChart = createBubbleChart({
-    data: bubbleData,
-    size: 'value',
-    minRadius: 6,
-    maxRadius: 36,
-    sizeScale: 'sqrt',
-    // Bubble fills are the chart's top-level `color`. Per-point colour
-    // encoding lands in v1.3 alongside multi-series bubble.
-    color: '--c-primary',
-    fillOpacity: 0.55,
-    stroke: '--bg-card',
-    strokeWidth: 1.5,
-    width: responsiveWidth('bubble-chart', 800),
-    height: 400,
-    ...sharedOpts(),
-    grid: { y: true, x: false },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-        format: (info) => ({
-            // info.snapDomainX is the bubble's x value; rows[0].value is its y.
-            // Show year, retention, and revenue all on the header for compact
-            // single-bubble tooltips.
-            header: 'year ' + info.snapDomainX.toFixed(1),
-        }),
-    },
-    legend: false, // single-series; nothing to toggle
-});
-bubbleChart.mount(document.getElementById('bubble-chart'));
-ALL_CHARTS.push(bubbleChart);
-
-// ---------------------------------------------------------------------
-// DENSE BUBBLE -- spatial-index integration (v1.2.0-alpha.0)
-// ---------------------------------------------------------------------
-//
-// 2000 bubbles. Above the default threshold of 1000, lite-charts switches
-// from O(n) linear-scan hit-test to O(log n) via a pluggable spatial
-// index. The integration is interface-driven: lite-charts defines the
-// `SpatialIndex` / `SpatialIndexFactory` contract, the consumer supplies
-// the implementation. In production you'd pass `@zakkster/lite-delaunay`
-// (Voronoi-dual nearest-neighbor walk); the demo below ships a small
-// reference linear-scan implementation just to prove the integration
-// wiring without adding a build dependency.
-//
-// Key design points:
-//   - findNearest writes into CALLER-OWNED Int32Array / Float32Array
-//     output buffers -- zero allocation per query
-//   - k > 1 candidates returned so the renderer can post-filter for
-//     disc containment + smallest-r tie-break (preserving v1.0.0
-//     "visually-topmost wins on overlap" semantics)
-//   - Index built lazily on the first hit-test after extract, cached
-//     until the next data/scale change invalidates it
-//   - dispose() called on data change AND chart unmount
-
-// Reference SpatialIndex implementation. NOT a real Delaunay -- it's a
-// linear scan that satisfies the interface so the demo can run without
-// pulling in @zakkster/lite-delaunay. Production users plug in the real
-// thing; lite-charts doesn't care which.
-const makeReferenceSpatialIndex = (pxs, pys, n) => {
-    // Snapshot so callers can mutate pxs/pys without affecting the index.
-    const snapPxs = new Float32Array(n);
-    const snapPys = new Float32Array(n);
-    for (let i = 0; i < n; i++) { snapPxs[i] = pxs[i]; snapPys[i] = pys[i]; }
-    const snapN = n;
-    return {
-        findNearest(qx, qy, k, maxDistSq, outIndices, outDistSq) {
-            let count = 0;
-            for (let i = 0; i < snapN; i++) {
-                const dx = qx - snapPxs[i];
-                const dy = qy - snapPys[i];
-                const d = dx * dx + dy * dy;
-                if (d > maxDistSq) continue;
-                // Insertion sort into the bounded k-sized output buffer.
-                let at = count;
-                while (at > 0 && outDistSq[at - 1] > d) at--;
-                if (at < k) {
-                    const limit = count < k ? count : k - 1;
-                    for (let s = limit; s > at; s--) {
-                        outIndices[s] = outIndices[s - 1];
-                        outDistSq[s] = outDistSq[s - 1];
-                    }
-                    outIndices[at] = i;
-                    outDistSq[at] = d;
-                    if (count < k) count++;
-                }
+    const heatmapData = (() => {
+        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        const hours = ['0', '2', '4', '6', '8', '10', '12', '14', '16', '18', '20', '22'];
+        const out = [];
+        for (let d = 0; d < days.length; d++) {
+            for (let h = 0; h < hours.length; h++) {
+                // Synthetic load curve: peaks at noon and 8pm; weekends shifted later.
+                const isWeekend = d >= 5;
+                const t = +hours[h];
+                const morning = Math.exp(-Math.pow((t - 12) / 4, 2)) * 60;
+                const evening = Math.exp(-Math.pow((t - 20) / 3, 2)) * 80;
+                const shift = isWeekend ? 1.5 : 0;
+                const v = Math.max(0, morning + evening + shift * 10 + (Math.random() - 0.5) * 8);
+                out.push({day: days[d], hour: hours[h], sessions: Math.round(v)});
             }
-            return count;
-        },
-        dispose() { /* nothing to free in this reference impl */ },
-    };
-};
-
-// 2000-point dataset: imagine "session events" plotted by time-of-day vs
-// session-length, sized by interaction count.
-const DENSE_N = 2000;
-const denseBubbleData = (() => {
-    const out = [];
-    for (let i = 0; i < DENSE_N; i++) {
-        const tod = (i * 7919) % 24;          // hour 0..23 (pseudo-random spread)
-        const dur = 1 + (((i * 1481) % 100) * 0.6);
-        const interactions = 1 + ((i * 17) % 50);
-        out.push({ x: tod, y: dur, value: interactions });
-    }
-    return out;
-})();
-
-const denseBubbleChart = createBubbleChart({
-    data: denseBubbleData,
-    size: 'value',
-    minRadius: 2,
-    maxRadius: 8,
-    color: '--c-cyan',
-    fillOpacity: 0.45,
-    stroke: '--bg-card',
-    strokeWidth: 0.75,
-    spatialIndex: makeReferenceSpatialIndex,
-    spatialIndexThreshold: 500,    // demo: lower so we hit the indexed path
-    width: responsiveWidth('dense-bubble-chart', 800),
-    height: 380,
-    ...sharedOpts(),
-    grid: { y: true, x: false },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-        format: (info) => ({
-            header: 'hour ' + info.snapDomainX.toFixed(0) + ':00',
-        }),
-    },
-    legend: false,
-});
-denseBubbleChart.mount(document.getElementById('dense-bubble-chart'));
-ALL_CHARTS.push(denseBubbleChart);
-
-// ---------------------------------------------------------------------
-// SCATTER -- v1.2.0-alpha.1
-// ---------------------------------------------------------------------
-//
-// Bubble's simpler sibling: no size dimension, every marker the same pixel
-// radius. Same axis kernel; the spatial-index foundation from alpha.0
-// works here too (with k = 1 since scatter has no overlap concerns).
-// This demo plots a synthetic "two clusters" dataset to show that the
-// hit-test correctly picks the nearest point even at high density.
-
-const scatterData = (() => {
-    const out = [];
-    // Cluster A around (3, 7), cluster B around (8, 3).
-    for (let i = 0; i < 400; i++) {
-        const ax = 3 + (Math.random() - 0.5) * 2;
-        const ay = 7 + (Math.random() - 0.5) * 2;
-        out.push({ x: ax, y: ay, cluster: 'A' });
-    }
-    for (let i = 0; i < 400; i++) {
-        const bx = 8 + (Math.random() - 0.5) * 2;
-        const by = 3 + (Math.random() - 0.5) * 2;
-        out.push({ x: bx, y: by, cluster: 'B' });
-    }
-    return out;
-})();
-
-const scatterChart = createScatterChart({
-    data: scatterData,
-    markerSize: 3,
-    hitTolerance: 6,
-    color: '--c-primary',
-    fillOpacity: 0.55,
-    stroke: null,
-    strokeWidth: 0,
-    spatialIndex: makeReferenceSpatialIndex,   // reuse from dense-bubble
-    spatialIndexThreshold: 200,
-    width: responsiveWidth('scatter-chart', 800),
-    height: 380,
-    ...sharedOpts(),
-    grid: { x: true, y: true },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-        format: (info) => ({
-            header: 'point ' + info.snapIdx,
-        }),
-    },
-    legend: false,
-});
-scatterChart.mount(document.getElementById('scatter-chart'));
-ALL_CHARTS.push(scatterChart);
-
-// ---------------------------------------------------------------------
-// MULTI-SERIES BUBBLE -- v1.2.0-alpha.2 (global size domain)
-// ---------------------------------------------------------------------
-//
-// Three product lines, each plotted as its own bubble cloud. The size
-// dimension uses a GLOBAL domain across visible series (computed by the
-// bubble renderer's postExtract hook), so equal raw values render at
-// equal pixel radii regardless of which series they belong to. Toggle
-// any series via the legend -- the global domain recomputes from the
-// surviving series and the bubbles resize accordingly.
-
-const multiBubbleSeries = [
-    { name: 'Q1', color: '--c-primary', data: [
-        { x: 5, y: 22, value: 18 }, { x: 7, y: 38, value: 30 },
-        { x: 9, y: 55, value: 24 }, { x: 11, y: 41, value: 12 },
-        { x: 13, y: 28, value: 8 },  { x: 15, y: 19, value: 4 },
-    ]},
-    { name: 'Q2', color: '--c-emerald', data: [
-        { x: 4, y: 48, value: 28 }, { x: 6, y: 62, value: 40 },
-        { x: 8, y: 71, value: 35 }, { x: 10, y: 58, value: 20 },
-        { x: 12, y: 44, value: 14 }, { x: 14, y: 31, value: 9 },
-    ]},
-    { name: 'Q3', color: '--c-amber', data: [
-        { x: 5, y: 70, value: 38 }, { x: 7, y: 85, value: 50 },
-        { x: 9, y: 92, value: 44 }, { x: 11, y: 78, value: 26 },
-        { x: 13, y: 60, value: 18 }, { x: 15, y: 42, value: 11 },
-    ]},
-];
-
-const multiBubbleChart = createBubbleChart({
-    series: multiBubbleSeries,
-    minRadius: 4,
-    maxRadius: 28,
-    fillOpacity: 0.55,
-    stroke: '--bg-card',
-    strokeWidth: 1.5,
-    width: responsiveWidth('multi-bubble-chart', 800),
-    height: 400,
-    ...sharedOpts(),
-    grid: { y: true, x: false },
-    crosshair: { color: '--text-secondary', dash: [3, 4] },
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-multiBubbleChart.mount(document.getElementById('multi-bubble-chart'));
-ALL_CHARTS.push(multiBubbleChart);
-
-// ---------------------------------------------------------------------
-// PER-POINT COLOR BUBBLE -- v1.2.0-alpha.2 (colorKey)
-// ---------------------------------------------------------------------
-//
-// Same bubble renderer, but each row carries its own color via the
-// `colorKey` config. CSS-var values (`'--c-emerald'`) work alongside
-// raw colors -- the extract step resolves them to concrete CSS strings
-// once, so the per-frame draw stays fast.
-
-const colorBubbleData = [];
-{
-    const palette = ['--c-primary', '--c-emerald', '--c-amber', '--c-cyan', '#ef4444', '#a855f7'];
-    for (let i = 0; i < 60; i++) {
-        colorBubbleData.push({
-            x: Math.random() * 100,
-            y: Math.random() * 100,
-            value: 5 + Math.random() * 25,
-            tone: palette[i % palette.length],
-        });
-    }
-}
-
-const colorBubbleChart = createBubbleChart({
-    data: colorBubbleData,
-    size: 'value',
-    colorKey: 'tone',
-    minRadius: 4,
-    maxRadius: 22,
-    fillOpacity: 0.7,
-    stroke: '--bg-card',
-    strokeWidth: 1,
-    width: responsiveWidth('color-bubble-chart', 800),
-    height: 360,
-    ...sharedOpts(),
-    grid: { y: true, x: false },
-    tooltip: false,
-    legend: false,
-});
-colorBubbleChart.mount(document.getElementById('color-bubble-chart'));
-ALL_CHARTS.push(colorBubbleChart);
-
-// ---------------------------------------------------------------------
-// HEATMAP -- v1.2.0 (fourth kernel)
-// ---------------------------------------------------------------------
-//
-// "Active sessions by day-of-week and hour-of-day". 7 x 12 = 84 cells.
-// The grid kernel is brand-new: no axes / scales / interpolation /
-// decimation / markers / multi-series. Just two band scales, a flat
-// Float32Array for cell values, a Uint8 presentMask for sparse rows,
-// and a precomputed string array for cell colors so the draw loop
-// stays allocation-free. ~11 KB minified -- the smallest of the nine
-// chart bundles.
-//
-// v1.2.0 polish on display here:
-//   - showValues: true with valueLabelColor: 'auto' (default)
-//     -> per-cell NTSC luminance picks #000 / #fff so labels stay
-//        readable across the whole ramp.
-//   - row + column highlight stripes on hover (defaults on)
-//   - tooltipFormat customizes the readout to "Mon 8:00 -- 42 sessions"
-
-const heatmapData = (() => {
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const hours = ['0', '2', '4', '6', '8', '10', '12', '14', '16', '18', '20', '22'];
-    const out = [];
-    for (let d = 0; d < days.length; d++) {
-        for (let h = 0; h < hours.length; h++) {
-            // Synthetic load curve: peaks at noon and 8pm; weekends shifted later.
-            const isWeekend = d >= 5;
-            const t = +hours[h];
-            const morning = Math.exp(-Math.pow((t - 12) / 4, 2)) * 60;
-            const evening = Math.exp(-Math.pow((t - 20) / 3, 2)) * 80;
-            const shift = isWeekend ? 1.5 : 0;
-            const v = Math.max(0, morning + evening + shift * 10 + (Math.random() - 0.5) * 8);
-            out.push({ day: days[d], hour: hours[h], sessions: Math.round(v) });
         }
-    }
-    return out;
-})();
+        return out;
+    })();
 
-const heatmapChart = createHeatmap({
-    data: heatmapData,
-    x: 'hour',
-    y: 'day',
-    value: 'sessions',
-    colors: ['#f1f5f9', '#1e40af'],  // slate-100 -> blue-800
-    // v1.2.0: showValues + auto label contrast. Cells across the full
-    // ramp get readable text without any per-cell config.
-    showValues: true,
-    valueFormat: (v) => v > 0 ? String(v) : '',  // hide labels on near-zero cells
-    valueLabelFont: '10px ui-sans-serif, system-ui, sans-serif',
-    cellGap: 0.06,
-    // v1.2.0: row + column highlight stripes (defaults on; tinted to
-    // the theme's row/column highlight color).
-    rowColumnHighlightFill: 'rgba(15,23,42,0.12)',
-    highlightStroke: '--text-primary',
-    highlightStrokeWidth: 2,
-    width: responsiveWidth('heatmap-chart', 800),
-    height: 360,
-    margin: { top: 24, right: 32, bottom: 48, left: 64 },
-    labelColor: '--text-secondary',
-    labelFont: '12px ui-sans-serif, system-ui, sans-serif',
-    tooltipFormat: (info) => info.yLabel + ' ' + info.xLabel + ':00 -- ' + info.value + ' sessions',
-});
-heatmapChart.mount(document.getElementById('heatmap-chart'));
-ALL_CHARTS.push(heatmapChart);
+    const heatmapChart = createHeatmap({
+        data: heatmapData,
+        x: 'hour',
+        y: 'day',
+        value: 'sessions',
+        colors: ['#f1f5f9', '#1e40af'],  // slate-100 -> blue-800
+        // v1.2.0: showValues + auto label contrast. Cells across the full
+        // ramp get readable text without any per-cell config.
+        showValues: true,
+        valueFormat: (v) => v > 0 ? String(v) : '',  // hide labels on near-zero cells
+        valueLabelFont: '10px ui-sans-serif, system-ui, sans-serif',
+        cellGap: 0.06,
+        // v1.2.0: row + column highlight stripes (defaults on; tinted to
+        // the theme's row/column highlight color).
+        rowColumnHighlightFill: 'rgba(15,23,42,0.12)',
+        highlightStroke: '--text-primary',
+        highlightStrokeWidth: 2,
+        width: responsiveWidth('heatmap-chart', 800),
+        height: 360,
+        margin: {top: 24, right: 32, bottom: 48, left: 64},
+        labelColor: '--text-secondary',
+        labelFont: '12px ui-sans-serif, system-ui, sans-serif',
+        tooltipFormat: (info) => info.yLabel + ' ' + info.xLabel + ':00 -- ' + info.value + ' sessions',
+    });
+    heatmapChart.mount(document.getElementById('heatmap-chart'));
+    ALL_CHARTS.push(heatmapChart);
 
-// ---------------------------------------------------------------------
-// HEATMAP (QUANTILE) -- v1.2.0
-// ---------------------------------------------------------------------
-//
-// A second heatmap on the same dataset but with `colorScale: 'quantile'`.
-// Side-by-side this makes the binning behavior visible: the linear ramp
-// above lets a few hot spots dominate; this one splits cells by RANK
-// into N bins so each bin has the same number of cells. Useful when a
-// few outliers would otherwise wash out everything else.
+    // ---------------------------------------------------------------------
+    // HEATMAP (QUANTILE) -- v1.2.0
+    // ---------------------------------------------------------------------
+    //
+    // A second heatmap on the same dataset but with `colorScale: 'quantile'`.
+    // Side-by-side this makes the binning behavior visible: the linear ramp
+    // above lets a few hot spots dominate; this one splits cells by RANK
+    // into N bins so each bin has the same number of cells. Useful when a
+    // few outliers would otherwise wash out everything else.
 
-const heatmapQuantileChart = createHeatmap({
-    data: heatmapData,
-    x: 'hour',
-    y: 'day',
-    value: 'sessions',
-    colors: ['#f1f5f9', '#1e40af'],
-    colorScale: 'quantile',
-    colorBins: 6,
-    showValues: false,
-    cellGap: 0.06,
-    highlightStroke: '--text-primary',
-    highlightStrokeWidth: 2,
-    width: responsiveWidth('heatmap-quantile-chart', 800),
-    height: 360,
-    margin: { top: 24, right: 32, bottom: 48, left: 64 },
-    labelColor: '--text-secondary',
-    labelFont: '12px ui-sans-serif, system-ui, sans-serif',
-    tooltipFormat: (info) => info.yLabel + ' ' + info.xLabel + ':00 -- ' + info.value + ' sessions (bin)',
-});
-heatmapQuantileChart.mount(document.getElementById('heatmap-quantile-chart'));
-ALL_CHARTS.push(heatmapQuantileChart);
+    const heatmapQuantileChart = createHeatmap({
+        data: heatmapData,
+        x: 'hour',
+        y: 'day',
+        value: 'sessions',
+        colors: ['#f1f5f9', '#1e40af'],
+        colorScale: 'quantile',
+        colorBins: 6,
+        showValues: false,
+        cellGap: 0.06,
+        highlightStroke: '--text-primary',
+        highlightStrokeWidth: 2,
+        width: responsiveWidth('heatmap-quantile-chart', 800),
+        height: 360,
+        margin: {top: 24, right: 32, bottom: 48, left: 64},
+        labelColor: '--text-secondary',
+        labelFont: '12px ui-sans-serif, system-ui, sans-serif',
+        tooltipFormat: (info) => info.yLabel + ' ' + info.xLabel + ':00 -- ' + info.value + ' sessions (bin)',
+    });
+    heatmapQuantileChart.mount(document.getElementById('heatmap-quantile-chart'));
+    ALL_CHARTS.push(heatmapQuantileChart);
 
-// ---------------------------------------------------------------------
-// RADAR -- multi-axis polygon layout, separate kernel
-// ---------------------------------------------------------------------
-//
-// Three "model" comparison across six attributes. The shared [0, 100]
-// domain is typical for "scored" radar charts; each axis ranges
-// independently when domain is omitted (auto-fit).
+    // ---------------------------------------------------------------------
+    // LOG SCALE -- v1.4.0-alpha.0 (side-by-side comparison)
+    // ---------------------------------------------------------------------
+    //
+    // Same exponential dataset rendered linear vs log on the y-axis. The
+    // data: y = 10^(x/8), x from 0..40, so y spans 1..1e5. On linear the
+    // first 80% of x is invisible (compressed against the axis); on log
+    // it's a clean straight line because log(10^(x/8)) = x/8 -- linear in
+    // x.
 
-const radarSeries = signal([
-    { name: 'Model A', color: '--c-primary', values: [88, 72, 90, 65, 80, 75] },
-    { name: 'Model B', color: '--c-emerald', values: [70, 95, 65, 88, 92, 80] },
-    { name: 'Model C', color: '--c-amber',   values: [82, 60, 78, 95, 70, 92] },
-]);
+    const logData = (() => {
+        const out = new Array(41);
+        for (let x = 0; x <= 40; x++) out[x] = {x, y: Math.pow(10, x / 8)};
+        return out;
+    })();
 
-const radarChart = createRadarChart({
-    axes: ['Speed', 'Power', 'Range', 'Charging', 'Safety', 'Comfort'],
-    series: radarSeries,
-    domain: [0, 100],
-    gridTicks: 4,
-    fillOpacity: 0.18,
-    strokeWidth: 2,
-    axisColor: '--axis-color',
-    gridColor: '--grid-color',
-    labelColor: '--text-secondary',
-    font: '11px sans-serif',
-    width: responsiveWidth('radar-chart', 800),
-    height: 440,
-    tooltip: {
-        background: '--tooltip-bg',
-        border: '--tooltip-border',
-    },
-    legend: 'bottom',
-});
-radarChart.mount(document.getElementById('radar-chart'));
-ALL_CHARTS.push(radarChart);
+    const logLinearChart = createLineChart({
+        data: logData,
+        width: responsiveWidth('log-linear-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-amber',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    logLinearChart.mount(document.getElementById('log-linear-chart'));
+    ALL_CHARTS.push(logLinearChart);
 
-// ---------------------------------------------------------------------
-// HIGH DENSITY -- 100k points, decimation kicks in
-// ---------------------------------------------------------------------
+    const logLogChart = createLineChart({
+        data: logData,
+        yScale: {type: 'log'},                  // <-- the opt-in
+        width: responsiveWidth('log-log-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-emerald',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    logLogChart.mount(document.getElementById('log-log-chart'));
+    ALL_CHARTS.push(logLogChart);
 
-let DENSITY_N = 100_000;
-let DENSITY_NOISE = 0.6;
-const densityXs = new Float32Array(DENSITY_N);
-const densityYs = new Float32Array(DENSITY_N);
-const densityData = signal({ xs: densityXs, ys: densityYs });
+    // ---------------------------------------------------------------------
+    // PAN + ZOOM -- v1.4.0-alpha.2 (interactive view)
+    // ---------------------------------------------------------------------
+    //
+    // Two line charts sharing the same dataset, differing only in
+    // panBounds. The dataset is a synthetic noisy sine so panning + zooming
+    // reveals visible detail at every scale.
 
-const fillDensity = () => {
-    const seed = Math.random() * 1000;
-    for (let i = 0; i < DENSITY_N; i++) {
-        densityXs[i] = i;
-        densityYs[i] =
-            50 * Math.sin(i * 0.00005 + seed)
-            + 25 * Math.sin(i * 0.0007)
-            + DENSITY_NOISE * 20 * (Math.random() - 0.5);
-    }
-};
+    const panZoomData = (() => {
+        const out = new Array(500);
+        for (let i = 0; i < 500; i++) {
+            const x = i;
+            const y = Math.sin(i * 0.05) * 40
+                + Math.sin(i * 0.013) * 20
+                + Math.cos(i * 0.31) * 6;
+            out[i] = {x, y};
+        }
+        return out;
+    })();
 
-fillDensity();
+    const _makePanZoomChart = (containerId, panBoundsMode) => createLineChart({
+        data: panZoomData,
+        pan: true,
+        zoom: true,
+        panBounds: panBoundsMode,
+        zoomMin: 0.001,                       // can zoom in to ~0.1% of data span
+        zoomMax: 100,                         // can zoom out to 100x data span
+        width: responsiveWidth(containerId, 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: panBoundsMode === 'data' ? '--c-primary' : '--c-amber',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
 
-const densityChart = createLineChart({
-    data: densityData,
-    color: '--c-primary',
-    lineWidth: 1,
-    width: responsiveWidth('density-chart', 1000),
-    height: 420,
-    ...sharedOpts(),
-    yScale: { nice: true },
-    crosshair: { color: '--text-secondary', dash: [3, 4] },
-    tooltip: false,
-    legend: false,
-});
-densityChart.mount(document.getElementById('density-chart'));
-ALL_CHARTS.push(densityChart);
+    const panzoomBoundedChart = _makePanZoomChart('panzoom-bounded-chart', 'data');
+    panzoomBoundedChart.mount(document.getElementById('panzoom-bounded-chart'));
+    ALL_CHARTS.push(panzoomBoundedChart);
 
-// Density-card DOM refs hoisted: regenerate() runs once per click but
-// the buttons fire multiple lookups (d-time, d-samples) per invocation.
-// Same hoist pattern for the click handlers themselves.
-const densityTimeEl    = document.getElementById('d-time');
-const densitySamplesEl = document.getElementById('d-samples');
-const densityRegenBtn  = document.getElementById('d-regen');
-const densityNoiseUp   = document.getElementById('d-noise-up');
-const densityNoiseDown = document.getElementById('d-noise-down');
+    const panzoomFreeChart = _makePanZoomChart('panzoom-free-chart', 'free');
+    panzoomFreeChart.mount(document.getElementById('panzoom-free-chart'));
+    ALL_CHARTS.push(panzoomFreeChart);
 
-const regenerate = () => {
-    const t0 = performance.now();
+    // Reset buttons + status readouts. Both wired reactively via effect()
+    // so the status text follows view changes from any source (drag, wheel,
+    // or programmatic setView calls). Cached DOM refs at module init per
+    // project demo conventions.
+    const $panzoomBoundedStatus = document.getElementById('panzoom-bounded-status');
+    const $panzoomFreeStatus = document.getElementById('panzoom-free-status');
+    const $panzoomBoundedReset = document.getElementById('panzoom-bounded-reset');
+    const $panzoomFreeReset = document.getElementById('panzoom-free-reset');
+
+    const _fmt = (n) => n == null ? 'null' : n.toFixed(1);
+    const _formatViewStatus = (view) => {
+        if (view == null) return 'view: null (following data)';
+        return 'view: x=[' + _fmt(view.xMin) + ', ' + _fmt(view.xMax)
+            + '] y=[' + _fmt(view.yMin) + ', ' + _fmt(view.yMax) + ']';
+    };
+
+    effect(() => {
+        $panzoomBoundedStatus.textContent = _formatViewStatus(panzoomBoundedChart.view());
+    });
+    effect(() => {
+        $panzoomFreeStatus.textContent = _formatViewStatus(panzoomFreeChart.view());
+    });
+
+    $panzoomBoundedReset.addEventListener('click', () => panzoomBoundedChart.resetView());
+    $panzoomFreeReset.addEventListener('click', () => panzoomFreeChart.resetView());
+
+    // ---------------------------------------------------------------------
+    // BRUSHING + cross-chart linking -- v1.4.0-alpha.3
+    // ---------------------------------------------------------------------
+    //
+    // Source chart accepts shift+drag; chart.brush emits a BrushSelection
+    // signal. Two follower charts subscribe via effect():
+    //   1) bar chart -- count of brushed points bucketed into 10 x-bins
+    //   2) scatter -- highlight ONLY brushed points (size 4 for selected,
+    //                 size 1.2 for unselected)
+    //
+    // The brush signal updates on every pointermove, so the followers
+    // update live during the drag.
+
+    const brushSourceData = (() => {
+        const out = new Array(300);
+        for (let i = 0; i < 300; i++) {
+            const x = i;
+            const y = Math.sin(i * 0.04) * 50 + Math.cos(i * 0.11) * 20 + (Math.random() - 0.5) * 8;
+            out[i] = {x, y};
+        }
+        return out;
+    })();
+
+    const brushSourceChart = createLineChart({
+        data: brushSourceData,
+        brush: true,
+        brushStyle: {
+            fill: 'rgba(255, 153, 51, 0.18)',
+            stroke: 'rgba(255, 153, 51, 0.85)',
+            lineDash: [5, 4],
+            lineWidth: 1.5,
+        },
+        width: responsiveWidth('brush-source-chart', 760),
+        height: 260,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-emerald',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    brushSourceChart.mount(document.getElementById('brush-source-chart'));
+    ALL_CHARTS.push(brushSourceChart);
+
+    // Follower 1: bar chart showing count per x-bin within the brush.
+    // Built from a signal that effect() rewrites when the brush changes.
+    const brushBarsData = signal([]);
+
+    const _recomputeBarsData = () => {
+        const b = brushSourceChart.brush.peek();
+        if (!b) {
+            brushBarsData.set([]);
+            return;
+        }
+        const buckets = 10;
+        const counts = new Array(buckets).fill(0);
+        const xRange = b.xMax - b.xMin;
+        if (xRange <= 0) {
+            brushBarsData.set([]);
+            return;
+        }
+        for (let i = 0; i < brushSourceData.length; i++) {
+            const x = brushSourceData[i].x, y = brushSourceData[i].y;
+            if (x < b.xMin || x > b.xMax || y < b.yMin || y > b.yMax) continue;
+            let bin = Math.floor((x - b.xMin) / xRange * buckets);
+            if (bin >= buckets) bin = buckets - 1;
+            counts[bin]++;
+        }
+        const rows = new Array(buckets);
+        for (let i = 0; i < buckets; i++) {
+            rows[i] = {x: 'b' + i, y: counts[i]};
+        }
+        brushBarsData.set(rows);
+    };
+
+    effect(() => {
+        brushSourceChart.brush();          // track
+        _recomputeBarsData();
+    });
+
+    const brushFollowerBars = createBarChart({
+        data: () => brushBarsData(),
+        width: responsiveWidth('brush-follower-bars', 380),
+        height: 220,
+        margin: {top: 16, right: 16, bottom: 32, left: 40},
+        color: '--c-amber',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+        baseline: 0,
+    });
+    brushFollowerBars.mount(document.getElementById('brush-follower-bars'));
+    ALL_CHARTS.push(brushFollowerBars);
+
+    // Follower 2: scatter where brushed points are larger + colored.
+    // Two series so we get two visual styles; the "highlighted" series
+    // is the subset of points whose ids are in the brush.
+    const brushUnselected = signal(brushSourceData);
+    const brushSelected = signal([]);
+
+    effect(() => {
+        const b = brushSourceChart.brush();
+        if (!b || !b.ids || b.ids.length === 0) {
+            brushUnselected.set(brushSourceData);
+            brushSelected.set([]);
+            return;
+        }
+        // Build the highlighted set from ids.
+        const sel = new Array(b.ids.length);
+        for (let i = 0; i < b.ids.length; i++) sel[i] = brushSourceData[b.ids[i]];
+        brushSelected.set(sel);
+        // For visual contrast, the unselected layer shows everything
+        // (the highlighted points overlay on top with the brighter marker).
+        brushUnselected.set(brushSourceData);
+    });
+
+    const brushFollowerScatter = createScatterChart({
+        series: [
+            {
+                name: 'all',
+                data: () => brushUnselected(),
+                color: 'rgba(120, 120, 120, 0.35)',
+                markerSize: 2,
+            },
+            {
+                name: 'brushed',
+                data: () => brushSelected(),
+                color: '--c-emerald',
+                markerSize: 5,
+            },
+        ],
+        width: responsiveWidth('brush-follower-scatter', 380),
+        height: 220,
+        margin: {top: 16, right: 16, bottom: 32, left: 40},
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    brushFollowerScatter.mount(document.getElementById('brush-follower-scatter'));
+    ALL_CHARTS.push(brushFollowerScatter);
+
+    // Status readout + clear button.
+    const $brushStatus = document.getElementById('brush-status');
+    const $brushClear = document.getElementById('brush-clear');
+
+    effect(() => {
+        const b = brushSourceChart.brush();
+        if (!b) {
+            $brushStatus.textContent = 'brush: null';
+            return;
+        }
+        const n = b.ids ? b.ids.length : 0;
+        $brushStatus.textContent = 'brush: x=[' + b.xMin.toFixed(1) + ', ' + b.xMax.toFixed(1) +
+            '] y=[' + b.yMin.toFixed(1) + ', ' + b.yMax.toFixed(1) +
+            '] ids=' + n + ' points';
+    });
+
+    $brushClear.addEventListener('click', () => brushSourceChart.clearBrush());
+
+    // ---------------------------------------------------------------------
+    // RADAR -- multi-axis polygon layout, separate kernel
+    // ---------------------------------------------------------------------
+    //
+    // Three "model" comparison across six attributes. The shared [0, 100]
+    // domain is typical for "scored" radar charts; each axis ranges
+    // independently when domain is omitted (auto-fit).
+
+    const radarSeries = signal([
+        {name: 'Model A', color: '--c-primary', values: [88, 72, 90, 65, 80, 75]},
+        {name: 'Model B', color: '--c-emerald', values: [70, 95, 65, 88, 92, 80]},
+        {name: 'Model C', color: '--c-amber', values: [82, 60, 78, 95, 70, 92]},
+    ]);
+
+    const radarChart = createRadarChart({
+        axes: ['Speed', 'Power', 'Range', 'Charging', 'Safety', 'Comfort'],
+        series: radarSeries,
+        domain: [0, 100],
+        gridTicks: 4,
+        fillOpacity: 0.18,
+        strokeWidth: 2,
+        axisColor: '--axis-color',
+        gridColor: '--grid-color',
+        labelColor: '--text-secondary',
+        font: '11px sans-serif',
+        width: responsiveWidth('radar-chart', 800),
+        height: 440,
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: 'bottom',
+    });
+    radarChart.mount(document.getElementById('radar-chart'));
+    ALL_CHARTS.push(radarChart);
+
+    // ---------------------------------------------------------------------
+    // HIGH DENSITY -- 100k points, decimation kicks in
+    // ---------------------------------------------------------------------
+
+    let DENSITY_N = 100_000;
+    let DENSITY_NOISE = 0.6;
+    const densityXs = new Float32Array(DENSITY_N);
+    const densityYs = new Float32Array(DENSITY_N);
+    const densityData = signal({xs: densityXs, ys: densityYs});
+
+    const fillDensity = () => {
+        const seed = Math.random() * 1000;
+        for (let i = 0; i < DENSITY_N; i++) {
+            densityXs[i] = i;
+            densityYs[i] =
+                50 * Math.sin(i * 0.00005 + seed)
+                + 25 * Math.sin(i * 0.0007)
+                + DENSITY_NOISE * 20 * (Math.random() - 0.5);
+        }
+    };
+
     fillDensity();
-    densityData.set({ xs: densityXs, ys: densityYs });
-    const dt = performance.now() - t0;
-    densityTimeEl.textContent = dt.toFixed(1);
-    densitySamplesEl.textContent = DENSITY_N.toLocaleString();
-};
 
-densityRegenBtn.addEventListener('click', regenerate);
-densityNoiseUp.addEventListener('click', () => {
-    DENSITY_NOISE = Math.min(3, DENSITY_NOISE + 0.3);
-    regenerate();
-});
-densityNoiseDown.addEventListener('click', () => {
-    DENSITY_NOISE = Math.max(0, DENSITY_NOISE - 0.3);
-    regenerate();
-});
+    const densityChart = createLineChart({
+        data: densityData,
+        color: '--c-primary',
+        lineWidth: 1,
+        width: responsiveWidth('density-chart', 1000),
+        height: 420,
+        ...SHARED_OPTS,
+        yScale: {nice: true},
+        crosshair: {color: '--text-secondary', dash: [3, 4]},
+        tooltip: false,
+        legend: false,
+    });
+    densityChart.mount(document.getElementById('density-chart'));
+    ALL_CHARTS.push(densityChart);
 
-// Trigger one initial regenerate so the metrics populate
-setTimeout(regenerate, 100);
+    // Density-card DOM refs hoisted: regenerate() runs once per click but
+    // the buttons fire multiple lookups (d-time, d-samples) per invocation.
+    // Same hoist pattern for the click handlers themselves.
+    const densityTimeEl = document.getElementById('d-time');
+    const densitySamplesEl = document.getElementById('d-samples');
+    const densityRegenBtn = document.getElementById('d-regen');
+    const densityNoiseUp = document.getElementById('d-noise-up');
+    const densityNoiseDown = document.getElementById('d-noise-down');
 
-// ---------------------------------------------------------------------
-// SVG EXPORT WIRING -- v1.3.0
-// ---------------------------------------------------------------------
-//
-// Each Download button calls `chart.exportSVG()` on the matching chart
-// and triggers a browser download via an object URL. The inline preview
-// button shows the SVG markup AND the rendered SVG side-by-side so you
-// can verify the output is well-formed.
+    const regenerate = () => {
+        const t0 = performance.now();
+        fillDensity();
+        densityData.set({xs: densityXs, ys: densityYs});
+        const dt = performance.now() - t0;
+        densityTimeEl.textContent = dt.toFixed(1);
+        densitySamplesEl.textContent = DENSITY_N.toLocaleString();
+    };
 
-const downloadSVG = (svgString, filename) => {
-    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    // Defer revoke so Safari/Firefox have a chance to start the download
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-};
+    densityRegenBtn.addEventListener('click', regenerate);
+    densityNoiseUp.addEventListener('click', () => {
+        DENSITY_NOISE = Math.min(3, DENSITY_NOISE + 0.3);
+        regenerate();
+    });
+    densityNoiseDown.addEventListener('click', () => {
+        DENSITY_NOISE = Math.max(0, DENSITY_NOISE - 0.3);
+        regenerate();
+    });
 
-document.getElementById('svg-export-line').addEventListener('click', () => {
-    downloadSVG(heroChart.exportSVG(), 'lite-charts-line.svg');
-});
-document.getElementById('svg-export-bar').addEventListener('click', () => {
-    downloadSVG(barChart.exportSVG(), 'lite-charts-bar.svg');
-});
-document.getElementById('svg-export-pie').addEventListener('click', () => {
-    downloadSVG(pieChart.exportSVG(), 'lite-charts-pie.svg');
-});
-document.getElementById('svg-export-radar').addEventListener('click', () => {
-    downloadSVG(radarChart.exportSVG(), 'lite-charts-radar.svg');
-});
-document.getElementById('svg-export-heatmap').addEventListener('click', () => {
-    downloadSVG(heatmapChart.exportSVG(), 'lite-charts-heatmap.svg');
-});
+    // Trigger one initial regenerate so the metrics populate
+    setTimeout(regenerate, 100);
 
-const previewArea = document.getElementById('svg-preview-area');
-const sourceArea = document.getElementById('svg-source-area');
-const previewBtn = document.getElementById('svg-preview-toggle');
-let previewShown = false;
-previewBtn.addEventListener('click', () => {
-    previewShown = !previewShown;
-    if (previewShown) {
-        const svg = heatmapChart.exportSVG({ background: '#ffffff' });
-        previewArea.innerHTML = svg;
-        previewArea.style.display = 'block';
-        sourceArea.textContent = svg;
-        sourceArea.style.display = 'block';
-        previewBtn.textContent = 'Hide preview';
-    } else {
-        previewArea.style.display = 'none';
-        sourceArea.style.display = 'none';
-        previewBtn.textContent = 'Preview heatmap inline';
-    }
-});
+    // ---------------------------------------------------------------------
+    // SVG EXPORT WIRING -- v1.3.0
+    // ---------------------------------------------------------------------
+    //
+    // Each Download button calls `chart.exportSVG()` on the matching chart
+    // and triggers a browser download via an object URL. The inline preview
+    // button shows the SVG markup AND the rendered SVG side-by-side so you
+    // can verify the output is well-formed.
+
+    const downloadSVG = (svgString, filename) => {
+        const blob = new Blob([svgString], {type: 'image/svg+xml;charset=utf-8'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Defer revoke so Safari/Firefox have a chance to start the download
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+
+    document.getElementById('svg-export-line').addEventListener('click', () => {
+        downloadSVG(heroChart.exportSVG(), 'lite-charts-line.svg');
+    });
+    document.getElementById('svg-export-bar').addEventListener('click', () => {
+        downloadSVG(barChart.exportSVG(), 'lite-charts-bar.svg');
+    });
+    document.getElementById('svg-export-pie').addEventListener('click', () => {
+        downloadSVG(pieChart.exportSVG(), 'lite-charts-pie.svg');
+    });
+    document.getElementById('svg-export-radar').addEventListener('click', () => {
+        downloadSVG(radarChart.exportSVG(), 'lite-charts-radar.svg');
+    });
+    document.getElementById('svg-export-heatmap').addEventListener('click', () => {
+        downloadSVG(heatmapChart.exportSVG(), 'lite-charts-heatmap.svg');
+    });
+
+    const previewArea = document.getElementById('svg-preview-area');
+    const sourceArea = document.getElementById('svg-source-area');
+    const previewBtn = document.getElementById('svg-preview-toggle');
+    let previewShown = false;
+    previewBtn.addEventListener('click', () => {
+        previewShown = !previewShown;
+        if (previewShown) {
+            const svg = heatmapChart.exportSVG({background: '#ffffff'});
+            previewArea.innerHTML = svg;
+            previewArea.style.display = 'block';
+            sourceArea.textContent = svg;
+            sourceArea.style.display = 'block';
+            previewBtn.textContent = 'Hide preview';
+        } else {
+            previewArea.style.display = 'none';
+            sourceArea.style.display = 'none';
+            previewBtn.textContent = 'Preview heatmap inline';
+        }
+    });
 
 </script>
 

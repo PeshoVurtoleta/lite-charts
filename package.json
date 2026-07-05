@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-charts",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "Reactive, zero-GC chart library. Signal-native data, scales, and dimensions; 60fps at 100k points; zero allocations in steady-state render. Built on @zakkster/lite-scene.",
   "type": "module",
   "main": "./Charts.js",
@@ -16,8 +16,8 @@
   },
   "files": [
     "Charts.js",
-    "CHANGELOG.md",
     "Charts.d.ts",
+    "CHANGELOG.md",
     "README.md",
     "ROADMAP.md",
     "llms.txt",

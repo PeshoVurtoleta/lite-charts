@@ -106,6 +106,109 @@ export interface CrosshairConfig {
     dash?: number[];
 }
 
+// ---------------------------------------------------------------------------
+// View (v1.4.0-alpha.2 -- pan + zoom)
+// ---------------------------------------------------------------------------
+
+/**
+ * The view domain currently rendered by the chart. Each field may be
+ * `null` (or omitted on `setView`) to fall back to the data-derived
+ * domain on that axis. Shape is intentionally symmetric with
+ * `lite-camera-max`'s camera signal so the same value drops into a
+ * lite-gl `project()` function unchanged.
+ */
+export interface View {
+    xMin: number | null;
+    xMax: number | null;
+    yMin: number | null;
+    yMax: number | null;
+}
+
+/**
+ * Pan/zoom configuration (v1.4.0-alpha.2). Both default to `false`;
+ * neither set = no view signal, no listeners, zero cost. Setting EITHER
+ * enables the view signal and the `chart.view` / `setView` / `resetView`
+ * facade.
+ */
+export interface PanZoomConfig {
+    /** Enable mouse-drag-to-pan. Default false. */
+    pan?: boolean;
+    /** Enable wheel-to-zoom. Default false. */
+    zoom?: boolean;
+    /**
+     * Bounds policy for both pan and zoom.
+     * - `'data'` (default): view shifts to stay within the data domain.
+     *   If a zoom would make the view wider than data, it snaps to the
+     *   full domain.
+     * - `'free'`: any view allowed (extend past data, invert axes, etc.).
+     */
+    panBounds?: 'data' | 'free';
+    /**
+     * Minimum zoom factor expressed as a ratio of visible-span to
+     * data-span. `0.01` = zoom in until the visible range is 1% of the
+     * data range. Default `0.01`.
+     */
+    zoomMin?: number;
+    /**
+     * Maximum zoom factor expressed as a ratio of visible-span to
+     * data-span. `1000` = zoom out until the visible range is 1000x
+     * the data range. Default `1000`.
+     */
+    zoomMax?: number;
+    /**
+     * Wheel ratio per tick. `1.15` = each wheel notch zooms by 15%.
+     * Default `1.15`. Clamped to `>= 1.001`.
+     */
+    zoomStep?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Brush (v1.4.0-alpha.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Brush selection. Data-space bounds + indices into the primary series
+ * (the first series in `series[]`, or the single-series `data` when
+ * that shorthand is used). `ids` is `null` when the brush was set
+ * programmatically via `chart.setBrush()` (the API doesn't recompute
+ * ids -- the user controls the value); when set by a shift+drag
+ * gesture it's freshly allocated each commit.
+ */
+export interface BrushSelection {
+    xMin: number;
+    xMax: number;
+    yMin: number;
+    yMax: number;
+    ids: number[] | null;
+}
+
+/**
+ * Brush visual style. Defaults: translucent accent fill with a dashed
+ * accent outline. Set `lineDash: []` for a solid outline.
+ */
+export interface BrushStyleConfig {
+    /** Fill color for the brush rect. Default 'rgba(99, 102, 241, 0.15)'. */
+    fill?: string;
+    /** Stroke color for the brush outline. Default 'rgba(99, 102, 241, 0.7)'. */
+    stroke?: string;
+    /** Stroke dash pattern. Default [4, 4]. Empty array for solid. */
+    lineDash?: number[];
+    /** Stroke width. Default 1. */
+    lineWidth?: number;
+}
+
+/**
+ * Brush configuration (v1.4.0-alpha.3). Default `false`; setting
+ * `brush: true` enables shift+drag-to-select on the chart. Coexists
+ * with pan/zoom -- no modifier routes to pan, shift routes to brush.
+ */
+export interface BrushConfig {
+    /** Enable shift+drag brushing. Default false. */
+    brush?: boolean;
+    /** Visual style for the brush rect overlay. */
+    brushStyle?: BrushStyleConfig;
+}
+
 export type InterpolationMode =
     | 'linear'
     | 'step'
@@ -188,7 +291,7 @@ export interface Signal<T> {
     update(fn: (v: T) => T): void;
 }
 
-export interface LineChartConfig {
+export interface LineChartConfig extends PanZoomConfig, BrushConfig {
     /** Single-series shorthand. Either `data` or `series` is required. */
     data?: DataAccessor;
     /** Multi-series form. */
@@ -314,6 +417,44 @@ export interface Chart {
         set(v: CrosshairState): void;
         subscribe(fn: (s: CrosshairState) => void): () => void;
     };
+    /**
+     * View signal (v1.4.0-alpha.2). Read returns the currently-set view
+     * or `null` (view follows the data domain). `.peek()` reads without
+     * subscribing, `.set(v)` writes (null clears), `.reset()` clears.
+     * Shape `{ xMin, xMax, yMin, yMax }` is intentionally symmetric with
+     * `lite-camera-max`'s camera signal so the same value drops into a
+     * lite-gl `project()` function unchanged when the lite-charts-gl
+     * companion package lands. Any field may be `null` to fall back to
+     * the data-derived domain on that axis. Set/reset throw if neither
+     * `pan` nor `zoom` was enabled at construction.
+     */
+    readonly view: (() => View | null) & {
+        peek(): View | null;
+        set(v: View | null): void;
+        reset(): void;
+    };
+    /** Alias for `chart.view.set(v)`. Throws if pan/zoom not enabled. */
+    readonly setView: (v: View | null) => void;
+    /** Alias for `chart.view.reset()`. Throws if pan/zoom not enabled. */
+    readonly resetView: () => void;
+    /**
+     * Brush facade (v1.4.0-alpha.3). `chart.brush()` reads (tracked),
+     * `.peek()` reads untracked, `.set(v)` writes, `.clear()` clears.
+     * `chart.setBrush(v)` and `chart.clearBrush()` are imperative
+     * aliases. Set/clear throw if `brush: true` was not in config.
+     * Programmatic `setBrush()` does NOT recompute ids -- pass `ids`
+     * yourself if you want them; gesture-driven brushes always
+     * populate ids from the primary series.
+     */
+    readonly brush: (() => BrushSelection | null) & {
+        peek(): BrushSelection | null;
+        set(v: BrushSelection | null): void;
+        clear(): void;
+    };
+    /** Alias for `chart.brush.set(v)`. Throws if `brush: true` not in config. */
+    readonly setBrush: (v: BrushSelection | null) => void;
+    /** Alias for `chart.brush.clear()`. Throws if `brush: true` not in config. */
+    readonly clearBrush: () => void;
     /** One signal per series. Read in a reactive context to bind external UI; write to toggle. */
     readonly seriesVisibility: Signal<boolean>[];
     /** The legend DOM element, or null if legend was disabled / mounted into a bare canvas. */
@@ -417,7 +558,7 @@ export interface BubbleSeriesInput {
     fillOpacity?: number;
 }
 
-export interface BubbleChartConfig {
+export interface BubbleChartConfig extends PanZoomConfig, BrushConfig {
     /** Single-series data shape. */
     data?: Array<{ [k: string]: unknown }> | (() => Array<{ [k: string]: unknown }>);
     /**
@@ -464,7 +605,7 @@ export interface BubbleChartConfig {
     margin?: { top?: number; right?: number; bottom?: number; left?: number };
 
     xScale?: { type?: 'linear' | 'time'; domain?: [number, number] };
-    yScale?: { type?: 'linear'; domain?: [number, number]; nice?: boolean; zero?: boolean };
+    yScale?: { type?: 'linear' | 'log'; domain?: [number, number]; nice?: boolean; zero?: boolean };
 
     grid?: boolean | { x?: boolean; y?: boolean; color?: string };
 
@@ -736,7 +877,7 @@ export function createDonutChart(config: DonutChartConfig): PolarChart;
 // SAME pixel radius (`markerSize`); the hit-test uses a configurable
 // tolerance disc around each point.
 
-export interface ScatterChartConfig {
+export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
     /** Single-series data shape. */
     data?: Array<{ [k: string]: unknown }> | (() => Array<{ [k: string]: unknown }>);
     /** Multi-series shape. Each series gets its own data + color. */
@@ -768,7 +909,7 @@ export interface ScatterChartConfig {
     margin?: { top?: number; right?: number; bottom?: number; left?: number };
 
     xScale?: { type?: 'linear' | 'time'; domain?: [number, number] };
-    yScale?: { type?: 'linear'; domain?: [number, number]; nice?: boolean; zero?: boolean };
+    yScale?: { type?: 'linear' | 'log'; domain?: [number, number]; nice?: boolean; zero?: boolean };
 
     grid?: boolean | { x?: boolean; y?: boolean; color?: string };
     crosshair?: false | { color?: string; dash?: [number, number] };
