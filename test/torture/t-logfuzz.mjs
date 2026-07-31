@@ -1,34 +1,36 @@
 /**
  * T-LOG -- the log-domain fuzzer. The C0 regression net.
  *
- * *** THIS TIER IS RED ON 1.4.0 BY DESIGN. It is NOT wired into `npm run torture`
- * (that gate must print "ok"); it runs via `npm run torture:logfuzz`. Per the
- * roadmap it must FAIL on 1.4.0 and PASS on 1.4.1 (finding C0 / LC-01..LC-04). ***
- *
- * On 1.4.0, `_applyPan` / `_applyZoom` do LINEAR arithmetic on the data domain
- * even for a log axis (see the comment above `_applyPan` in Charts.js), and
- * `updateLogScale` CLAMPS a non-positive domain to 1e-10 instead of throwing. So
- * a single drag or zoom notch on a log axis can walk a bound to zero or negative:
+ * HISTORY: this tier is RED on 1.4.0 and GREEN on 1.4.1. On 1.4.0 the log-axis
+ * pan/zoom handler used the LINEAR `_applyPan` / `_applyZoom` (the only pair that
+ * existed) and `updateLogScale` clamped a non-positive domain to 1e-10 instead of
+ * throwing, so a single drag or zoom notch could walk a bound to zero or negative:
  *
  *     view {yMin: 1, yMax: 1000}, plotH 400
  *       drag  +50px  -> yMin 125.875   (log-correct: 2.371)   53x off
- *       drag -500px  -> yMin -1247.75  -> Math.log10 is NaN
+ *       drag -500px  -> yMin -1247.75  -> Math.log is NaN
  *       zoom  1.25x  -> yMin -123.875  -> one notch, negative domain
  *
- * This fuzzer drives seeded random pan/zoom gestures against the SAME math the
- * chart's pointer handlers call, and after every gesture asserts the resulting
- * y-domain is positive and finite -- the property a log axis must preserve. On
- * 1.4.0 it fails within a handful of gestures and prints the offending seed +
- * gesture so C0 can replay it; after C0 wires the log-aware branch it passes.
+ * C0 (v1.4.1) added `_applyPanLog` / `_applyZoomLog` (log-space math, per-axis)
+ * plus a log-axis floor, and made `updateLogScale` fail closed. This fuzzer drives
+ * seeded random pan/zoom gestures against those log helpers -- the SAME math the
+ * chart's log-axis handler now calls -- and after every gesture asserts the
+ * y-domain stays positive and finite. It passes on 1.4.1 and is wired into the
+ * green `npm run torture` gate (as tier T-LOG); it is ALSO runnable standalone via
+ * `npm run torture:logfuzz` for the historical before/after check.
  *
- * Exit code: 0 = the invariant held (C0 has landed). Non-zero = a gesture
- * produced an invalid log domain (expected on 1.4.0). The runner reports which.
+ * If the log helpers are ever removed (a C0 revert), `fuzz()` returns `ok:false`
+ * with a `reason`, so both the gate tier and the standalone runner go red again.
  */
 
 import { _testHelpers } from '../../Charts.js';
-import { makePrng, SEED } from './harness.mjs';
+import { makePrng, SEED, die } from './harness.mjs';
 
-const { _applyPan, _applyZoom } = _testHelpers;
+// C0 wired the log-aware branch; the chart's log-axis pan/zoom handler now calls
+// these. Before C0 this file imported the LINEAR `_applyPan`/`_applyZoom` (the
+// only pair that existed) and went red within a gesture -- that was the finding.
+const { _applyPanLog, _applyZoomLog } = _testHelpers;
+const HAS_LOG_MATH = typeof _applyPanLog === 'function' && typeof _applyZoomLog === 'function';
 
 /** The invariant a log y-axis must preserve after any gesture. */
 const positiveFinite = (lo, hi) =>
@@ -39,6 +41,14 @@ const positiveFinite = (lo, hi) =>
  * produced a non-positive / non-finite log domain (the LC-01..LC-04 bug).
  */
 export function fuzz(iterations) {
+    if (!HAS_LOG_MATH) {
+        return {
+            ok: false, gesture: 'n/a', seed: SEED, iteration: -1,
+            view: { yMin: NaN, yMax: NaN },
+            reason: 'C0 has not landed: _applyPanLog / _applyZoomLog are not exported. ' +
+                'On 1.4.0 the log-axis handler uses linear math (LC-01..04) and this net is red.',
+        };
+    }
     const prng = makePrng(SEED);
     const frnd = (lo, hi) => lo + (prng() / 0xffffffff) * (hi - lo);
     const N = iterations || 10000;
@@ -54,19 +64,21 @@ export function fuzz(iterations) {
     // cross zero; the linear-space 1.4.0 math can, within a few gestures.
     let view = { xMin: 0, xMax: 1000, yMin: 1, yMax: 1000 };
 
+    // Linear x, log y -- the mixed case, which is where an axis-coupled shortcut
+    // fails. xLog=false / yLog=true.
     for (let i = 0; i < N; i++) {
         const kind = prng() % 2;
         let gesture;
         if (kind === 0) {
             const dx = frnd(-plotW, plotW);
             const dy = frnd(-plotH, plotH);
-            view = _applyPan(view, dx, dy, plotW, plotH);
+            view = _applyPanLog(view, dx, dy, plotW, plotH, false, true);
             gesture = `pan dx=${dx.toFixed(1)} dy=${dy.toFixed(1)}`;
         } else {
             const ax = frnd(plotLeft, plotLeft + plotW);
             const ay = frnd(plotTop, plotTop + plotH);
             const z = frnd(0.5, 2);
-            view = _applyZoom(view, ax, ay, plotLeft, plotTop, plotW, plotH, z, z);
+            view = _applyZoomLog(view, ax, ay, plotLeft, plotTop, plotW, plotH, z, z, false, true);
             gesture = `zoom ax=${ax.toFixed(1)} ay=${ay.toFixed(1)} z=${z.toFixed(3)}`;
         }
 
@@ -75,4 +87,15 @@ export function fuzz(iterations) {
         }
     }
     return { ok: true, seed: SEED, iterations: N };
+}
+
+/** Tier entry for the green gate: fail closed if any gesture invalidates the domain. */
+export function run() {
+    const res = fuzz(10000);
+    if (!res.ok) {
+        die('T-LOG: log domain went invalid at gesture ' + res.iteration +
+            ' (' + res.gesture + ') -> yMin=' + res.view.yMin + ' yMax=' + res.view.yMax +
+            (res.reason ? ' -- ' + res.reason : '') +
+            '\n  replay: TORTURE_SEED=' + res.seed + ' node --expose-gc test/torture-logfuzz.mjs');
+    }
 }

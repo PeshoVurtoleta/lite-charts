@@ -19,6 +19,7 @@ const {
     makeLinearScale, updateLinearScale,
     makeLogScale, updateLogScale,
     decimateMinMax, _clampToBounds, _applyPan, _applyZoom, niceYDomain,
+    _applyPanLog, _applyZoomLog,
 } = _testHelpers;
 
 const REL = 1e-9;   // relative epsilon for float round-trips
@@ -221,6 +222,85 @@ export function run() {
             const [zlo, zhi] = niceYDomain(lo, hi, { zero: true });
             if (lo > 0) check(zlo <= 0 + 1e-9, () => `T0.nice-zero: positive range did not include 0 seed=${SEED}`);
             if (hi < 0) check(zhi >= 0 - 1e-9, () => `T0.nice-zero: negative range did not include 0 seed=${SEED}`);
+        }
+    }
+
+    // === C0 log-aware pan/zoom laws ==========================================
+
+    // --- Law 9: linear-path equivalence (hash parity). The log helpers with ---
+    // both axes linear must be BYTE-identical to _applyPan / _applyZoom, so a
+    // linear chart's behaviour cannot move now that a log branch exists.
+    {
+        for (let t = 0; t < 4000; t++) {
+            const s = { xMin: frnd(-1e3, 1e3), xMax: 0, yMin: frnd(-1e3, 1e3), yMax: 0 };
+            s.xMax = s.xMin + frnd(1, 1e3);
+            s.yMax = s.yMin + frnd(1, 1e3);
+            const W = frnd(50, 2000), H = frnd(50, 2000);
+            const dx = frnd(-1e3, 1e3), dy = frnd(-1e3, 1e3);
+            const a = _applyPan(s, dx, dy, W, H);
+            const b = _applyPanLog(s, dx, dy, W, H, false, false);
+            check(a.xMin === b.xMin && a.xMax === b.xMax && a.yMin === b.yMin && a.yMax === b.yMax,
+                () => `T0.linear-parity-pan: _applyPanLog(...,false,false) != _applyPan seed=${SEED}`);
+            const ax = frnd(0, W), ay = frnd(0, H), z = frnd(0.2, 5);
+            const c = _applyZoom(s, ax, ay, 0, 0, W, H, z, z);
+            const d = _applyZoomLog(s, ax, ay, 0, 0, W, H, z, z, false, false);
+            check(c.xMin === d.xMin && c.xMax === d.xMax && c.yMin === d.yMin && c.yMax === d.yMax,
+                () => `T0.linear-parity-zoom: _applyZoomLog(...,false,false) != _applyZoom seed=${SEED}`);
+        }
+    }
+
+    // --- Law 10: log pan is invertible in log space (away from the floor) -----
+    {
+        for (let t = 0; t < 4000; t++) {
+            const yMin = Math.exp(frnd(-6, 4));
+            const yMax = yMin * Math.exp(frnd(0.5, 6)); // positive, spans decades
+            const start = { xMin: 0, xMax: 1000, yMin, yMax };
+            const W = frnd(100, 1500), H = frnd(100, 1500);
+            const dy = frnd(-H * 0.4, H * 0.4); // moderate: never near the 1e300 floor
+            const mid = _applyPanLog(start, 0, dy, W, H, false, true);
+            const back = _applyPanLog(mid, 0, -dy, W, H, false, true);
+            check(near(back.yMin, start.yMin, 1e-6) && near(back.yMax, start.yMax, 1e-6),
+                () => `T0.log-pan-inverse: +d then -d did not return (yMin ${start.yMin} -> ${back.yMin}) seed=${SEED}`);
+            // ... and every intermediate bound is strictly positive & finite.
+            check(mid.yMin > 0 && mid.yMax > 0 && Number.isFinite(mid.yMax) && mid.yMax > mid.yMin,
+                () => `T0.log-pan-positive: log pan produced [${mid.yMin},${mid.yMax}] seed=${SEED}`);
+        }
+    }
+
+    // --- Law 11: log zoom preserves the anchor (in DATA space) ----------------
+    {
+        for (let t = 0; t < 4000; t++) {
+            const yMin = Math.exp(frnd(-4, 2));
+            const yMax = yMin * Math.exp(frnd(0.5, 5));
+            const start = { xMin: 0, xMax: 1000, yMin, yMax };
+            const W = 800, H = frnd(100, 1000);
+            const ay = frnd(0, H), z = frnd(0.3, 3);
+            const ty = ay / H;
+            // Data value under the cursor before the zoom (log interpolation).
+            const anchorLogY = Math.log(yMax) - ty * (Math.log(yMax) - Math.log(yMin));
+            const anchorY = Math.exp(anchorLogY);
+            const v = _applyZoomLog(start, 400, ay, 0, 0, W, H, z, z, false, true);
+            const newLogY = Math.log(v.yMax) - ty * (Math.log(v.yMax) - Math.log(v.yMin));
+            const newY = Math.exp(newLogY);
+            check(near(newY, anchorY, 1e-6),
+                () => `T0.log-zoom-anchor: anchor moved ${anchorY} -> ${newY} seed=${SEED}`);
+            check(v.yMin > 0 && Number.isFinite(v.yMax) && v.yMax > v.yMin,
+                () => `T0.log-zoom-positive: log zoom produced [${v.yMin},${v.yMax}] seed=${SEED}`);
+        }
+    }
+
+    // --- Law 12: the decade law. Dragging d px on an n-decade axis multiplies --
+    // both bounds by 10^(n*d/plotH). This pins the MAGNITUDE the linear-math bug
+    // got wrong (the roadmap's "125.875 vs 2.371").
+    {
+        const H = 400;
+        const start = { xMin: 0, xMax: 1000, yMin: 1, yMax: 1000 }; // 3 decades
+        const n = Math.log10(start.yMax / start.yMin);
+        for (const d of [1, 50, 150, 399, -50, -200]) {
+            const v = _applyPanLog(start, 0, d, 800, H, false, true);
+            const mult = Math.pow(10, n * d / H);
+            check(near(v.yMin, start.yMin * mult, 1e-6) && near(v.yMax, start.yMax * mult, 1e-6),
+                () => `T0.decade-law: drag ${d}px expected x${mult}, got yMin ${v.yMin} (want ${start.yMin * mult}) seed=${SEED}`);
         }
     }
 }

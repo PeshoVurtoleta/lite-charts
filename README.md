@@ -892,11 +892,13 @@ extent in the relevant axis.
 
 ### Caveats worth knowing
 
-- **Linear arithmetic only in alpha.2.** For `yScale: { type: 'log' }`
-  charts, the pan/zoom math is technically wrong (adds and scales in
-  data space rather than log space) -- the chart still renders, but
-  pan magnitude won't feel right and zoom centered on a log scale
-  will skew. A log-aware path is a follow-up.
+- **Log-aware pan/zoom (fixed in v1.4.1).** Through v1.4.0 the pan/zoom
+  math added and scaled in data space even on a `yScale: { type: 'log' }`
+  chart, so pan magnitude was wrong and a large gesture could drive the
+  domain non-positive. v1.4.1 (finding C0) operates in log space: a drag
+  of `d` px on an `n`-decade axis multiplies both bounds by `10^(n*d/plotH)`
+  and no gesture can produce a non-positive domain. `xScale: { type: 'log' }`
+  is fail-closed (throws) until it is wired in v1.5.0.
 - **Bar charts** inherit pan/zoom typing via `Omit<LineChartConfig,
   ...>` but their band x-axis isn't ideal for panning. Visually
   weird; not documented as supported in alpha.2.
@@ -1085,8 +1087,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.2.0-alpha.3** | `createHeatmap` on a new `createBaseGridChart` kernel (the fourth). 231 tests. |
 | **v1.2.0** | Heatmap polish (row + column highlight, quantile binning, auto-contrast value labels); `chart.destroy()` terminal teardown on every kernel. 245 tests. |
 | **v1.3.0** | `chart.exportSVG()` across all nine charts via a Canvas2D-shim that walks the live scene tree. Pixel-identical to canvas paint (minus DPR scaling). Pre-existing bar-label centering bug found and fixed. 259 tests. |
-| **v1.4.0** (this) | Three interaction primitives on axis-kernel charts: log scale on y (`yScale: { type: 'log' }`), pan + zoom (`pan` / `zoom`, `chart.view`), brushing (`brush`, `chart.brush`). Plus four pre-existing allocation traps closed during a bare-metal audit. 320 tests. Shipped across alphas .0-.3; see CHANGELOG for the per-alpha breakdown. |
-| v1.5.0 (next) | TBD. Candidate themes: log-aware pan/zoom math (data-space subtraction is technically wrong for log); brush-on-band-axis (proper bar/band support); configurable brush modifier; brush IDs from all visible series instead of just the primary. |
+| **v1.4.0** | Three interaction primitives on axis-kernel charts: log scale on y (`yScale: { type: 'log' }`), pan + zoom (`pan` / `zoom`, `chart.view`), brushing (`brush`, `chart.brush`). Plus four pre-existing allocation traps closed during a bare-metal audit. 320 tests. Shipped across alphas .0-.3; see CHANGELOG for the per-alpha breakdown. |
+| **v1.4.1** (this) | Correctness patch: log-aware pan/zoom math (`_applyPanLog` / `_applyZoomLog`, log-space arithmetic + a domain floor), per-axis branching, and fail-closed scale validation -- a log chart could not be panned or zoomed before (findings LC-01..LC-05). `updateLogScale` throws on an invalid domain; `xScale: { type: 'log' }` throws until v1.5.0. 341 tests + a torture/stress gate (`npm run torture`). |
+| v1.5.0 (next) | TBD. Candidate themes: x-log wiring (currently fail-closed); brush-on-band-axis (proper bar/band support); configurable brush modifier; brush IDs from all visible series instead of just the primary. |
 | **companion** | `@zakkster/lite-charts-gl` v0.1.0+ -- separate WebGL2 package built on `@zakkster/lite-gl`. Scatter / bubble / density charts targeting the 100k-1M point range. lite-charts core stays canvas-only and node-testable. |
 | v1.5.0 | Time-series specialized variants; legend virtualization via `lite-virtual`; annotation layer |
 

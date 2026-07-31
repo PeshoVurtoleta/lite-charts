@@ -4602,27 +4602,38 @@ describe('log scale (v1.4.0-alpha.0)', () => {
             assert.ok(Number.isNaN(s.map(-1e9)), 'map(-1e9) should be NaN');
         });
 
-        it('clamps non-positive bounds in updateLogScale (safety net)', () => {
+        // v1.4.1 (C0 / LC-04): updateLogScale fails CLOSED on an invalid domain.
+        // alpha.0 substituted `dMin = 1e-10` (and swapped/collapsed silently),
+        // rendering a different axis than the data described -- a fail-open the
+        // package's own laws forbid. It now throws, naming the offending bound;
+        // callers (the extraction path) clamp to the positive extent BEFORE the
+        // call. Four named cases: dMin<=0, dMax<=0, dMin>=dMax, NaN.
+        it('throws on a non-positive dMin (LC-04, no more 1e-10 substitution)', () => {
             const s = makeLogScale();
-            updateLogScale(s, 0, 100, 0, 100);
-            assert.ok(s.dMin > 0, 'dMin should be clamped to a positive epsilon, got ' + s.dMin);
-            assert.ok(s.dMax === 100, 'dMax should be unchanged when positive');
+            assert.throws(() => updateLogScale(s, 0, 100, 0, 100), /positive domain minimum.*dMin=0/);
+            assert.throws(() => updateLogScale(s, -5, 100, 0, 100), /positive domain minimum.*dMin=-5/);
         });
 
-        it('handles degenerate domains (dMin === dMax)', () => {
+        it('throws on a non-positive dMax', () => {
             const s = makeLogScale();
-            updateLogScale(s, 10, 10, 0, 100);
-            // _slope should be 0 (no range) without throwing
-            assert.strictEqual(s._slope, 0);
-            // map() result is the intercept (defined behavior: collapsed range)
-            assert.strictEqual(s.map(10), 0);
+            assert.throws(() => updateLogScale(s, 1, 0, 0, 100), /positive domain maximum.*dMax=0/);
+            assert.throws(() => updateLogScale(s, -10, -1, 0, 100), /positive domain (minimum|maximum)/);
         });
 
-        it('reverses swapped bounds (dMax < dMin)', () => {
+        it('throws on a collapsed domain (dMin === dMax) instead of a zero-slope axis', () => {
             const s = makeLogScale();
-            updateLogScale(s, 1000, 1, 0, 300);
-            assert.strictEqual(s.dMin, 1);
-            assert.strictEqual(s.dMax, 1000);
+            assert.throws(() => updateLogScale(s, 10, 10, 0, 100), /dMax > dMin.*dMin=10 dMax=10/);
+        });
+
+        it('throws on swapped bounds (dMax < dMin) instead of silently reversing', () => {
+            const s = makeLogScale();
+            assert.throws(() => updateLogScale(s, 1000, 1, 0, 300), /dMax > dMin/);
+        });
+
+        it('throws on a NaN bound', () => {
+            const s = makeLogScale();
+            assert.throws(() => updateLogScale(s, NaN, 100, 0, 100), /positive domain minimum/);
+            assert.throws(() => updateLogScale(s, 1, NaN, 0, 100), /positive domain maximum/);
         });
 
         it('has the same shape as linear scale (type, dMin/dMax/rMin/rMax)', () => {
@@ -5052,6 +5063,128 @@ describe('pan + zoom math (v1.4.0-alpha.2)', () => {
             // y clamped to start at 0
             assert.strictEqual(v.yMin, 0);
             assert.strictEqual(v.yMax, 50);
+        });
+    });
+});
+
+describe('log pan/zoom math (v1.4.1 -- C0 / LC-01..LC-05)', () => {
+    const { _applyPan, _applyZoom, _applyPanLog, _applyZoomLog, _clampToBoundsLog } = _testHelpers;
+
+    describe('_applyPanLog -- the decade law', () => {
+        // Dragging d px on an n-decade axis multiplies both bounds by
+        // 10^(n*d/plotH). alpha.2's linear math got this badly wrong (a +50px
+        // drag on [1,1000]/400px gave yMin 125.875 instead of 2.371).
+        const start = { xMin: 0, xMax: 1000, yMin: 1, yMax: 1000 }; // 3 decades
+        const H = 400;
+        const n = Math.log10(start.yMax / start.yMin); // 3
+
+        for (const d of [1, 50, 150, 399]) {
+            it(`drag ${d}px multiplies the log y-domain by 10^(n*d/H)`, () => {
+                const mult = Math.pow(10, n * d / H);
+                const v = _applyPanLog(start, 0, d, 800, H, false, true);
+                assert.ok(Math.abs(v.yMin - start.yMin * mult) < 1e-6, `yMin ${v.yMin} != ${start.yMin * mult}`);
+                assert.ok(Math.abs(v.yMax - start.yMax * mult) < 1e-6, `yMax ${v.yMax} != ${start.yMax * mult}`);
+            });
+        }
+
+        it('the roadmap example: +50px drag gives yMin 2.371, not 125.875', () => {
+            const v = _applyPanLog(start, 0, 50, 800, 400, false, true);
+            assert.ok(Math.abs(v.yMin - 2.371373706) < 1e-6, 'yMin should be ~2.371, got ' + v.yMin);
+        });
+
+        it('never produces a non-positive bound, at any drag distance', () => {
+            for (let dy = -4000; dy <= 4000; dy += 137) {
+                const v = _applyPanLog(start, 0, dy, 800, 400, false, true);
+                assert.ok(v.yMin > 0 && v.yMax > 0 && Number.isFinite(v.yMax) && v.yMax > v.yMin,
+                    `dy=${dy} -> [${v.yMin}, ${v.yMax}]`);
+            }
+        });
+    });
+
+    describe('_applyZoomLog', () => {
+        it('preserves the data value under the cursor (anchor)', () => {
+            const start = { xMin: 0, xMax: 1000, yMin: 2, yMax: 200 };
+            const H = 400, ay = 120, ty = ay / H;
+            const anchorY = Math.exp(Math.log(start.yMax) - ty * (Math.log(start.yMax) - Math.log(start.yMin)));
+            const v = _applyZoomLog(start, 400, ay, 0, 0, 800, H, 0.5, 0.5, false, true);
+            const newY = Math.exp(Math.log(v.yMax) - ty * (Math.log(v.yMax) - Math.log(v.yMin)));
+            assert.ok(Math.abs(newY - anchorY) < 1e-6, `anchor moved ${anchorY} -> ${newY}`);
+        });
+
+        it('repeated zoom-out never crosses zero (the log floor)', () => {
+            let v = { xMin: 0, xMax: 1000, yMin: 1, yMax: 1000 };
+            for (let i = 0; i < 500; i++) {
+                v = _applyZoomLog(v, 400, 200, 0, 0, 800, 400, 1.25, 1.25, false, true);
+                assert.ok(v.yMin > 0 && Number.isFinite(v.yMax) && v.yMax > v.yMin, `notch ${i} -> [${v.yMin}, ${v.yMax}]`);
+            }
+        });
+    });
+
+    describe('linear-path parity (hash parity)', () => {
+        // The log helpers with both axes linear must be BYTE-identical to the
+        // untouched _applyPan / _applyZoom -- a linear chart cannot change.
+        it('_applyPanLog(...,false,false) === _applyPan', () => {
+            const s = { xMin: -3, xMax: 97, yMin: 0, yMax: 50 };
+            const a = _applyPan(s, 37, -21, 640, 480);
+            const b = _applyPanLog(s, 37, -21, 640, 480, false, false);
+            assert.deepStrictEqual(b, a);
+        });
+        it('_applyZoomLog(...,false,false) === _applyZoom', () => {
+            const s = { xMin: -3, xMax: 97, yMin: 0, yMax: 50 };
+            const a = _applyZoom(s, 300, 200, 20, 10, 640, 480, 0.8, 0.8);
+            const b = _applyZoomLog(s, 300, 200, 20, 10, 640, 480, 0.8, 0.8, false, false);
+            assert.deepStrictEqual(b, a);
+        });
+    });
+
+    describe('mixed linear-x / log-y', () => {
+        it('pans x linearly and y in log space, independently', () => {
+            const s = { xMin: 0, xMax: 100, yMin: 1, yMax: 100 };
+            const v = _applyPanLog(s, 50, 40, 500, 400, false, true);
+            // x: linear shift by 50/500*100 = 10 -> [-10, 90]
+            assert.ok(Math.abs(v.xMin - -10) < 1e-9 && Math.abs(v.xMax - 90) < 1e-9, 'x should pan linearly');
+            // y: multiply by 10^(2*40/400) = 10^0.2 ~ 1.5849
+            const mult = Math.pow(10, 2 * 40 / 400);
+            assert.ok(Math.abs(v.yMin - 1 * mult) < 1e-6 && v.yMin > 0, 'y should pan in log space');
+        });
+    });
+
+    describe('_clampToBoundsLog', () => {
+        it('keeps a log axis inside its positive data domain', () => {
+            const view = { xMin: 0, xMax: 100, yMin: 0.001, yMax: 5 }; // below data floor
+            const dataDom = { xMin: 0, xMax: 100, yMin: 1, yMax: 1000 };
+            _clampToBoundsLog(view, dataDom, false, true);
+            assert.ok(view.yMin >= 1 - 1e-9, 'yMin should be clamped up to the data floor, got ' + view.yMin);
+            assert.ok(view.yMax <= 1000 + 1e-9 && view.yMin > 0, 'view stayed inside positive data bounds');
+        });
+    });
+
+    describe('LC-05 -- x-log is fail-closed at construction', () => {
+        it('createLineChart with xScale { type: "log" } throws', () => {
+            assert.throws(
+                () => createLineChart({ data: [{ x: 1, y: 1 }], xScale: { type: 'log' }, schedule: (fn) => fn() }),
+                /not supported yet/,
+            );
+        });
+    });
+
+    describe('LC-04 -- a log y-axis with no positive data fails closed at mount', () => {
+        it('all-negative data on a log y-axis throws instead of clamping to 1e-10', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: -5 }, { x: 2, y: -10 }],
+                yScale: { type: 'log' }, x: 'x', y: 'y', schedule: (fn) => fn(),
+            });
+            assert.throws(() => c.mount(createMockCanvas(400, 300)), /needs positive data/);
+        });
+
+        it('mixed-sign data on a log y-axis renders on its positive extent', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: -5 }, { x: 2, y: 10 }, { x: 3, y: 1000 }],
+                yScale: { type: 'log' }, x: 'x', y: 'y', width: 400, height: 300, schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            assert.ok(c.yScale.dMin > 0 && Number.isFinite(c.yScale.dMax), 'positive domain');
+            c.destroy();
         });
     });
 });

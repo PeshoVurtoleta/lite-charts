@@ -100,16 +100,24 @@ export function run() {
         });
     }
 
-    // === log axis: the LC-04 clamp ==========================================
-    // A log axis fed all-negative data does NOT throw on 1.4.0; updateLogScale
-    // clamps dMin to 1e-10. This is the fail-open C0 will close. Pinned exactly.
+    // === log axis: LC-04 is now fail-closed =================================
+    // A log axis fed all-negative data has NO positive extent to plot, so C0
+    // makes it THROW at mount (naming the domain) instead of the old silent
+    // clamp to 1e-10. Pinned as a decided fail-closed throw.
     pin('line/log-all-negative', () =>
-        createLineChart({ data: [{ x: 1, y: -5 }, { x: 2, y: -10 }], x: 'x', y: 'y', yScale: { type: 'log' }, ...SYNC }), (chart) => {
-        check(chart.yScale.type === 'log',
-            () => 'T1.log-all-negative: yScale is not log');
-        check(chart.yScale.dMin === 1e-10,
-            () => `T1.log-all-negative: expected LC-04 clamp dMin=1e-10, got ${chart.yScale.dMin} -- LC-04 fixed?`);
+        createLineChart({ data: [{ x: 1, y: -5 }, { x: 2, y: -10 }], x: 'x', y: 'y', yScale: { type: 'log' }, ...SYNC }),
+        null, /* mayThrow */ true);
+    // Mixed sign on a log axis: the positive extent IS plottable, so it renders
+    // (the negatives are outside a log domain, drawn as breaks -- like map(v<=0)).
+    pin('line/log-mixed-sign', () =>
+        createLineChart({ data: [{ x: 1, y: -5 }, { x: 2, y: 10 }, { x: 3, y: 1000 }], x: 'x', y: 'y', yScale: { type: 'log' }, ...SYNC }), (chart) => {
+        check(chart.yScale.dMin > 0 && Number.isFinite(chart.yScale.dMax),
+            () => `T1.log-mixed-sign: expected a positive finite domain, got [${chart.yScale.dMin},${chart.yScale.dMax}]`);
     });
+    // x-log is fail-closed until C1 (LC-05): construction throws.
+    pin('line/x-log-unsupported', () =>
+        createLineChart({ data: [{ x: 1, y: 1 }, { x: 2, y: 2 }], x: 'x', y: 'y', xScale: { type: 'log' }, ...SYNC }),
+        null, /* mayThrow */ true);
     // A log axis with valid positive data must round-trip a finite positive domain.
     pin('line/log-positive', () =>
         createLineChart({ data: [{ x: 1, y: 1 }, { x: 2, y: 1000 }], x: 'x', y: 'y', yScale: { type: 'log' }, ...SYNC }), (chart) => {

@@ -5,7 +5,40 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.1] -- 2026-07
+
+A correctness patch: **a log-scale chart could not be panned or zoomed**. v1.4
+shipped log scale, pan, and zoom as independent opt-ins, but enabling log plus
+either interaction ran the pan/zoom arithmetic in DATA space on a LOG axis --
+the first gesture produced a wrong or invalid domain (findings LC-01..LC-05).
+No public API changes; the fix is in the interaction math and scale validation.
+
+### Fixed -- C0: log-axis pan/zoom is correct and fail-closed (LC-01..LC-05)
+
+- **Log-aware pan/zoom math** (`_applyPanLog` / `_applyZoomLog`, exported via
+  `_testHelpers` alongside the linear pair). They operate in LOG space --
+  `Math.log` the bounds, apply the pixel delta there, `Math.exp` back -- so a
+  drag of `d` px on an `n`-decade axis multiplies both bounds by `10^(n*d/plotH)`
+  (LC-01/LC-02) and no gesture can drive a bound to zero or negative (LC-03). A
+  `+50px` drag on `[1, 1000]` / 400px now yields `yMin = 2.371`, not `125.875`.
+- **Per-axis branching.** The pan and zoom handlers consult `xScale.type` and
+  `yScale.type` independently, so a linear-x / log-y chart pans with log math on
+  y and linear math on x. The all-linear path still calls the untouched
+  `_applyPan` / `_applyZoom` and is byte-identical (asserted by a parity test) --
+  a linear chart's behaviour and cost do not move in this patch.
+- **A log-axis floor.** exp() over a bounded log range keeps a free (unbounded)
+  pan or a long zoom-out from drifting the domain to `0` / `Infinity` -- "a log
+  axis has no bottom", so it stops at a representable floor instead.
+- **`updateLogScale` fails closed (LC-04).** It now THROWS on a non-positive,
+  collapsed, or NaN domain, naming the offending bound, instead of silently
+  substituting `dMin = 1e-10`. The domain-extraction caller floors the domain to
+  its positive extent BEFORE the call; a log y-axis with NO positive data throws
+  at mount ("needs positive data") rather than drawing a fabricated `1..10`. The
+  failed mount is atomic -- it disposes what it created, leaking no signal node.
+- **x-log is fail-closed until v1.5.0 (LC-05).** `xScale: { type: 'log' }` now
+  throws at construction. It was half-wired (the x-scale is always linear while a
+  few paths branched on `xScale.type === 'log'`), which would pan and label an
+  x-log chart with linear math -- worse than unsupported.
 
 ### Added -- torture / stress suite (tests only; no shipped-code change)
 
@@ -47,11 +80,11 @@ with `TORTURE_SEED` replay, thunk-only assertions, and an
 Whole-suite control: `CHARTS_TORTURE_BREAK=1 npm run torture` injects
 retained allocations into T6 and must exit non-zero.
 
-Separately, `npm run torture:logfuzz` is the **C0 regression net**: seeded
-free-pan/zoom gestures on a log axis, asserting the y-domain stays positive
-and finite. It is **RED on 1.4.0 by design** (finding C0 / LC-01..LC-04: the
-pan/zoom math is linear on a log domain) and is intentionally excluded from
-the green `npm run torture` gate; it turns green when C0 lands.
+The **C0 regression net** (tier `T-LOG`, also runnable standalone via
+`npm run torture:logfuzz`): seeded pan/zoom gestures on a log axis, asserting
+the y-domain stays positive and finite. It was RED on 1.4.0 (the finding: linear
+math on a log domain) and is GREEN as of this release's log-aware branch, so it
+now runs inside the green `npm run torture` gate.
 
 Adds `@zakkster/lite-gc-profiler` and `@zakkster/lite-leak` (plus the four
 runtime peers) as `devDependencies` for local test resolution. Ships nothing:

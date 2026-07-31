@@ -265,15 +265,22 @@ const makeLogScale = () => ({
 });
 
 const updateLogScale = (s, dMin, dMax, rMin, rMax) => {
-    // Safety net for degenerate domains. The chart's domain extraction is
-    // expected to handle this upstream, but a small epsilon keeps the
-    // scale evaluable rather than NaN-everywhere.
-    if (!(dMin > 0)) dMin = 1e-10;
-    if (!(dMax > 0)) dMax = dMin * 10;
-    if (dMax < dMin) {
-        const t = dMin;
-        dMin = dMax;
-        dMax = t;
+    // v1.4.1 (C0 / LC-04): fail CLOSED on an invalid domain. alpha.0 silently
+    // substituted `dMin = 1e-10` (and `dMax = dMin*10`), so a computed
+    // non-positive domain rendered a DIFFERENT axis rather than reporting the
+    // problem -- a fail-open on unverified state the package's own laws forbid.
+    // A log domain must be finite, strictly positive, and ordered; anything else
+    // is a bug at the caller, which now must clamp/filter BEFORE calling (the
+    // extraction path does exactly that for a log axis). The message names the
+    // offending bound and its value.
+    if (!(dMin > 0)) {
+        throw new Error('lite-charts: log scale needs a positive domain minimum, got dMin=' + dMin);
+    }
+    if (!(dMax > 0)) {
+        throw new Error('lite-charts: log scale needs a positive domain maximum, got dMax=' + dMax);
+    }
+    if (!(dMax > dMin)) {
+        throw new Error('lite-charts: log scale needs dMax > dMin, got dMin=' + dMin + ' dMax=' + dMax);
     }
     s.dMin = dMin;
     s.dMax = dMax;
@@ -1913,6 +1920,154 @@ const _clampToBounds = (view, dataDom) => {
         view.yMax = dataDom.yMax;
     }
     return view;
+};
+
+// v1.4.1 (C0) -- log-aware pan / zoom.
+//
+// alpha.2's `_applyPan` / `_applyZoom` do LINEAR arithmetic on the data domain.
+// On a log axis that is wrong: it adds/scales in DATA space, so a drag feels the
+// wrong magnitude and -- worse -- a large drag or one zoom-out notch can walk a
+// bound to zero or negative, at which point `Math.log` is NaN and the axis dies
+// (findings LC-01..LC-03). The fix operates in LOG space: transform the bounds
+// with `Math.log`, apply the SAME pixel arithmetic there, then `Math.exp` back.
+// exp() is always positive, so no gesture can produce a non-positive bound.
+//
+// Base is irrelevant to correctness (log then its own inverse), so we use the
+// natural log to match `makeLogScale`'s kernel. The decade law still holds:
+// dragging d px on an n-decade axis multiplies both bounds by 10^(n*d/plotH).
+//
+// Per-axis flags (`xLog` / `yLog`): each axis is handled independently, so a
+// linear-x / log-y chart pans correctly on both. When a flag is false the axis
+// uses the EXACT linear formula from `_applyPan` / `_applyZoom`, so a mixed chart
+// is byte-identical to the linear path on its linear axis. The all-linear callers
+// still use `_applyPan` / `_applyZoom` unchanged (hash-parity: a linear chart's
+// behaviour and cost must not move in a patch).
+// The log-axis floor. A log axis "has no bottom" (LC-05 rationale), so a free
+// (unbounded) pan or a long zoom-out could otherwise drift the log-space bounds
+// until `Math.exp` underflows to 0 or overflows to Infinity -- re-introducing a
+// non-positive / non-finite domain by a different route. exp() over
+// [-690, 690] stays strictly inside [~1e-300, 1e300], so we keep both log bounds
+// in that band, shifting the window to preserve its width where it fits and
+// pinning to the band only when the width exceeds ~600 decades. Results go into
+// module scratch to keep the pointer hot path allocation-free.
+const _LOG_FLOOR = -690, _LOG_CEIL = 690;
+let _expLo = 0, _expHi = 0;
+const _expClampedInto = (logLo, logHi) => {
+    if (!(logHi > logLo)) logHi = logLo + 1e-9;      // degenerate-width guard
+    if (logLo < _LOG_FLOOR) { logHi += _LOG_FLOOR - logLo; logLo = _LOG_FLOOR; }
+    if (logHi > _LOG_CEIL) { logLo -= logHi - _LOG_CEIL; logHi = _LOG_CEIL; }
+    if (logLo < _LOG_FLOOR) logLo = _LOG_FLOOR;      // width > band: pin to it
+    _expLo = Math.exp(logLo);
+    _expHi = Math.exp(logHi);
+};
+
+const _applyPanLog = (start, dxPx, dyPx, plotW, plotH, xLog, yLog) => {
+    let xMin, xMax, yMin, yMax;
+    if (xLog) {
+        const lx0 = Math.log(start.xMin), lx1 = Math.log(start.xMax);
+        const dLog = dxPx * (lx1 - lx0) / plotW;
+        _expClampedInto(lx0 - dLog, lx1 - dLog);
+        xMin = _expLo; xMax = _expHi;
+    } else {
+        const dxData = dxPx * (start.xMax - start.xMin) / plotW;
+        xMin = start.xMin - dxData;
+        xMax = start.xMax - dxData;
+    }
+    if (yLog) {
+        const ly0 = Math.log(start.yMin), ly1 = Math.log(start.yMax);
+        const dLog = -dyPx * (ly1 - ly0) / plotH;
+        _expClampedInto(ly0 - dLog, ly1 - dLog);
+        yMin = _expLo; yMax = _expHi;
+    } else {
+        const dyData = -dyPx * (start.yMax - start.yMin) / plotH;
+        yMin = start.yMin - dyData;
+        yMax = start.yMax - dyData;
+    }
+    return { xMin, xMax, yMin, yMax };
+};
+
+const _applyZoomLog = (start, anchorPx, anchorPy, plotLeft, plotTop, plotW, plotH, zoomX, zoomY, xLog, yLog) => {
+    const tx = plotW > 0 ? (anchorPx - plotLeft) / plotW : 0.5;
+    const ty = plotH > 0 ? (anchorPy - plotTop) / plotH : 0.5;
+    let xMin, xMax, yMin, yMax;
+    if (xLog) {
+        const lx0 = Math.log(start.xMin), lx1 = Math.log(start.xMax);
+        const aLog = lx0 + tx * (lx1 - lx0);
+        _expClampedInto(aLog - (aLog - lx0) * zoomX, aLog + (lx1 - aLog) * zoomX);
+        xMin = _expLo; xMax = _expHi;
+    } else {
+        const aX = start.xMin + tx * (start.xMax - start.xMin);
+        xMin = aX - (aX - start.xMin) * zoomX;
+        xMax = aX + (start.xMax - aX) * zoomX;
+    }
+    if (yLog) {
+        // y is flipped: top of plot = yMax, bottom = yMin (same as linear).
+        const ly0 = Math.log(start.yMin), ly1 = Math.log(start.yMax);
+        const aLog = ly1 - ty * (ly1 - ly0);
+        _expClampedInto(aLog - (aLog - ly0) * zoomY, aLog + (ly1 - aLog) * zoomY);
+        yMin = _expLo; yMax = _expHi;
+    } else {
+        const aY = start.yMax - ty * (start.yMax - start.yMin);
+        yMin = aY - (aY - start.yMin) * zoomY;
+        yMax = aY + (start.yMax - aY) * zoomY;
+    }
+    return { xMin, xMax, yMin, yMax };
+};
+
+// Log-aware clamp. `_clampToBounds` compares/shifts in DATA space; on a log axis
+// that both feels wrong and cannot express a log-correct floor. This clamps each
+// log axis in LOG space (snap-if-wider, else shift to keep the log-width inside
+// [log(dataMin), log(dataMax)]) and leaves a linear axis to the identical linear
+// logic. It is the "log-aware floor" that stops a drag walking the domain to zero
+// even under a free (unbounded) pan mode.
+const _clampToBoundsLog = (view, dataDom, xLog, yLog) => {
+    if (xLog) {
+        _clampAxisLog(view, dataDom, 'xMin', 'xMax');
+    } else {
+        _clampAxisLinear(view, dataDom, 'xMin', 'xMax');
+    }
+    if (yLog) {
+        _clampAxisLog(view, dataDom, 'yMin', 'yMax');
+    } else {
+        _clampAxisLinear(view, dataDom, 'yMin', 'yMax');
+    }
+    return view;
+};
+
+const _clampAxisLinear = (view, dataDom, loKey, hiKey) => {
+    const v = view[hiKey] - view[loKey];
+    const d = dataDom[hiKey] - dataDom[loKey];
+    if (v >= d) {
+        view[loKey] = dataDom[loKey];
+        view[hiKey] = dataDom[hiKey];
+    } else if (view[loKey] < dataDom[loKey]) {
+        view[hiKey] += dataDom[loKey] - view[loKey];
+        view[loKey] = dataDom[loKey];
+    } else if (view[hiKey] > dataDom[hiKey]) {
+        view[loKey] -= view[hiKey] - dataDom[hiKey];
+        view[hiKey] = dataDom[hiKey];
+    }
+};
+
+const _clampAxisLog = (view, dataDom, loKey, hiKey) => {
+    // A non-positive data bound has no log; nothing to clamp against. Leave the
+    // (log-math-positive) view untouched rather than fabricate a bound.
+    if (!(dataDom[loKey] > 0) || !(dataDom[hiKey] > 0)) return;
+    let vLo = Math.log(view[loKey]);
+    let vHi = Math.log(view[hiKey]);
+    const dLo = Math.log(dataDom[loKey]);
+    const dHi = Math.log(dataDom[hiKey]);
+    const vw = vHi - vLo;
+    const dw = dHi - dLo;
+    if (vw >= dw) {
+        vLo = dLo; vHi = dHi;
+    } else if (vLo < dLo) {
+        vHi += dLo - vLo; vLo = dLo;
+    } else if (vHi > dHi) {
+        vLo -= vHi - dHi; vHi = dHi;
+    }
+    view[loKey] = Math.exp(vLo);
+    view[hiKey] = Math.exp(vHi);
 };
 
 // v1.4.0-alpha.3 -- brush math.
@@ -3620,6 +3775,17 @@ const createBaseAxisChart = (config, renderer) => {
         throw new Error('lite-charts: chart factories require a config object');
     }
 
+    // v1.4.1 (C0 / LC-05): x-log is not wired -- the x-scale is always linear
+    // (`createXScale: makeLinearScale`), while a few draw/extract paths branch on
+    // `xScale.type === 'log'`. Half-honoured is worse than unsupported: it would
+    // pan and label an x-log chart with linear math. Fail CLOSED here, at the very
+    // top of construction (before any signal is allocated, so nothing leaks),
+    // until C1 wires it -- rather than render a silently-wrong axis.
+    if (config.xScale && config.xScale.type === 'log') {
+        throw new Error('lite-charts: xScale { type: \'log\' } is not supported yet ' +
+            '(planned for v1.5.0); use a linear or time x-scale');
+    }
+
     // -- Normalize series shape (data shorthand -> single-element series array) --
     // We pre-resolve interpolation here so an invalid mode throws at chart
     // construction, not mount. Markers stay deferred to mount because their
@@ -4132,7 +4298,17 @@ const createBaseAxisChart = (config, renderer) => {
         // visibility signal -- toggling a series visible re-rescales the
         // y-domain to fit the remaining visible data (Chart.js convention,
         // useful default that surfaces detail in the un-hidden series).
+        //
+        // C0: a log axis with no positive data is a fail-closed error. The effect
+        // must NOT `throw` on its first (synchronous) run -- that would escape
+        // `effect(...)` before its disposer is captured by `disposers.push`, so
+        // the effect node would leak on the failed mount. Instead it records the
+        // message here and mount() re-throws AFTER the disposer is registered, so
+        // the caller's error path (and destroy()) unwinds cleanly. A later re-run
+        // that goes invalid just skips the frame (fail-safe), like map(v<=0).
+        let _logDomainError = null;
         disposers.push(effect(() => {
+            _logDomainError = null;
             plotBoundsSignal(); // dep: rerun on size change
             let xMin = Infinity;
             let xMax = -Infinity;
@@ -4235,7 +4411,24 @@ const createBaseAxisChart = (config, renderer) => {
                 rendererCtx,
             );
             if (yScaleType === 'log') {
-                updateLogScale(yScale, yLo, yHi, plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
+                // C0 (LC-04): `updateLogScale` now fails closed, so the domain is
+                // made valid HERE rather than substituted inside it. Non-positive
+                // values are outside a log axis anyway (`map(v<=0)` is NaN, drawn
+                // as a break), so we floor the domain to the positive part: if the
+                // top is positive, clamp the bottom up to it spanning at most ~9
+                // decades. Only a domain with NO positive extent (yHi <= 0) is
+                // genuinely un-plottable on a log axis -- that throws, naming the
+                // domain, instead of drawing a fabricated 1..10.
+                let lo = yLo, hi = yHi;
+                if (!(hi > 0)) {
+                    // No positive extent: flag and bail this run (mount() throws).
+                    _logDomainError = 'lite-charts: a log y-axis needs positive data, but the y-domain [' +
+                        yLo + ', ' + yHi + '] has no positive values';
+                    return;
+                }
+                if (!(lo > 0)) lo = hi * 1e-9;
+                if (!(hi > lo)) hi = lo * 10;
+                updateLogScale(yScale, lo, hi, plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
             } else {
                 updateLinearScale(yScale, yLo, yHi, plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
             }
@@ -4251,6 +4444,17 @@ const createBaseAxisChart = (config, renderer) => {
             scaleVersion.update((v) => (v + 1) | 0);
             if (scene) scene.markDirty();
         }));
+        // C0: fail the mount CLOSED with nothing left behind. `mounted` is not set
+        // until the end of mount(), so destroy() would skip cleanup on a mid-mount
+        // throw; run the disposers created so far (the effects + any observers) and
+        // clear them, so no signal node leaks on the rejected mount.
+        if (_logDomainError) {
+            for (let i = disposers.length - 1; i >= 0; i--) {
+                try { disposers[i](); } catch (_) { /* best-effort unwind */ }
+            }
+            disposers.length = 0;
+            throw new Error(_logDomainError);
+        }
 
         // Effect 2b: mirror visibility signals into the synchronous refs the
         // draw closures read. Also serves as the dirty bridge for visibility
@@ -4504,9 +4708,18 @@ const createBaseAxisChart = (config, renderer) => {
                 const dy = p.y - dragStartY;
                 const w = dragPlotBounds.width || 1;
                 const h = dragPlotBounds.height || 1;
-                const newView = _applyPan(dragStartView, dx, dy, w, h);
+                // C0: branch per axis. `xScale.type` / `yScale.type` are consulted
+                // independently so a linear-x / log-y chart pans with log math on y
+                // and linear math on x. An all-linear chart takes the byte-identical
+                // `_applyPan` / `_clampToBounds` path (hash parity).
+                const xLog = xScale.type === 'log';
+                const yLog = yScale.type === 'log';
+                const newView = (xLog || yLog)
+                    ? _applyPanLog(dragStartView, dx, dy, w, h, xLog, yLog)
+                    : _applyPan(dragStartView, dx, dy, w, h);
                 if (panBoundsMode === 'data' && _dataDomain) {
-                    _clampToBounds(newView, _dataDomain);
+                    if (xLog || yLog) _clampToBoundsLog(newView, _dataDomain, xLog, yLog);
+                    else _clampToBounds(newView, _dataDomain);
                 }
                 viewSig.set(newView);
             } : null;
@@ -4534,10 +4747,17 @@ const createBaseAxisChart = (config, renderer) => {
                 // new view must stay within [zoomMinFactor, zoomMaxFactor].
                 // (zoomMinFactor < 1 means "zoomed in"; > 1 means
                 // "zoomed out".) The factor we check is newSpan / dataSpan.
-                const dataXSpan = _dataDomain.xMax - _dataDomain.xMin;
-                const dataYSpan = _dataDomain.yMax - _dataDomain.yMin;
-                const proposedXSpan = (start.xMax - start.xMin) * zoomFactor;
-                const proposedYSpan = (start.yMax - start.yMin) * zoomFactor;
+                // C0: the span ratios are measured in the axis's OWN space so the
+                // zoom cap means the same thing on a log axis. A log span is the
+                // decade count (log(hi)-log(lo)); a linear span is hi-lo.
+                const xLog = xScale.type === 'log';
+                const yLog = yScale.type === 'log';
+                const axisSpan = (lo, hi, isLog) =>
+                    isLog ? (Math.log(hi) - Math.log(lo)) : (hi - lo);
+                const dataXSpan = axisSpan(_dataDomain.xMin, _dataDomain.xMax, xLog);
+                const dataYSpan = axisSpan(_dataDomain.yMin, _dataDomain.yMax, yLog);
+                const proposedXSpan = axisSpan(start.xMin, start.xMax, xLog) * zoomFactor;
+                const proposedYSpan = axisSpan(start.yMin, start.yMax, yLog) * zoomFactor;
                 const proposedXRatio = dataXSpan > 0 ? proposedXSpan / dataXSpan : 1;
                 const proposedYRatio = dataYSpan > 0 ? proposedYSpan / dataYSpan : 1;
                 // Block the zoom if either axis would exceed bounds. We
@@ -4545,14 +4765,22 @@ const createBaseAxisChart = (config, renderer) => {
                 // the convention; refusing here keeps interaction predictable.
                 if (proposedXRatio < zoomMinFactor || proposedYRatio < zoomMinFactor) return;
                 if (proposedXRatio > zoomMaxFactor || proposedYRatio > zoomMaxFactor) return;
-                const newView = _applyZoom(
-                    start,
-                    p.x, p.y,
-                    plotBoundsBox.x, plotBoundsBox.y, plotBoundsBox.w, plotBoundsBox.h,
-                    zoomFactor, zoomFactor,
-                );
+                const newView = (xLog || yLog)
+                    ? _applyZoomLog(
+                        start,
+                        p.x, p.y,
+                        plotBoundsBox.x, plotBoundsBox.y, plotBoundsBox.w, plotBoundsBox.h,
+                        zoomFactor, zoomFactor, xLog, yLog,
+                    )
+                    : _applyZoom(
+                        start,
+                        p.x, p.y,
+                        plotBoundsBox.x, plotBoundsBox.y, plotBoundsBox.w, plotBoundsBox.h,
+                        zoomFactor, zoomFactor,
+                    );
                 if (panBoundsMode === 'data' && _dataDomain) {
-                    _clampToBounds(newView, _dataDomain);
+                    if (xLog || yLog) _clampToBoundsLog(newView, _dataDomain, xLog, yLog);
+                    else _clampToBounds(newView, _dataDomain);
                 }
                 viewSig.set(newView);
             } : null;
@@ -6913,6 +7141,10 @@ export const _testHelpers = {
     _applyPan,
     _applyZoom,
     _clampToBounds,
+    // v1.4.1 (C0) log-aware pan/zoom + clamp
+    _applyPanLog,
+    _applyZoomLog,
+    _clampToBoundsLog,
     // v1.4.0-alpha.3 brush math helpers
     _normalizeBrushRect,
     _brushPxToData,

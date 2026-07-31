@@ -87,17 +87,25 @@ export function run() {
         if (!positiveFinite(1, 1000)) die('T9 control: positiveFinite rejected a valid positive domain -- the fuzzer would be blind');
     }
 
-    // Control 6 -- makeLogScale's LC-04 fail-open, made visible. On 1.4.0,
-    // updateLogScale does NOT throw on a non-positive domain; it clamps to 1e-10.
-    // T1 pins that clamp. Here we prove the pin is non-vacuous: the clamp really
-    // fires (a fail-CLOSED version would throw and this control would need to
-    // flip -- which is exactly the C0 signal).
+    // Control 6 -- makeLogScale is fail-CLOSED (C0 / LC-04). updateLogScale must
+    // THROW on a non-positive / collapsed domain, naming the bound, and must
+    // ACCEPT a valid one. If a bad domain slipped through silently, the T1
+    // fail-closed pins and the whole LC-04 fix would be decorative.
     {
         const s = makeLogScale();
-        let threw = false;
-        try { updateLogScale(s, -5, -1, 0, 800); } catch { threw = true; }
-        if (threw) die('T9 control: updateLogScale THREW on a negative domain -- LC-04 is fixed; update T1 and the C0 net');
-        if (s.dMin !== 1e-10) die('T9 control: updateLogScale did not clamp a negative domain to 1e-10 -- the T1 pin is stale');
+        let threwNeg = false;
+        try { updateLogScale(s, -5, -1, 0, 800); } catch { threwNeg = true; }
+        if (!threwNeg) die('T9 control: updateLogScale accepted a negative domain -- LC-04 regressed to fail-open');
+        let threwZero = false;
+        try { updateLogScale(s, 0, 100, 0, 800); } catch { threwZero = true; }
+        if (!threwZero) die('T9 control: updateLogScale accepted dMin=0');
+        let threwCollapsed = false;
+        try { updateLogScale(s, 10, 10, 0, 800); } catch { threwCollapsed = true; }
+        if (!threwCollapsed) die('T9 control: updateLogScale accepted a collapsed domain (dMin==dMax)');
+        let acceptedValid = true;
+        try { updateLogScale(s, 1, 1000, 0, 800); } catch { acceptedValid = false; }
+        if (!acceptedValid) die('T9 control: updateLogScale rejected a VALID positive domain -- fail-closed is too aggressive');
+        if (!(s.dMin === 1 && s.dMax === 1000)) die('T9 control: a valid updateLogScale did not set the domain');
     }
 
     // Control 7 -- the SVG ceiling is a real constraint. A real 1k-point export
