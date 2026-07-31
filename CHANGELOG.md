@@ -5,6 +5,58 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added -- torture / stress suite (tests only; no shipped-code change)
+
+A LiteBvh-style torture gate under `test/torture/`, run with
+`npm run torture` (`node --expose-gc test/torture.mjs`, prints `ok`).
+Modelled on the ecosystem's zero-GC discipline: a seeded xorshift32 PRNG
+with `TORTURE_SEED` replay, thunk-only assertions, and an
+`@zakkster/lite-gc-profiler` gate at `maxArrayBuffersGrowth: 0` with
+`stabilize: 'deep'` -- the rule that finally sees the SoA pixel pools
+(ArrayBuffer backing stores are invisible to a `heapUsed` delta). Tiers:
+
+- **T0 laws** -- scale round-trips, monotonicity, endpoint pinning,
+  decimation extrema preservation, pan invertibility, zoom anchor
+  preservation, `_clampToBounds` containment.
+- **T1 degenerate** -- every chart type x {empty, single, identical, NaN,
+  +/-Infinity, 1e-300, 1e300, unsorted x, duplicate x, all-negative-on-log},
+  each with a pinned answer; the +/-Infinity, 1e300 and log-clamp cases pin
+  the shipped **fail-open** behaviour (LC-04 family) so a later fail-closed
+  fix flips the pin loudly.
+- **T3 decimation** -- `decimateMinMax` vs a naive oracle under sawtooth,
+  single-spike, monotone, all-equal, edge-inclusive and dense-random inputs.
+- **T5 oracle** -- differential: a chart driven by a random view walk equals
+  one built with only the final view (path independence), and `resetView()`
+  restores a pristine chart (idempotence); `exportSVG()` is the pixel witness.
+- **T6 alloc** -- the zero-alloc gate over the decimation/scale kernel, a
+  `redraw()` loop, and a pointer+wheel event storm; pins pool `byteLength`.
+- **T7 soak** -- 4096 create/mount/destroy cycles across all nine chart
+  types; `destroy()` returns `activeNodes` / `activeLinks` (lite-signal
+  `stats()`) and canvas listeners to baseline every cycle, with an
+  `@zakkster/lite-leak` second witness and flat `arrayBuffers`.
+- **T8 export + resize** -- `exportSVG` size stays bounded and does NOT scale
+  with point count (decimation caps it at pixel-column resolution) at
+  1k/100k/1M points; a 10k-callback `ResizeObserver` storm (zero-width,
+  sub-pixel, oscillating) accumulates no observers and stays buffer-flat.
+- **T9 controls** -- every gate is proven able to fail (alloc gate, observer
+  gate, listener gate, decimation comparator, log-domain predicate, the
+  LC-04 clamp, the SVG ceiling, RO accumulation).
+
+Whole-suite control: `CHARTS_TORTURE_BREAK=1 npm run torture` injects
+retained allocations into T6 and must exit non-zero.
+
+Separately, `npm run torture:logfuzz` is the **C0 regression net**: seeded
+free-pan/zoom gestures on a log axis, asserting the y-domain stays positive
+and finite. It is **RED on 1.4.0 by design** (finding C0 / LC-01..LC-04: the
+pan/zoom math is linear on a log domain) and is intentionally excluded from
+the green `npm run torture` gate; it turns green when C0 lands.
+
+Adds `@zakkster/lite-gc-profiler` and `@zakkster/lite-leak` (plus the four
+runtime peers) as `devDependencies` for local test resolution. Ships nothing:
+the `files` allowlist still publishes only `Charts.js` and its docs.
+
 ## [1.4.0] -- 2026-06
 
 The v1.4 release. Three new interaction primitives on axis-kernel

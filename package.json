@@ -36,8 +36,19 @@
     }
   },
   "scripts": {
-    "test": "node --expose-gc --test --test-reporter=spec",
+    "test": "node --expose-gc --test --test-reporter=spec test/*.test.js",
+    "torture": "node --expose-gc test/torture.mjs",
+    "torture:logfuzz": "node --expose-gc test/torture-logfuzz.mjs",
+    "verify": "npm test && npm run torture",
     "bench": "node --expose-gc bench/line-100k.mjs"
+  },
+  "devDependencies": {
+    "@zakkster/lite-axis": "^1.0.1",
+    "@zakkster/lite-delaunay": "^1.0.0",
+    "@zakkster/lite-scene": "^1.0.0",
+    "@zakkster/lite-signal": ">=1.5.0-rc.1 <2.0.0",
+    "@zakkster/lite-gc-profiler": "^1.14.0",
+    "@zakkster/lite-leak": "^1.8.0"
   },
   "keywords": [
     "chart",
