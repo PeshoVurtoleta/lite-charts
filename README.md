@@ -17,11 +17,13 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.5.0 -- a presentation cut: a dynamic donut center label
-(a number in the hole, sized by CSS `clamp()`) and horizontal bar
-orientation. Additive only; no public API breaks vs v1.4.1, both
-features opt-in. **363/363 tests pass** plus a torture/stress gate
-(`npm run torture`).
+**Status:** v1.5.1 -- a correctness patch over the v1.5.0 presentation cut
+(a dynamic donut center label sized by CSS `clamp()`, and horizontal bar
+orientation). v1.5.1 fixes log-scale point projection: a `yScale: { type:
+'log' }` line/area/scatter/bubble chart placed its data points with linear
+math, throwing them off-canvas -- the axis, ticks, and pan/zoom were always
+correct, only the point projection was wrong. No public API change.
+**368/368 tests pass** plus a torture/stress gate (`npm run torture`).
 
 **New in v1.5.0:**
 - **`centerLabel` on `createDonutChart`** -- a number rendered in the
@@ -1195,7 +1197,8 @@ forward plan and the development history that led here. Headlines:
 | **v1.3.0** | `chart.exportSVG()` across all nine charts via a Canvas2D-shim that walks the live scene tree. Pixel-identical to canvas paint (minus DPR scaling). Pre-existing bar-label centering bug found and fixed. 259 tests. |
 | **v1.4.0** | Three interaction primitives on axis-kernel charts: log scale on y (`yScale: { type: 'log' }`), pan + zoom (`pan` / `zoom`, `chart.view`), brushing (`brush`, `chart.brush`). Plus four pre-existing allocation traps closed during a bare-metal audit. 320 tests. Shipped across alphas .0-.3; see CHANGELOG for the per-alpha breakdown. |
 | **v1.4.1** | Correctness patch: log-aware pan/zoom math (`_applyPanLog` / `_applyZoomLog`, log-space arithmetic + a domain floor), per-axis branching, and fail-closed scale validation -- a log chart could not be panned or zoomed before (findings LC-01..LC-05). `updateLogScale` throws on an invalid domain; `xScale: { type: 'log' }` throws until wired. 341 tests + a torture/stress gate (`npm run torture`). |
-| **v1.5.0** (this) | Presentation cut. Donut `centerLabel` -- a number in the hole as a CSS-`clamp()`-sized DOM overlay (digit count drives the font; zero per-frame JS). Horizontal bar `orientation` -- category band on Y, byte-identical vertical draw path, fail-closed vs `pan` / `zoom` / `brush` / value `grid` / log axis. Additive, no public API breaks vs 1.4.1. 363 tests + torture gate. |
+| **v1.5.0** | Presentation cut. Donut `centerLabel` -- a number in the hole as a CSS-`clamp()`-sized DOM overlay (digit count drives the font; zero per-frame JS). Horizontal bar `orientation` -- category band on Y, byte-identical vertical draw path, fail-closed vs `pan` / `zoom` / `brush` / value `grid` / log axis. Additive, no public API breaks vs 1.4.1. 363 tests + torture gate. |
+| **v1.5.1** (this) | Correctness patch. `scaleSeriesToPixels` -- the hot per-extract projection loop for every `projectToPixels` renderer (line / area / scatter / bubble) -- inlined linear `v * slope + intercept` for both axes, so a `yScale: { type: 'log' }` chart drew its axis and ticks correctly but placed every point at the wrong pixel (present since y-log shipped in 1.4.1). The loop is now log-aware on both axes via four cold-selected flat bodies; the all-linear path is byte-identical (proven by a 12k-point `Object.is` parity gate). Bars unaffected (`projectToPixels: false`); `xScale: { type: 'log' }` still throws. 368 tests + a pure-kernel torture gate (T6.A13). |
 | **companion** | `@zakkster/lite-charts-gl` v0.1.0+ -- separate WebGL2 package built on `@zakkster/lite-gl`. Scatter / bubble / density charts targeting the 100k-1M point range. lite-charts core stays canvas-only and node-testable. |
 | v1.6.0 (candidates) | x-log wiring (currently fail-closed); horizontal bars with `pan` / `zoom` / `brush` / value grid; configurable brush modifier; brush IDs across all visible series; time-series variants; annotation layer; legend virtualization via `lite-virtual`. |
 

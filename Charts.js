@@ -544,7 +544,13 @@ const extractBarSeriesData = (state, data, xAccessor, yAccessor, categories) => 
 
 /**
  * Re-project domain xs/ys into pixel space using the current scales.
- * Inlines the linear-scale math for ~3x throughput vs calling .map().
+ * Log-aware for BOTH axes: the scale kind is hoisted ONCE and one of four
+ * flat loops is picked by a cold if/else, so there is no per-iteration type
+ * test. For a linear scale the body inlines `v * _slope + _intercept`; for a
+ * log scale the body is `v > 0 ? Math.log(v) * _slope + _intercept : NaN`
+ * (the `_slope`/`_intercept` are already log-space, and a non-positive sample
+ * emits NaN so the polyline/markers break -- matching `map()` at 255-261).
+ * ~3x throughput vs calling .map() on the linear-linear path.
  */
 const scaleSeriesToPixels = (state, xScale, yScale) => {
     const n = state.n;
@@ -559,9 +565,32 @@ const scaleSeriesToPixels = (state, xScale, yScale) => {
     const xIntercept = xScale._intercept;
     const ySlope = yScale._slope;
     const yIntercept = yScale._intercept;
-    for (let i = 0; i < n; i++) {
-        pxs[i] = xs[i] * xSlope + xIntercept;
-        pys[i] = ys[i] * ySlope + yIntercept;
+    const xLog = xScale.type === 'log';
+    const yLog = yScale.type === 'log';
+    if (!xLog && !yLog) {
+        for (let i = 0; i < n; i++) {
+            pxs[i] = xs[i] * xSlope + xIntercept;
+            pys[i] = ys[i] * ySlope + yIntercept;
+        }
+    } else if (xLog && !yLog) {
+        for (let i = 0; i < n; i++) {
+            const vx = xs[i];
+            pxs[i] = vx > 0 ? Math.log(vx) * xSlope + xIntercept : NaN;
+            pys[i] = ys[i] * ySlope + yIntercept;
+        }
+    } else if (!xLog && yLog) {
+        for (let i = 0; i < n; i++) {
+            pxs[i] = xs[i] * xSlope + xIntercept;
+            const vy = ys[i];
+            pys[i] = vy > 0 ? Math.log(vy) * ySlope + yIntercept : NaN;
+        }
+    } else {
+        for (let i = 0; i < n; i++) {
+            const vx = xs[i];
+            const vy = ys[i];
+            pxs[i] = vx > 0 ? Math.log(vx) * xSlope + xIntercept : NaN;
+            pys[i] = vy > 0 ? Math.log(vy) * ySlope + yIntercept : NaN;
+        }
     }
 };
 

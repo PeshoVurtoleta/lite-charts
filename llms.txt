@@ -10,7 +10,23 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.5.0 (current): a presentation cut, additive over v1.4.1, both opt-in,
+> v1.5.1 (current): a correctness patch, no public API change. Fixes
+> log-scale point projection. scaleSeriesToPixels -- the per-extract hot loop
+> that maps domain values to pixels for every projectToPixels renderer
+> (line/area/scatter/bubble) -- inlined linear v*slope+intercept for both
+> axes; on a yScale:{type:'log'} chart the log-space slope hit the raw value
+> without log() first, so the axis+ticks were correct but every point landed
+> off-canvas (top decade of a [1,1000] domain ~tens of thousands of px above a
+> 400px canvas). Present since y-log shipped in v1.4.1. Fix: xLog/yLog resolved
+> once above the loop, four cold-selected flat bodies (linear/linear, log-x,
+> log-y, log-both); a log axis applies v>0 ? log(v)*slope+intercept : NaN so
+> non-positive samples break the polyline exactly as map() does; no per-point
+> branch, no allocation; the linear/linear body is byte-identical (12k-point
+> Object.is parity gate). Bars unaffected (BAR_RENDERER projectToPixels:false).
+> xScale:{type:'log'} still throws at construction (x-log is a separate
+> feature). Torture gate T6.A13 bounds the log branch at maxMajor:0, <=2.0 B/op
+> vs the identical linear projection.
+> v1.5.0: a presentation cut, additive over v1.4.1, both opt-in,
 > no public API breaks. (1) createDonutChart `centerLabel` -- a number in
 > the donut hole as a pointer-events:none DOM overlay (NOT canvas text),
 > font owned by CSS `clamp(--cl-min, calc(--cl-fit / --cl-digits),
@@ -1231,8 +1247,10 @@ charts dynamically.
   established (mock-WebGL2-context unit tests + real-GPU
   Playwright). Bench target: 1M scatter points at 60fps with
   signal-driven pan/zoom.
-- v1.5.0: time-series specialized variants (auto-formatted time
-  axes, hour/day/week binning helpers); legend virtualization via
+- v1.6.0 (candidates): x-log wiring (currently fail-closed at
+  construction); horizontal bars with pan/zoom/brush/value grid;
+  time-series specialized variants (auto-formatted time axes,
+  hour/day/week binning helpers); legend virtualization via
   `@zakkster/lite-virtual` (for charts with hundreds of series);
   annotation layer (text + arrow + region annotations bound to
   data-space coordinates).

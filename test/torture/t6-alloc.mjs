@@ -33,7 +33,10 @@ import {
     installCenterLabelDOM, BREAK, check, die,
 } from './harness.mjs';
 
-const { decimateMinMax, makeLinearScale, updateLinearScale } = _testHelpers;
+const {
+    decimateMinMax, makeLinearScale, updateLinearScale,
+    makeLogScale, updateLogScale, scaleSeriesToPixels,
+} = _testHelpers;
 
 /** Retained sink for the BREAK control -- survives GC so arrayBuffers grows. */
 const leak = [];
@@ -201,5 +204,51 @@ export function run() {
             () => `A12: horizontal ${gH.bytesPerOp.toFixed(3)} B/op vs vertical ${gV.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
         hz.destroy();
         vt.destroy();
+    }
+
+    // --- 6. y-log projection-loop budget (A13, v1.5.1) ------------------------
+    // scaleSeriesToPixels is now log-aware: a log axis takes a Math.log branch
+    // with no per-iteration type test and no allocation. This gate runs THAT loop
+    // directly -- the same pure-kernel shape as section 1's decimateMinMax gate --
+    // because it is the only way to bound the projection cost itself: `redraw()`
+    // never re-projects (it just marks the scene dirty), and driving re-projection
+    // through the reactive Effect 2 drags in that effect's own per-run allocation
+    // (a `niceYDomain` [lo,hi] array), which swamps the branch cost in sampling
+    // noise. Called with real domain-spanning positive data and pre-sized pools,
+    // the op fn allocates nothing at the harness level, so the absolute <=16 B/op
+    // ceiling and maxMajor:0 bound the projection loop, not harness garbage.
+    //
+    // The LINEAR-y projection (linear-linear branch) is driven by the IDENTICAL
+    // call on the SAME data with a linear y-scale, so any fixed overhead cancels
+    // and the differential isolates the log branch's cost. Structural proof is
+    // report.ok (maxMajor:0 / maxArrayBuffersGrowth:0) plus a pixel-pool
+    // byteLength pin; the log-SPECIFIC claim is the <=2.0 B/op differential (the
+    // same shape as A7/A12).
+    {
+        const N = 2000;
+        const xs = new Float32Array(N);
+        const ys = new Float32Array(N);
+        // y in [1, 1000]: three decades, strictly positive so the log branch takes
+        // the Math.log path for every sample (never the NaN guard).
+        for (let i = 0; i < N; i++) {
+            xs[i] = i;
+            ys[i] = (Math.sin(i / 20) * 0.5 + 0.5) * 990 + 1;
+        }
+        const state = { xs, ys, n: N, pxs: new Float32Array(N), pys: new Float32Array(N) };
+        const xLin = updateLinearScale(makeLinearScale('linear'), 0, N, 56, 776);
+        const yLog = updateLogScale(makeLogScale(), 1, 1000, 400, 0);
+        const yLin = updateLinearScale(makeLinearScale('linear'), 1, 1000, 400, 0);
+        const poolBefore = state.pys.buffer.byteLength;
+        const hotLog = () => { scaleSeriesToPixels(state, xLin, yLog); };
+        const hotLin = () => { scaleSeriesToPixels(state, xLin, yLin); };
+        const gLog = runOpsGate(hotLog, { ops: 40000, warmup: 1000 });
+        const gLin = runOpsGate(hotLin, { ops: 40000, warmup: 1000 });
+        check(state.pys.buffer.byteLength === poolBefore,
+            () => `A13: y-log pixel pool grew ${poolBefore} -> ${state.pys.buffer.byteLength}`);
+        if (!gLog.report.ok) die(allocFailMsg('A13.ylog-project', gLog.report, gLog.summary));
+        check(gLog.bytesPerOp <= 16.0,
+            () => `A13: y-log projection allocated ${gLog.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gLog.bytesPerOp - gLin.bytesPerOp) <= 2.0,
+            () => `A13: y-log ${gLog.bytesPerOp.toFixed(3)} B/op vs linear-y ${gLin.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
     }
 }

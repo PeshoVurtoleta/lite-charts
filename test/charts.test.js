@@ -313,6 +313,134 @@ describe('scaleSeriesToPixels', () => {
         assert.equal(state.pys[0], 368);
         assert.equal(state.pys[2], 16);
     });
+
+    // v1.5.1: scaleSeriesToPixels must be LOG-aware for both axes. Before this
+    // patch it inlined LINEAR math unconditionally, so a log scale's log-space
+    // _slope/_intercept were applied to the RAW value -- points flew thousands
+    // of px off canvas. White-box the projection loop directly against map().
+    it('log-y: projected pixels equal yScale.map(v) exactly', () => {
+        const vals = [1, 10, 100, 1000];
+        const n = vals.length;
+        const xLin = updateLinearScale(makeLinearScale(), 0, 3, 0, 720);
+        const yLog = updateLogScale(makeLogScale(), 1, 1000, 400, 0);
+        const state = {
+            xs: new Float64Array([0, 1, 2, 3]),
+            ys: new Float64Array(vals),
+            n,
+            // Float64Array of the right length is returned as-is by
+            // ensureFloat32, so projection keeps full double precision and can
+            // be compared bit-for-bit against map().
+            pxs: new Float64Array(n),
+            pys: new Float64Array(n),
+        };
+        scaleSeriesToPixels(state, xLin, yLog);
+        for (let i = 0; i < n; i++) {
+            assert.ok(Math.abs(state.pys[i] - yLog.map(vals[i])) < 1e-9,
+                'pys[' + i + ']=' + state.pys[i] + ' vs map=' + yLog.map(vals[i]));
+        }
+        // sanity: value 1000 -> pixel 0 (range top), NOT thousands off-canvas.
+        assert.ok(Math.abs(state.pys[3] - 0) < 1e-9);
+    });
+
+    it('log-x: projected pixels equal xScale.map(v) exactly', () => {
+        const vals = [1, 10, 100, 1000];
+        const n = vals.length;
+        const xLog = updateLogScale(makeLogScale(), 1, 1000, 56, 776);
+        const yLin = updateLinearScale(makeLinearScale(), 0, 3, 400, 0);
+        const state = {
+            xs: new Float64Array(vals),
+            ys: new Float64Array([0, 1, 2, 3]),
+            n,
+            pxs: new Float64Array(n),
+            pys: new Float64Array(n),
+        };
+        scaleSeriesToPixels(state, xLog, yLin);
+        for (let i = 0; i < n; i++) {
+            assert.ok(Math.abs(state.pxs[i] - xLog.map(vals[i])) < 1e-9,
+                'pxs[' + i + ']=' + state.pxs[i] + ' vs map=' + xLog.map(vals[i]));
+        }
+    });
+
+    it('log-both: projected pixels equal each scale.map(v) exactly', () => {
+        const vals = [1, 10, 100, 1000];
+        const n = vals.length;
+        const xLog = updateLogScale(makeLogScale(), 1, 1000, 56, 776);
+        const yLog = updateLogScale(makeLogScale(), 1, 1000, 400, 0);
+        const state = {
+            xs: new Float64Array(vals),
+            ys: new Float64Array(vals),
+            n,
+            pxs: new Float64Array(n),
+            pys: new Float64Array(n),
+        };
+        scaleSeriesToPixels(state, xLog, yLog);
+        for (let i = 0; i < n; i++) {
+            assert.ok(Math.abs(state.pxs[i] - xLog.map(vals[i])) < 1e-9);
+            assert.ok(Math.abs(state.pys[i] - yLog.map(vals[i])) < 1e-9);
+        }
+    });
+
+    it('log axis: a non-positive sample projects to NaN (breaks the polyline)', () => {
+        const yLog = updateLogScale(makeLogScale(), 1, 1000, 400, 0);
+        const xLin = updateLinearScale(makeLinearScale(), 0, 3, 0, 720);
+        const state = {
+            xs: new Float64Array([0, 1, 2, 3]),
+            ys: new Float64Array([1, 0, -5, 1000]),
+            n: 4,
+            pxs: new Float64Array(4),
+            pys: new Float64Array(4),
+        };
+        scaleSeriesToPixels(state, xLin, yLog);
+        assert.ok(Number.isNaN(state.pys[1]), 'y=0 must be NaN');
+        assert.ok(Number.isNaN(state.pys[2]), 'y=-5 must be NaN');
+        assert.ok(!Number.isNaN(state.pys[0]));
+        assert.ok(!Number.isNaN(state.pys[3]));
+        // and a non-positive x on a log-x axis too
+        const xLog = updateLogScale(makeLogScale(), 1, 1000, 56, 776);
+        const yLin = updateLinearScale(makeLinearScale(), 0, 3, 400, 0);
+        const s2 = {
+            xs: new Float64Array([1, -2, 100, 1000]),
+            ys: new Float64Array([0, 1, 2, 3]),
+            n: 4,
+            pxs: new Float64Array(4),
+            pys: new Float64Array(4),
+        };
+        scaleSeriesToPixels(s2, xLog, yLin);
+        assert.ok(Number.isNaN(s2.pxs[1]), 'x=-2 must be NaN');
+        assert.ok(!Number.isNaN(s2.pxs[0]));
+    });
+
+    // Zero-regression guard: the linear-linear branch MUST stay byte-identical
+    // to the pre-fix inlined formula. Any drift here moves the hot bench band
+    // and every pixel assertion in the suite. Prove bit-for-bit equality over a
+    // large N against the exact pre-fix expression, rounded through Float32.
+    it('linear/linear parity: bit-identical to the pre-fix formula over 10k pts', () => {
+        const n = 12000;
+        const xs = new Float32Array(n);
+        const ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            xs[i] = Math.sin(i * 0.017) * 500 + 250;
+            ys[i] = Math.cos(i * 0.013) * 8 + 4;
+        }
+        const xLin = updateLinearScale(makeLinearScale(), 0, 500, 56, 776);
+        const yLin = updateLinearScale(makeLinearScale(), 0, 10, 368, 16);
+        const state = { xs, ys, n, pxs: null, pys: null };
+        scaleSeriesToPixels(state, xLin, yLin);
+        const xSlope = xLin._slope, xIntercept = xLin._intercept;
+        const ySlope = yLin._slope, yIntercept = yLin._intercept;
+        // Reference: the exact pre-fix body, stored through Float32 to match
+        // the output typed array's rounding.
+        const refX = new Float32Array(n);
+        const refY = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            refX[i] = xs[i] * xSlope + xIntercept;
+            refY[i] = ys[i] * ySlope + yIntercept;
+        }
+        for (let i = 0; i < n; i++) {
+            assert.ok(Object.is(state.pxs[i], refX[i]), 'pxs[' + i + '] drift');
+            assert.ok(Object.is(state.pys[i], refY[i]), 'pys[' + i + '] drift');
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------

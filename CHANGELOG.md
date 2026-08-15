@@ -5,6 +5,40 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] -- unreleased
+
+A correctness patch. One hot function; no public API change.
+
+### Fixed -- log-scale point projection (line / area / scatter / bubble)
+
+- **`yScale: { type: 'log' }` projected data points with linear math, throwing
+  them off-canvas.** `scaleSeriesToPixels` -- the per-extract hot loop that maps
+  domain values to pixels for every `projectToPixels` renderer -- inlined
+  `v * slope + intercept` for both axes. On a log scale, `slope`/`intercept` are
+  computed in log space (`map(v)` is `log(v) * slope + intercept`), so the loop
+  applied the log-space slope to the raw value without taking `log` first. A
+  y-log line drew its axis and ticks correctly, then placed every point at the
+  wrong pixel -- on a `[1, 1000]` domain the top decade landed tens of thousands
+  of pixels above a 400px canvas. Present since the y-log scale shipped in 1.4.1;
+  the axis, domain fail-closed, and pan/zoom math were all correct -- only the
+  point projection was wrong, and no test asserted a projected pixel.
+- **Fix:** the loop is now log-aware for both axes. `xLog`/`yLog` are resolved
+  once above the loop, which branches cold into one of four flat bodies
+  (linear/linear, log-x, log-y, log-both); a log axis applies
+  `v > 0 ? log(v) * slope + intercept : NaN` so non-positive samples break the
+  polyline exactly as `map()` does. No per-point type test, no allocation. The
+  linear/linear body is byte-identical to before -- the all-linear hot path is
+  bit-for-bit unchanged (proven by a 12k-point `Object.is` parity gate).
+- **Coverage.** New tests assert projection equals `scale.map(v)` within 1e-9 for
+  log-x, log-y, and log-both, and that non-positive samples (including `-0`)
+  project to `NaN`. A pure-kernel torture gate (T6.A13) bounds the log branch at
+  `maxMajor: 0` with a `<= 2.0 B/op` differential against the identical
+  linear-scale projection, and is proven to exercise the log path (one `log()`
+  per sample per op) rather than no-op through the paint path.
+- **Scope.** Bars are unaffected (`projectToPixels: false` -- bar series are
+  never projected through this loop). `xScale: { type: 'log' }` still throws at
+  construction; x-axis log is a separate feature, not enabled here.
+
 ## [1.5.0] -- 2026-08
 
 A presentation cut. Additive only; no public API breaks vs 1.4.1.
