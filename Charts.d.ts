@@ -540,6 +540,21 @@ export interface BarChartConfig extends Omit<LineChartConfig, 'interpolation' | 
      * is forced to 'band'.
      */
     xScale?: { domain?: string[] };
+    /**
+     * v1.5.0: bar orientation. `'vertical'` (default) draws category bands
+     * along X with bars growing up/down from the value baseline. `'horizontal'`
+     * draws category bands along Y (category 0 at the TOP) with bars growing
+     * left/right from the value baseline; the value axis moves to the bottom
+     * and category labels to the left.
+     *
+     * Horizontal is a fail-closed subset in v1.5.0: combining it with `pan`,
+     * `zoom`, `brush`, `grid`, or a log `yScale` throws at construction (those
+     * interactions assume the standard axis roles). When horizontal, the
+     * reactive `crosshair().snapPixelX` holds the BAND-axis pixel (a Y
+     * coordinate), consistent with the vertical convention that snapPixelX is
+     * always the category-axis pixel.
+     */
+    orientation?: 'vertical' | 'horizontal';
 }
 
 export function createBarChart(config: BarChartConfig): Chart;
@@ -832,10 +847,62 @@ export interface PieChartConfig {
     schedule?: (cb: () => void) => unknown;
 }
 
+/** Slice state passed to a `centerLabel.format` callback. */
+export interface CenterLabelState {
+    /** Sum of ALL slice values (visible + hidden). */
+    total: number;
+    /** Sum of VISIBLE slice values -- what the default label shows. */
+    visibleTotal: number;
+    /** Per-slice values, parallel to `labels` / `colors`. */
+    values: Float32Array;
+    labels: string[];
+    colors: string[];
+    /** Per-slice visibility (driven by legend toggles). */
+    visible: boolean[];
+}
+
+/**
+ * v1.5.0: donut center label. A number rendered in the donut hole as a
+ * `pointer-events:none` DOM overlay (NOT canvas text), so its font resizes
+ * itself: the font-size is fixed to
+ * `clamp(minFontSize, hole-radius / digit-count, maxFontSize)` and the chart
+ * writes those custom properties on data/resize only. More digits shrink the
+ * number; there is no per-frame JS and no `measureText`.
+ *
+ * Fail-closed: passing `centerLabel` to a chart with no hole (a pie, or a
+ * resolved `innerRadius` of 0) throws at construction, as does
+ * `minFontSize > maxFontSize`. `exportSVG()` emits an equivalent centered
+ * `<text>`; `exportPNG` does NOT include the overlay.
+ */
+export interface CenterLabelConfig {
+    /** The main text. String for static, `() => string` / signal for reactive. */
+    text?: string | (() => string);
+    /**
+     * Derive the label from slice state. Defaults to the total of visible
+     * slices (used when `centerLabel: true`). Ignored when `text` is set.
+     */
+    format?: (state: CenterLabelState) => string;
+    /** Smaller line beneath the number. String or reactive accessor. */
+    subLabel?: string | (() => string);
+    /** Text color (hex, or a CSS-var token resolved against the container). */
+    color?: string;
+    font?: string;
+    /** clamp() floor / cap in px. `minFontSize > maxFontSize` throws. */
+    minFontSize?: number;
+    maxFontSize?: number;
+}
+
 /** createDonutChart accepts the same config as createPieChart, with a 0.5
- *  innerRadius default instead of 0. The user can still override
- *  innerRadius (e.g. 0.7 for a thinner donut). */
-export type DonutChartConfig = PieChartConfig;
+ *  innerRadius default instead of 0 (overridable), plus the v1.5.0
+ *  `centerLabel`. `centerLabel` on a pie (no hole) throws at construction. */
+export interface DonutChartConfig extends PieChartConfig {
+    /**
+     * v1.5.0: a number in the donut hole. `true` shows the total of visible
+     * slices; a string / accessor is shorthand for `{ text }`; the object form
+     * gives full control. Requires a hole -- throws on `innerRadius` 0.
+     */
+    centerLabel?: boolean | string | (() => string) | CenterLabelConfig;
+}
 
 export interface PolarChart {
     mount(target: HTMLElement | HTMLCanvasElement): PolarChart;
@@ -852,6 +919,8 @@ export interface PolarChart {
     readonly canvas: HTMLCanvasElement | null;
     readonly geometry: { cx: number; cy: number; rOuter: number; rInner: number };
     readonly legend: HTMLElement | null;
+    /** v1.5.0: the donut center-label overlay element, or null when not configured. */
+    readonly centerLabel: HTMLElement | null;
     plotBounds: unknown;
     crosshair: unknown;
     sliceVisibility: Array<unknown>;

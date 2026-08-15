@@ -5,12 +5,35 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.4.0 (current)
+## v1.5.0 (current)
 
-Three new interaction primitives on axis-kernel charts (log scale, pan +
+A presentation cut, additive over v1.4.1, both features opt-in and no
+public API breaks:
+
+- **Donut `centerLabel`** -- a number in the donut hole rendered as a
+  `pointer-events:none` DOM overlay (not canvas text), with the font size
+  owned by CSS `clamp()`: the chart writes the hole radius and the label's
+  digit count as custom properties on data/resize only, so more digits
+  shrink the number and there is no per-frame JS and no `measureText`.
+  Fail-closed on a chart with no hole. Lives entirely in the polar kernel.
+- **Horizontal bar `orientation`** -- category band on the Y axis, bars
+  growing from the value baseline along X. The vertical draw path is
+  byte-identical (a peer draw function is chosen once at setup).
+  Fail-closed when combined with `pan` / `zoom` / `brush` / a value grid /
+  a log value axis; those interactions are deferred to a later 1.5.x.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.4.0 (+ v1.4.1 patch)
+
+Three interaction primitives on axis-kernel charts (log scale, pan +
 zoom, brushing) plus four pre-existing allocation traps closed during a
-bare-metal audit. See CHANGELOG.md for the full v1.4 details across the
-alpha line; the entries below track v1.3.0 and earlier.
+bare-metal audit. The v1.4.1 patch made log-axis pan/zoom correct and
+fail-closed (findings LC-01..LC-05) -- it had been broken on the first
+gesture. See CHANGELOG.md for the full v1.4 details across the alpha
+line; the entries below track v1.3.0 and earlier.
 
 ---
 
@@ -305,7 +328,13 @@ the lifecycle API (mount/unmount/destroy/exportSVG).
 re-projection. lite-gl's README claims it; the integration test
 proves it.
 
-### v1.5.0 -- Scale + polish
+### v1.6.0 -- Scale + polish
+
+> v1.5.0 instead shipped the donut center label and horizontal bar
+> orientation (see the top of this file). The items below rolled forward
+> to the next minor, joined by x-log wiring and horizontal bars with the
+> interaction set (`pan` / `zoom` / `brush` / value grid) that 1.5.0
+> deliberately fail-closes on.
 
 - **Time-series specialized variants** -- `createTimeLineChart` etc.
   with built-in date tick generation, weekday/weekend shading,

@@ -142,6 +142,35 @@ export function run() {
     }), null);
     pin('bar/nan-y', () => createBarChart({ data: [{ x: 'A', y: NaN }, { x: 'B', y: 3 }], ...SYNC }), null);
 
+    // === bar: horizontal orientation (v1.5.0, A14) ==========================
+    // Every degenerate case must mount/draw/export/destroy without a throw, a
+    // leak, or a NaN reaching a bar rect (a NaN value must SKIP its bar, not
+    // emit fillRect(NaN)).
+    const noNaNBars = (label) => (chart) => {
+        const calls = chart.canvas.getContext('2d').calls;
+        for (const c of calls) {
+            if (c[0] === 'fillRect' || c[0] === 'roundRect') {
+                for (const a of c[1]) {
+                    check(!Number.isNaN(a), () => `T1.${label}: NaN in ${c[0]} arg`);
+                }
+            }
+        }
+    };
+    pin('hbar/empty', () => createBarChart({ data: [], orientation: 'horizontal', ...SYNC }), noNaNBars('hbar/empty'));
+    pin('hbar/single', () => createBarChart({ data: [{ x: 'A', y: 10 }], orientation: 'horizontal', ...SYNC }), noNaNBars('hbar/single'));
+    pin('hbar/all-nan', () => createBarChart({ data: [{ x: 'A', y: NaN }, { x: 'B', y: NaN }], orientation: 'horizontal', ...SYNC }), noNaNBars('hbar/all-nan'));
+    pin('hbar/all-zero', () => createBarChart({ data: [{ x: 'A', y: 0 }, { x: 'B', y: 0 }], orientation: 'horizontal', ...SYNC }), noNaNBars('hbar/all-zero'));
+    pin('hbar/single-negative', () => createBarChart({ data: [{ x: 'A', y: -5 }], orientation: 'horizontal', ...SYNC }), noNaNBars('hbar/single-negative'));
+    // 300 categories in a 200px plot -> ~0.43px bands: the degenerate case is
+    // sub-pixel band packing (labels must thin, bars must not NaN). Count is
+    // capped at 300 because pin() mounts a RECORDING canvas -- thousands of bars
+    // OOM the recorder (true for vertical too; a pre-existing harness cost, not a
+    // bar defect). The scale math is exercised regardless of count.
+    pin('hbar/300-cats-200px', () => createBarChart({
+        data: Array.from({ length: 300 }, (_, i) => ({ x: 'c' + i, y: (i % 7) - 3 })),
+        orientation: 'horizontal', width: 200, height: 200, ...SYNC,
+    }), noNaNBars('hbar/300-cats-200px'));
+
     // === pie / donut: value slices ==========================================
     for (const [pname, pf] of [['pie', createPieChart], ['donut', createDonutChart]]) {
         pin(`${pname}/empty`, () => pf({ data: [], ...SYNC }), null);

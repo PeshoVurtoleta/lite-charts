@@ -10,7 +10,23 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.4.0 (current): the v1.4 release. THREE new interaction primitives
+> v1.5.0 (current): a presentation cut, additive over v1.4.1, both opt-in,
+> no public API breaks. (1) createDonutChart `centerLabel` -- a number in
+> the donut hole as a pointer-events:none DOM overlay (NOT canvas text),
+> font owned by CSS `clamp(--cl-min, calc(--cl-fit / --cl-digits),
+> --cl-max)`; chart writes hole radius + label digit-count as custom props
+> on data/resize only (sub-Hz), zero per-frame JS, no measureText; box
+> constrained to the hole's inscribed square; fail-closed (throws on a pie
+> or innerRadius-0 hole, and minFontSize > maxFontSize); exportSVG emits an
+> equivalent centered <text>, exportPNG does NOT include the overlay.
+> (2) createBarChart `orientation: 'horizontal'` -- category band on the Y
+> axis (category 0 at top), bars grow from the value baseline along X;
+> vertical draw path is byte-identical (peer draw fn + pixel-range swap
+> chosen once at setup, no per-frame branch); fail-closed subset -- throws
+> when combined with pan/zoom/brush/value-grid/log axis (deferred to a
+> later 1.5.x); crosshair().snapPixelX is the band-axis pixel when
+> horizontal. See the dedicated sections below for both.
+> v1.4.0: the v1.4 release. THREE new interaction primitives
 > on axis-kernel charts plus FOUR pre-existing allocation traps closed
 > during a bare-metal audit. No public API breaks vs v1.3.0; all new
 > features are opt-in. (1) Log scale on the y-axis via
@@ -473,6 +489,42 @@ const chart = createLineChart({ data, width: w, height: 400 });  // mixed
 w.set(1200);  // triggers resize + rescale + redraw automatically
 ```
 
+The donut `centerLabel.text` and `centerLabel.subLabel` follow the same rule --
+pass a string for a static label or a `() => string` / signal for a reactive one
+(see "Donut center label" below).
+
+## Donut center label (v1.5.0)
+
+`createDonutChart` accepts `centerLabel` -- a number rendered in the hole as a
+`pointer-events:none` DOM overlay (NOT canvas text), so it resizes itself:
+
+```js
+const data = signal([{label:'Search', value:4200}, {label:'Direct', value:2800}]);
+createDonutChart({
+  data, innerRadius: 0.55,
+  centerLabel: {
+    text: () => data().reduce((s, d) => s + d.value, 0).toLocaleString(),
+    subLabel: 'Total',
+  },
+});
+```
+
+- Config: `boolean | string | (() => string) | { text, format, subLabel, color,
+  font, minFontSize, maxFontSize }`. `centerLabel: true` defaults `format` to the
+  total of visible slices; a string / accessor is shorthand for `{ text }`.
+- Font size is owned by CSS: the overlay is fixed at
+  `font-size: clamp(var(--cl-min), calc(var(--cl-fit) / var(--cl-digits)),
+  var(--cl-max))`. On data/resize only (sub-Hz) the chart writes `--cl-fit` (hole
+  radius), `--cl-digits` (label length), `--cl-min`/`--cl-max` (floor/cap). More
+  digits shrink the number; it tracks resize; zero per-frame JS, no `measureText`.
+- Fail-closed: throws at construction if there is no hole (a pie, or resolved
+  `innerRadius` 0), and if `minFontSize > maxFontSize`.
+- `chart.exportSVG()` emits an equivalent centered `<text>` (same fit formula).
+  `chart.centerLabel` exposes the overlay element (null when not configured).
+- Zero hot-path cost: the overlay is a DOM sibling of the canvas, never a scene
+  node, so the per-frame slice draw is untouched; the `line`/`bar`/`heatmap`
+  bundles never pull it in.
+
 ## Data shape conventions
 
 Two accepted forms:
@@ -600,6 +652,13 @@ createLineChart({
   `signal.update(() => ({xs, ys}))`. Future v1.1: add an opt-in
   "rebroadcast" flag to skip the equality check.
 - **`exportPNG` requires a real HTMLCanvasElement.** Throws on mock canvases.
+- **`exportPNG` does NOT include the donut `centerLabel`.** PNG export is a
+  `canvas.toDataURL`, and the center label is a DOM overlay, not a canvas pixel.
+  Use `exportSVG` (which emits an equivalent `<text>`) if you need the label in
+  an exported image. Intentional.
+- **A donut `centerLabel` requires mounting into a DOM element with a parent**
+  (so the overlay has a host to interpose). Mounting onto a bare detached canvas
+  throws; a plain donut without `centerLabel` mounts anywhere as before.
 - **Mount target may be either an element (canvas created inside) or a
   canvas itself.** Test mocks duck-type via `getContext`.
 - **In Node, the default schedule is synchronous.** This is correct for

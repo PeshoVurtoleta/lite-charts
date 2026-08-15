@@ -17,13 +17,32 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.4.0 -- three new interaction primitives on axis-kernel
-charts (log scale, pan + zoom, brushing) plus four pre-existing
-allocation traps closed during a bare-metal audit. No public API
-breaks vs v1.3.0; the new features are all opt-in. **320/320 tests
-pass.**
+**Status:** v1.5.0 -- a presentation cut: a dynamic donut center label
+(a number in the hole, sized by CSS `clamp()`) and horizontal bar
+orientation. Additive only; no public API breaks vs v1.4.1, both
+features opt-in. **363/363 tests pass** plus a torture/stress gate
+(`npm run torture`).
 
-**New in v1.4.0:**
+**New in v1.5.0:**
+- **`centerLabel` on `createDonutChart`** -- a number rendered in the
+  donut hole as a `pointer-events:none` DOM overlay (not canvas text),
+  so its font resizes itself. Font size is owned by CSS `clamp()`: the
+  chart writes the hole radius and the label's digit count as custom
+  properties on data/resize only (sub-Hz), and more digits shrink the
+  number to stay inside the ring -- zero per-frame JS, no `measureText`.
+  Accepts `boolean | string | (() => string) | { text, format, subLabel,
+  color, font, minFontSize, maxFontSize }`. Fail-closed: throws on a
+  chart with no hole (a pie, or `innerRadius` 0). See "Donut center
+  label" below.
+- **`orientation: 'horizontal'` on `createBarChart`** -- category band
+  on the Y axis (category 0 at top), bars growing from the value
+  baseline along X. The vertical draw path is byte-identical (horizontal
+  selects a peer draw function once at setup). Fail-closed subset for
+  this cut: `horizontal` combined with `pan` / `zoom` / `brush` / a value
+  `grid` / a log value axis throws at construction. See "Horizontal
+  orientation" below.
+
+**Inherited from v1.4.0 (+ the v1.4.1 patch):**
 - **`yScale: { type: 'log' }`** -- log scale on the y-axis for any
   axis-kernel chart. Base-10 log; ticks via `lite-axis.logTicks`.
   See "Log scale" below.
@@ -41,6 +60,12 @@ pass.**
   `charBufToString` via `apply`; SVG path chunks for 100k+ point
   export. No public API changes; pre-existing leaks in v1.2-1.3
   code, fixed silently.
+- **Log-aware pan/zoom (v1.4.1 patch).** `pan` / `zoom` on a
+  `yScale: { type: 'log' }` chart now run their arithmetic in log
+  space (`_applyPanLog` / `_applyZoomLog`) with a domain floor;
+  before, the first gesture drove the domain wrong or negative
+  (findings LC-01..LC-05). `updateLogScale` throws on a non-positive
+  domain; `xScale: { type: 'log' }` throws until it is fully wired.
 
 **Inherited from v1.3.0:**
 - **`chart.exportSVG()`** on every chart. Safe at 100k+ points
@@ -531,6 +556,7 @@ createBarChart({
 | `paddingInner` | `number` | `0.15` | Gap between bands as fraction of step. d3 convention. |
 | `paddingOuter` | `number` | `0.1` | Padding at each end of the range as fraction of step. |
 | `groupInnerPad` | `number` | `0.08` | Inner gap between bars within a grouped slot. |
+| `orientation` | `'vertical' \| 'horizontal'` | `'vertical'` | `'horizontal'` puts the category band on Y (v1.5.0). Any other value throws. |
 
 **Hit detection is discrete.** Unlike line/area which uses `bisectNearest`
 (O(log n) over the x array), bar uses `bandScale.invert(canvasX)` which is
@@ -541,10 +567,42 @@ regardless of category count.
 **Y-domain includes the baseline by default** so bars don't visually float.
 Override with `yScale: { domain: [...] }` if you need a fixed window.
 
-**Stacked layout** ships in v1.1.1. The current beta only supports grouped
-multi-series (which is the right default -- stacked introduces design
-choices around shared y-domain and tooltip ordering that are worth a
-dedicated session).
+**Stacked layout** (v1.1.0) flips the grouped layout with `stack: true`;
+each series gets per-category `stackBottoms` / `stackTops` in data space
+from a `postExtract` hook, and the y-domain rolls up to the cumulative
+total.
+
+### Horizontal orientation (v1.5.0)
+
+```javascript
+createBarChart({
+    orientation: 'horizontal',
+    series: [{ name: 'Downloads', color: '--c-primary', data: [
+        { x: 'TypeScript', y: 1840 },
+        { x: 'Python',     y: 1620 },
+        { x: 'Rust',       y: 940  },
+    ]}],
+});
+```
+
+`orientation: 'horizontal'` swaps the category band onto the **Y axis**
+(category 0 at top, reusing the heatmap y-band convention) and grows each
+bar from the value baseline along **X**; the value axis moves to the
+bottom and category labels sit right-aligned on the left. Rankings and
+long category labels read better this way than rotated under a vertical
+axis.
+
+The **vertical draw path is byte-identical to v1.4.1** -- horizontal
+selects a peer draw function (`makeHBarDrawFn`) and a pixel-range swap
+once at setup, so there is no per-frame branch and a vertical chart pays
+nothing. Proven by a SHA-256 hash-parity test over the five hot draw
+functions.
+
+**Fail-closed subset for this cut.** `orientation: 'horizontal'` combined
+with `pan`, `zoom`, `brush`, a value-axis `grid`, or a log value axis
+throws at construction rather than half-wiring the interaction (those
+land in a later 1.5.x). `crosshair().snapPixelX` reports the band-axis
+pixel when horizontal.
 
 ## Tree-shakeable architecture (v1.2.0)
 
@@ -646,6 +704,54 @@ export const createHeatmap = (c) => createBaseGridChart(c, HEATMAP_RENDERER);
 Each chart type added to the library costs nothing for users who don't
 import it. A dashboard that only needs line and bar charts gets a ~30 KB
 bundle even after pie, donut, radar, bubble, and heatmap ship.
+
+## Donut center label (v1.5.0)
+
+A number in the donut hole, rendered as a `pointer-events:none` DOM
+overlay (a sibling of the canvas, **not** canvas text or a scene node) so
+it resizes itself and never touches the per-frame slice draw:
+
+```javascript
+import { signal, createDonutChart } from '...';
+
+const data = signal([
+    { label: 'Search', value: 4200 },
+    { label: 'Direct', value: 2800 },
+]);
+
+createDonutChart({
+    data,
+    innerRadius: 0.55,
+    centerLabel: {
+        text: () => data().reduce((s, d) => s + d.value, 0).toLocaleString(),
+        subLabel: 'Total',
+    },
+});
+```
+
+- **Config:** `boolean | string | (() => string) | { text, format,
+  subLabel, color, font, minFontSize, maxFontSize }`. `centerLabel: true`
+  defaults `format` to the total of visible slices; a string or accessor
+  is shorthand for `{ text }`. `text` and `subLabel` are static-or-signal
+  -- an accessor makes the label reactive.
+- **Font size is owned by CSS.** The overlay is fixed at mount to
+  `font-size: clamp(var(--cl-min), calc(var(--cl-fit) / var(--cl-digits)),
+  var(--cl-max))`. On data/resize only (sub-Hz) the chart writes
+  `--cl-fit` (hole radius), `--cl-digits` (label length), and the
+  min/max floor and cap. More digits shrink the number; it tracks the
+  donut as it resizes; there is **zero per-frame JS and no
+  `measureText`**. The overlay box is constrained to the hole's inscribed
+  square so text cannot overflow the ring.
+- **Fail-closed.** Throws at construction on a chart with no hole (a pie,
+  or a resolved `innerRadius` of 0), and if `minFontSize > maxFontSize`.
+- **SVG export parity.** `chart.exportSVG()` emits an equivalent centered
+  `<text>` from the same fit formula (plus a second `<text>` for the
+  sub-label). `exportPNG` does **not** include the overlay -- it is a
+  `toDataURL` of the canvas only, by design. `chart.centerLabel` exposes
+  the overlay element (null when not configured).
+- **Requires a mount target with a parent** (the overlay is absolutely
+  positioned against the chart container); a plain donut without
+  `centerLabel` still mounts anywhere.
 
 ## Performance
 
@@ -1088,10 +1194,10 @@ forward plan and the development history that led here. Headlines:
 | **v1.2.0** | Heatmap polish (row + column highlight, quantile binning, auto-contrast value labels); `chart.destroy()` terminal teardown on every kernel. 245 tests. |
 | **v1.3.0** | `chart.exportSVG()` across all nine charts via a Canvas2D-shim that walks the live scene tree. Pixel-identical to canvas paint (minus DPR scaling). Pre-existing bar-label centering bug found and fixed. 259 tests. |
 | **v1.4.0** | Three interaction primitives on axis-kernel charts: log scale on y (`yScale: { type: 'log' }`), pan + zoom (`pan` / `zoom`, `chart.view`), brushing (`brush`, `chart.brush`). Plus four pre-existing allocation traps closed during a bare-metal audit. 320 tests. Shipped across alphas .0-.3; see CHANGELOG for the per-alpha breakdown. |
-| **v1.4.1** (this) | Correctness patch: log-aware pan/zoom math (`_applyPanLog` / `_applyZoomLog`, log-space arithmetic + a domain floor), per-axis branching, and fail-closed scale validation -- a log chart could not be panned or zoomed before (findings LC-01..LC-05). `updateLogScale` throws on an invalid domain; `xScale: { type: 'log' }` throws until v1.5.0. 341 tests + a torture/stress gate (`npm run torture`). |
-| v1.5.0 (next) | TBD. Candidate themes: x-log wiring (currently fail-closed); brush-on-band-axis (proper bar/band support); configurable brush modifier; brush IDs from all visible series instead of just the primary. |
+| **v1.4.1** | Correctness patch: log-aware pan/zoom math (`_applyPanLog` / `_applyZoomLog`, log-space arithmetic + a domain floor), per-axis branching, and fail-closed scale validation -- a log chart could not be panned or zoomed before (findings LC-01..LC-05). `updateLogScale` throws on an invalid domain; `xScale: { type: 'log' }` throws until wired. 341 tests + a torture/stress gate (`npm run torture`). |
+| **v1.5.0** (this) | Presentation cut. Donut `centerLabel` -- a number in the hole as a CSS-`clamp()`-sized DOM overlay (digit count drives the font; zero per-frame JS). Horizontal bar `orientation` -- category band on Y, byte-identical vertical draw path, fail-closed vs `pan` / `zoom` / `brush` / value `grid` / log axis. Additive, no public API breaks vs 1.4.1. 363 tests + torture gate. |
 | **companion** | `@zakkster/lite-charts-gl` v0.1.0+ -- separate WebGL2 package built on `@zakkster/lite-gl`. Scatter / bubble / density charts targeting the 100k-1M point range. lite-charts core stays canvas-only and node-testable. |
-| v1.5.0 | Time-series specialized variants; legend virtualization via `lite-virtual`; annotation layer |
+| v1.6.0 (candidates) | x-log wiring (currently fail-closed); horizontal bars with `pan` / `zoom` / `brush` / value grid; configurable brush modifier; brush IDs across all visible series; time-series variants; annotation layer; legend virtualization via `lite-virtual`. |
 
 ## Ecosystem
 

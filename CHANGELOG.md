@@ -5,6 +5,78 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] -- 2026-08
+
+A presentation cut. Additive only; no public API breaks vs 1.4.1.
+
+### Added -- donut center label (DOM overlay, CSS-clamped)
+
+- **`centerLabel` on `createDonutChart`.** Renders a number in the donut hole as
+  a `pointer-events:none` DOM overlay centered on the ring's inner circle -- NOT
+  canvas text, so the font resizes itself. Accepts
+  `boolean | string | (() => string) | { text, format, subLabel, color, font,
+  minFontSize, maxFontSize }`. `text` and `subLabel` are static-or-signal (an
+  accessor makes the label reactive); `format(state) => string` derives the label
+  from slice state (defaults to the total of visible slices when `centerLabel:
+  true`); an optional `subLabel` renders a smaller line beneath.
+- **Font size is owned by CSS `clamp()`.** The overlay's font-size is fixed at
+  mount to `clamp(var(--cl-min), calc(var(--cl-fit) / var(--cl-digits)),
+  var(--cl-max))`; on data/resize only (sub-Hz) the chart writes the four custom
+  properties -- `--cl-fit` from the hole radius, `--cl-digits` from the label
+  length, `--cl-min`/`--cl-max` as the floor/cap. More digits shrink the number;
+  it tracks the donut as it resizes; there is no per-frame JS and no
+  `measureText`. The overlay box is constrained to the hole's inscribed square so
+  text cannot overflow the ring.
+- **Fail-closed.** `centerLabel` on a chart with no hole (a pie, or a resolved
+  `innerRadius` of 0) throws at construction, naming the reason. `minFontSize >
+  maxFontSize` also throws.
+- **SVG export parity.** `chart.exportSVG()` emits an equivalent centered
+  `<text>` (font-size from the same fit formula, plus a second `<text>` for the
+  sub-label) so canvas and SVG match. `exportPNG` does NOT include the overlay --
+  it is a `toDataURL` of the canvas only; this is intentional and documented.
+
+### Added -- horizontal bar orientation
+
+- **`orientation: 'horizontal'` on `createBarChart`.** Puts the category band on
+  the Y axis (category 0 at top, reusing the heatmap y-band convention) and grows
+  each bar from the value baseline along X; the value axis moves to the bottom and
+  category labels sit right-aligned on the left. Defaults to `'vertical'`; any
+  other value throws at construction.
+- **The vertical path is byte-identical.** Horizontal selects a peer draw
+  function (`makeHBarDrawFn`) once at setup rather than branching per frame, so a
+  vertical bar chart draws exactly as it did in 1.4.1. Proven by a SHA-256
+  hash-parity test over the five hot draw functions and a differential torture
+  redraw (horizontal allocates the same as vertical within sampling noise).
+- **Fail-closed subset.** The v1.5.0 cut is a static ranking chart.
+  `orientation: 'horizontal'` combined with `pan`, `zoom`, `brush`, a value-axis
+  `grid`, or a log value axis throws at construction, naming the reason, rather
+  than half-wiring the interaction. Those combinations are planned for a later
+  1.5.x. `crosshair().snapPixelX` reports the band-axis pixel when horizontal.
+
+### Performance / bundle
+
+- **Zero hot-path cost.** The overlay is a DOM sibling of the canvas, never a
+  scene node, so `makeSliceDrawFn` and the per-frame scene walk gain zero bytes
+  and zero branches; a plain donut pays one construction-time null check. Proven
+  by the torture gate: a labelled-donut redraw allocates the same as an
+  unlabelled one within sampling noise (`report.ok`, `maxMajor:0`), and 4096
+  text-signal writes stay within a small per-op budget.
+- **Horizontal bars add no per-frame branch.** The orientation is resolved to a
+  peer draw function and a pixel-range swap at setup; the per-bar draw loop is
+  unchanged, and vertical output is byte-identical to 1.4.1.
+- **Kernel isolation preserved.** The center label lives entirely in the polar
+  kernel and horizontal bars entirely in the axis kernel; the `line` / `heatmap`
+  bundles are byte-identical to 1.4.1 and contain neither `centerLabel` /
+  `--cl-fit` nor `makeHBarDrawFn`.
+
+### Demo
+
+- **`demo/index.html` showcases all three v1.5.0 surfaces.** A horizontal-bar
+  ranking section; a dynamic donut `centerLabel` (live total in the hole with a
+  "scale x100" toggle that visibly steps the clamp font down as the digit count
+  grows); and a log-y chart with `pan` + `zoom` enabled -- the v1.4.1 C0 proof,
+  previously absent from the demo. Demo version strings bumped to v1.5.0.
+
 ## [1.4.1] -- 2026-07
 
 A correctness patch: **a log-scale chart could not be panned or zoomed**. v1.4

@@ -26,10 +26,11 @@
  * plain `npm run torture` already proves the gate bites.
  */
 
-import { _testHelpers, createLineChart } from '../../Charts.js';
+import { _testHelpers, createLineChart, createDonutChart, createBarChart } from '../../Charts.js';
+import { signal } from '@zakkster/lite-signal';
 import {
     createEventCanvas, quietCanvas, fireShared, runOpsGate, allocFailMsg,
-    BREAK, check, die,
+    installCenterLabelDOM, BREAK, check, die,
 } from './harness.mjs';
 
 const { decimateMinMax, makeLinearScale, updateLinearScale } = _testHelpers;
@@ -98,5 +99,107 @@ export function run() {
         fireShared(canvas, 'pointerup', 300, 220);
         if (!report.ok) die(allocFailMsg('T6.pointer-storm', report, summary));
         chart.destroy();
+    }
+
+    // --- 4. centerLabel redraw budget (A7) + text-write budget (A8) -----------
+    // A7: a mounted donut WITH centerLabel re-issuing draws allocates no more
+    // than the SAME donut WITHOUT it -- the overlay is not on the draw path.
+    // A8: a text-signal write drives the cold DOM update; it must stay within a
+    // small per-op budget. Both keep maxMajor:0.
+    {
+        const dom = installCenterLabelDOM();
+        try {
+            // A7 -- redraw with the label mounted vs. a plain donut.
+            const withCL = createDonutChart({
+                data: [{ value: 1 }, { value: 2 }], width: 400, height: 400,
+                centerLabel: { text: () => '1234' }, legend: false, schedule: (fn) => fn(),
+            });
+            const h1 = dom.canvasInContainer(400, 400);
+            withCL.mount(h1.canvas);
+            quietCanvas(h1.canvas);
+
+            const plain = createDonutChart({
+                data: [{ value: 1 }, { value: 2 }], width: 400, height: 400,
+                legend: false, schedule: (fn) => fn(),
+            });
+            const h2 = dom.canvasInContainer(400, 400);
+            plain.mount(h2.canvas);
+            quietCanvas(h2.canvas);
+
+            // 50k-op window: at 10k the fixed heapUsed sampling quantum (~15 KB)
+            // dominates bytesPerOp -- even a NO-LABEL donut floats to 2-4 B/op
+            // there, so an absolute 1 B/op floor gates sampling noise, not the
+            // label. A larger window amortizes the quantum below 1 B/op.
+            const gCL = runOpsGate(() => { withCL.redraw(); }, { ops: 50000, warmup: 500 });
+            const gPlain = runOpsGate(() => { plain.redraw(); }, { ops: 50000, warmup: 500 });
+            if (!gCL.report.ok) die(allocFailMsg('A7.redraw', gCL.report, gCL.summary));
+            check(gCL.summary.gc.maxMs <= 2.0,
+                () => `A7: redraw pause ${gCL.summary.gc.maxMs.toFixed(3)}ms > 2.0`);
+            // The structural zero-alloc proof is report.ok (maxMajor:0 /
+            // maxArrayBuffersGrowth:0) -- the same gate the plain-redraw loop
+            // above trusts. The label-SPECIFIC claim -- the overlay is not on the
+            // draw path -- is the differential: a labelled redraw costs the same
+            // as an unlabelled one within sampling noise. A loose absolute ceiling
+            // still catches a gross per-frame regression (a real one would be
+            // tens-to-hundreds of B/op, far above the sub-1 B/op noise floor).
+            check(gCL.bytesPerOp <= 16.0,
+                () => `A7: centerLabel redraw allocated ${gCL.bytesPerOp.toFixed(3)} B/op > 16`);
+            check(Math.abs(gCL.bytesPerOp - gPlain.bytesPerOp) <= 2.0,
+                () => `A7: label redraw ${gCL.bytesPerOp.toFixed(3)} B/op vs plain ${gPlain.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
+            withCL.destroy();
+            plain.destroy();
+
+            // A8 -- text-signal write budget. Each write fires Effect 5 -> the
+            // cold DOM writer (four setProperty + textContent). <=512 B/op.
+            const text = signal('1');
+            const upd = createDonutChart({
+                data: [{ value: 1 }, { value: 2 }], width: 400, height: 400,
+                centerLabel: { text }, legend: false, schedule: (fn) => fn(),
+            });
+            const h3 = dom.canvasInContainer(400, 400);
+            upd.mount(h3.canvas);
+            quietCanvas(h3.canvas);
+            const gUpd = runOpsGate((i) => { text.set(String(i & 1023)); }, { ops: 4096, warmup: 256 });
+            if (!gUpd.report.ok) die(allocFailMsg('A8.text-write', gUpd.report, gUpd.summary));
+            check(gUpd.bytesPerOp <= 512,
+                () => `A8: text-write allocated ${gUpd.bytesPerOp} B/op > 512`);
+            upd.destroy();
+        } finally {
+            dom.uninstall();
+        }
+    }
+
+    // --- 5. horizontal bar redraw budget (A12) --------------------------------
+    // A horizontal-bar redraw must allocate no more than the vertical one on the
+    // identical dataset -- makeHBarDrawFn is a peer of makeBarDrawFn with the same
+    // scalar-only profile. 50k-op window amortizes the fixed heapUsed sampling
+    // quantum (see A7); the structural proof is report.ok, the orientation-
+    // specific claim is the vertical/horizontal differential.
+    {
+        const mk = (horizontal) => {
+            const c = createBarChart({
+                series: [
+                    { name: 'a', data: Array.from({ length: 100 }, (_, i) => ({ x: 'c' + i, y: (i % 13) - 6 })) },
+                    { name: 'b', data: Array.from({ length: 100 }, (_, i) => ({ x: 'c' + i, y: (i % 5) + 1 })) },
+                    { name: 'd', data: Array.from({ length: 100 }, (_, i) => ({ x: 'c' + i, y: (i % 8) })) },
+                ],
+                width: 600, height: 400, orientation: horizontal ? 'horizontal' : 'vertical',
+                cornerRadius: 4, hoverTint: 'rgba(255,255,255,0.2)', schedule: (fn) => fn(),
+            });
+            const cv = createEventCanvas(600, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const hz = mk(true), vt = mk(false);
+        const gH = runOpsGate(() => { hz.redraw(); }, { ops: 50000, warmup: 500 });
+        const gV = runOpsGate(() => { vt.redraw(); }, { ops: 50000, warmup: 500 });
+        if (!gH.report.ok) die(allocFailMsg('A12.hbar-redraw', gH.report, gH.summary));
+        check(gH.bytesPerOp <= 16.0,
+            () => `A12: horizontal redraw allocated ${gH.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gH.bytesPerOp - gV.bytesPerOp) <= 2.0,
+            () => `A12: horizontal ${gH.bytesPerOp.toFixed(3)} B/op vs vertical ${gV.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
+        hz.destroy();
+        vt.destroy();
     }
 }

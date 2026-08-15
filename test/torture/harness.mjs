@@ -94,7 +94,7 @@ export function runOpsGate(fn, opts) {
         warmup: opts.warmup === undefined ? 0 : opts.warmup,
         stabilize: 'deep',
     });
-    return { report: checkNoGc(res.summary, RULES), summary: res.summary };
+    return { report: checkNoGc(res.summary, RULES), summary: res.summary, bytesPerOp: res.bytesPerOp };
 }
 
 /** One-line diagnostic for a rejected alloc window. */
@@ -187,6 +187,71 @@ export function createEventCanvas(width, height) {
         _container: container,
     };
     return canvas;
+}
+
+// ---------------------------------------------------------------------------
+// centerLabel DOM host (v1.5.0)
+// ---------------------------------------------------------------------------
+//
+// The bare event-canvas above has no DOM parent to host the donut centerLabel
+// overlay. This installs a minimal `document` whose elements support the
+// interposition the polar kernel performs (insertBefore + reparent), plus a
+// canvas-in-container factory. `canvasInContainer` keeps `canvasCreated=false`
+// (the chart mounts onto an existing canvas), so unmount leaves the canvas in
+// its container -- exactly what the A6 restore assertion checks.
+
+export function installCenterLabelDOM() {
+    const mkStyle = () => {
+        const p = new Map();
+        return { setProperty(k, v) { p.set(k, v); }, getPropertyValue(k) { return p.get(k) || ''; } };
+    };
+    const mkEl = (tag) => ({
+        tagName: (tag || 'div').toUpperCase(),
+        childNodes: [], parentNode: null, parentElement: null,
+        style: mkStyle(), className: '', textContent: '',
+        appendChild(c) {
+            if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
+            this.childNodes.push(c); c.parentNode = this; c.parentElement = this; return c;
+        },
+        insertBefore(c, ref) {
+            if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
+            const i = this.childNodes.indexOf(ref);
+            if (i < 0) this.childNodes.push(c); else this.childNodes.splice(i, 0, c);
+            c.parentNode = this; c.parentElement = this; return c;
+        },
+        removeChild(c) {
+            const i = this.childNodes.indexOf(c);
+            if (i >= 0) this.childNodes.splice(i, 1);
+            c.parentNode = null; c.parentElement = null; return c;
+        },
+        querySelectorAll() { return []; },
+    });
+    const mkCanvas = (w, h) => {
+        const c = mkEl('canvas');
+        let _w = w || 320, _h = h || 240, _ctx = null;
+        const L = new Map();
+        Object.defineProperty(c, 'width', { get() { return _w; }, set(v) { _w = v | 0; } });
+        Object.defineProperty(c, 'height', { get() { return _h; }, set(v) { _h = v | 0; } });
+        c.getContext = (t) => { if (t !== '2d') return null; if (!_ctx) _ctx = createMockContext(); return _ctx; };
+        c.getBoundingClientRect = () => ({ left: 0, top: 0, width: _w, height: _h, x: 0, y: 0, right: _w, bottom: _h });
+        c.addEventListener = (ty, fn) => { let s = L.get(ty); if (!s) { s = new Set(); L.set(ty, s); } s.add(fn); };
+        c.removeEventListener = (ty, fn) => { const s = L.get(ty); if (s) s.delete(fn); };
+        c._listenerCount = () => { let n = 0; for (const s of L.values()) n += s.size; return n; };
+        c.toDataURL = () => 'data:,';
+        return c;
+    };
+    const prev = globalThis.document;
+    globalThis.document = { createElement: (t) => t === 'canvas' ? mkCanvas() : mkEl(t) };
+    return {
+        mkEl,
+        canvasInContainer(w, h) {
+            const container = mkEl('div');
+            const canvas = mkCanvas(w, h);
+            container.appendChild(canvas);
+            return { container, canvas };
+        },
+        uninstall() { globalThis.document = prev; },
+    };
 }
 
 /** Silence the recording context so a hot loop's `calls` array cannot grow. */

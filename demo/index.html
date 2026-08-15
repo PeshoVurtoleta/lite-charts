@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>@zakkster/lite-charts -- v1.4.0</title>
+    <title>@zakkster/lite-charts -- v1.5.0</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -815,7 +815,7 @@
         <div class="brand">
             <span class="brand-logo"></span>
             <span class="brand-name">@zakkster/lite-charts</span>
-            <span class="brand-version">v1.4.0</span>
+            <span class="brand-version">v1.5.0</span>
         </div>
         <button class="theme-toggle" id="theme-toggle">
             <span class="indicator"></span>
@@ -831,7 +831,7 @@
          ================================================================= -->
     <section>
         <div class="hero-intro">
-            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.4.0</span>
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.5.0</span>
             <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
             <p>
                 Single-file ESM. Three peer deps. Signal-native data, dimensions, theme,
@@ -932,6 +932,40 @@
     </section>
 
     <!-- =================================================================
+         Horizontal bar -- v1.5.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// horizontal bars -- new in v1.5</span>
+                <h2>Rankings read better sideways.</h2>
+                <p>
+                    <span class="mono">orientation: 'horizontal'</span> puts the
+                    category band on the Y axis (category 0 at top) and grows
+                    each bar from the value baseline along X. Long category
+                    labels get the horizontal room they need instead of being
+                    rotated or truncated under a vertical axis. The vertical
+                    draw path is byte-for-byte unchanged -- horizontal selects a
+                    peer draw function once at setup, so there is zero per-frame
+                    branch and no cost to charts that stay vertical.
+                </p>
+                <p>
+                    Fail-closed by design: the v1.5.0 cut is a static ranking
+                    chart. Combining <span class="mono">horizontal</span> with
+                    <span class="mono">pan</span>, <span class="mono">zoom</span>,
+                    <span class="mono">brush</span>, a value
+                    <span class="mono">grid</span>, or a log value axis throws at
+                    construction rather than rendering something half-wired --
+                    those land in a later 1.5.x.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="hbar-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
          Stacked bar (v1.1.0)
          ================================================================= -->
     <section>
@@ -980,12 +1014,28 @@
                     <span class="mono">~13 KB</span> minified -- importing it
                     pulls in no axis-chart code.
                 </p>
+                <p>
+                    New in v1.5: the donut takes a
+                    <span class="mono">centerLabel</span> -- a live number in the
+                    hole, rendered as a DOM overlay (not canvas text) so CSS
+                    <span class="mono">clamp()</span> sizes it. The chart writes
+                    only the hole radius and the label's digit count as custom
+                    properties on data/resize; the font fits itself, shrinking as
+                    the number grows. Hit "scale x100" -- the total jumps to six
+                    figures and the font steps down to stay inside the ring, with
+                    zero per-frame JS and no <span class="mono">measureText</span>.
+                </p>
             </div>
         </div>
         <div class="card dashboard-card">
             <div class="chart-area" style="display: flex; gap: 24px; flex-wrap: wrap; height: auto; min-height: 440px;">
                 <div id="pie-chart" style="flex: 1; min-width: 320px;"></div>
                 <div id="donut-chart" style="flex: 1; min-width: 320px;"></div>
+            </div>
+            <div class="control-row">
+                <button class="btn" id="donut-scale-toggle">scale x100</button>
+                <span class="pill"><span class="dot"></span><span
+                        id="donut-total-status">total: 9,800 sessions</span></span>
             </div>
         </div>
     </section>
@@ -1302,6 +1352,17 @@
             <span id="panzoom-bounded-status">view: null (following data)</span>
             <span class="sep">|</span>
             <span id="panzoom-free-status">view: null (following data)</span>
+        </div>
+        <div class="card dashboard-card" style="margin-top: 24px;">
+            <div class="caption centered">
+                log y + pan + zoom (v1.4.1) -- drag and wheel stay decade-aligned
+            </div>
+            <div class="chart-area" id="panzoom-log-chart"></div>
+            <div class="control-row">
+                <button class="btn" id="panzoom-log-reset">reset view</button>
+                <span class="pill"><span class="dot"></span><span
+                        id="panzoom-log-status">view: null (following data)</span></span>
+            </div>
         </div>
     </section>
 
@@ -1953,6 +2014,48 @@
     ALL_CHARTS.push(barChart);
 
     // ---------------------------------------------------------------------
+    // HORIZONTAL BAR -- v1.5.0 (orientation: 'horizontal')
+    // ---------------------------------------------------------------------
+    //
+    // Same axis kernel, category band swapped onto the Y axis. Single-series
+    // ranking with labels long enough to justify the horizontal layout. No
+    // `grid` key here on purpose: horizontal + value grid is a fail-closed
+    // throw in the v1.5.0 cut, so this chart sets its colours explicitly
+    // instead of spreading SHARED_OPTS (which carries a grid).
+    const hbarChart = createBarChart({
+        orientation: 'horizontal',
+        series: [{
+            name: 'Weekly downloads (thousands)',
+            color: '--c-primary',
+            data: [
+                {x: 'TypeScript', y: 1840},
+                {x: 'Python', y: 1620},
+                {x: 'Rust', y: 940},
+                {x: 'Go', y: 720},
+                {x: 'Kotlin', y: 410},
+                {x: 'Swift', y: 260},
+            ],
+        }],
+        width: responsiveWidth('hbar-chart', 800),
+        height: 380,
+        axisColor: '--text-faint',
+        labelColor: '--text-muted',
+        font: '11px "Geist Mono", monospace',
+        paddingInner: 0.25,
+        paddingOuter: 0.12,
+        cornerRadius: 4,
+        hoverTint: 'rgba(255,255,255,0.18)',
+        crosshair: {color: '--text-secondary', dash: [3, 4]},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+        },
+        legend: false,          // single series; nothing to toggle
+    });
+    hbarChart.mount(document.getElementById('hbar-chart'));
+    ALL_CHARTS.push(hbarChart);
+
+    // ---------------------------------------------------------------------
     // STACKED BAR -- v1.1.0 (same kernel, stack: true)
     // ---------------------------------------------------------------------
     //
@@ -2034,6 +2137,14 @@
         sliceStroke: '--bg-card',
         sliceStrokeWidth: 2,
         labelColor: '--text-secondary',
+        // v1.5.0: a live number in the hole. `text` is a reactive accessor,
+        // so it re-runs when pieData changes; CSS clamp() owns the font size
+        // (see the scale toggle below -- more digits => smaller font).
+        centerLabel: {
+            text: () => pieData().reduce((s, d) => s + d.value, 0).toLocaleString(),
+            subLabel: 'sessions',
+            color: '--text-primary',
+        },
         tooltip: {
             background: '--tooltip-bg',
             border: '--tooltip-border',
@@ -2042,6 +2153,35 @@
     });
     donutChart.mount(document.getElementById('donut-chart'));
     ALL_CHARTS.push(donutChart);
+
+    // Center-label showcase: toggling the scale changes the digit count of the
+    // total, which is the sole driver of the hole font size via clamp(). The
+    // click handler rebuilds the 5-row dataset (not a hot path -- fires once
+    // per click); the pie + donut both re-slice from the shared signal. DOM
+    // refs cached at init per the demo no-reflow law.
+    const $donutScaleToggle = document.getElementById('donut-scale-toggle');
+    const $donutTotalStatus = document.getElementById('donut-total-status');
+    const PIE_BASE = pieData.peek();
+    let donutScaled = false;
+
+    effect(() => {
+        let total = 0;
+        const rows = pieData();
+        for (let i = 0; i < rows.length; i++) total += rows[i].value;
+        $donutTotalStatus.textContent = 'total: ' + total.toLocaleString() + ' sessions';
+    });
+
+    $donutScaleToggle.addEventListener('click', () => {
+        donutScaled = !donutScaled;
+        const factor = donutScaled ? 100 : 1;
+        const next = new Array(PIE_BASE.length);
+        for (let i = 0; i < PIE_BASE.length; i++) {
+            const d = PIE_BASE[i];
+            next[i] = {label: d.label, value: d.value * factor, color: d.color};
+        }
+        pieData.set(next);
+        $donutScaleToggle.textContent = donutScaled ? 'scale x1' : 'scale x100';
+    });
 
     // ---------------------------------------------------------------------
     // BUBBLE -- axis kernel with size dimension; one circle per data point
@@ -2574,6 +2714,49 @@
 
     $panzoomBoundedReset.addEventListener('click', () => panzoomBoundedChart.resetView());
     $panzoomFreeReset.addEventListener('click', () => panzoomFreeChart.resetView());
+
+    // Log y + pan + zoom -- the v1.4.1 fix (LC-01..05): pan and zoom are
+    // computed in log space, so a drag translates by decades and a wheel
+    // scales the exponent. Without the fix, panning a log axis walked the
+    // pixel delta through the linear inverse and drifted off the data. The
+    // dataset is a pure exponential (a straight line once the y-axis is log);
+    // every value is strictly positive, as log requires.
+    const panzoomLogData = (() => {
+        const out = new Array(300);
+        for (let i = 0; i < 300; i++) {
+            const x = i + 1;
+            const y = Math.pow(10, x / 60) * (1 + Math.sin(i * 0.15) * 0.15);
+            out[i] = {x, y};
+        }
+        return out;
+    })();
+
+    const panzoomLogChart = createLineChart({
+        data: panzoomLogData,
+        yScale: {type: 'log'},
+        pan: true,
+        zoom: true,
+        panBounds: 'data',
+        zoomMin: 0.01,
+        zoomMax: 50,
+        width: responsiveWidth('panzoom-log-chart', 800),
+        height: 340,
+        margin: {top: 16, right: 24, bottom: 40, left: 64},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-violet',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    panzoomLogChart.mount(document.getElementById('panzoom-log-chart'));
+    ALL_CHARTS.push(panzoomLogChart);
+
+    const $panzoomLogStatus = document.getElementById('panzoom-log-status');
+    const $panzoomLogReset = document.getElementById('panzoom-log-reset');
+    effect(() => {
+        $panzoomLogStatus.textContent = _formatViewStatus(panzoomLogChart.view());
+    });
+    $panzoomLogReset.addEventListener('click', () => panzoomLogChart.resetView());
 
     // ---------------------------------------------------------------------
     // BRUSHING + cross-chart linking -- v1.4.0-alpha.3

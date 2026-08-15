@@ -20,6 +20,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { signal, createRegistry, setDefaultRegistry, stats, effect } from '@zakkster/lite-signal';
 // The full suite creates 200+ charts; each chart allocates ~12-20 reactive
@@ -2865,13 +2866,67 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
         removeChild(c) { this.children = this.children.filter((x) => x !== c); },
     });
 
+    // A style object that records setProperty(...) into a Map so the
+    // centerLabel custom-property writes (--cl-fit/-digits/-max/-min) are
+    // inspectable, while ordinary `style.left = ...` assignments still work.
+    const mkStyleMap = () => {
+        const props = new Map();
+        return {
+            _props: props,
+            setProperty(k, v) { props.set(k, v); },
+            getPropertyValue(k) { return props.get(k) || ''; },
+        };
+    };
+    // Minimal DOM element with parenting + insertBefore, enough for the
+    // labelHost interposition (canvas moved into a position:relative wrapper,
+    // overlay appended as a canvas-relative sibling).
+    const mkDomEl = (tag) => ({
+        tagName: (tag || 'div').toUpperCase(),
+        childNodes: [],
+        parentNode: null,
+        parentElement: null,
+        style: mkStyleMap(),
+        className: '',
+        textContent: '',
+        appendChild(c) {
+            if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
+            this.childNodes.push(c); c.parentNode = this; c.parentElement = this; return c;
+        },
+        insertBefore(c, ref) {
+            if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
+            const i = this.childNodes.indexOf(ref);
+            if (i < 0) this.childNodes.push(c); else this.childNodes.splice(i, 0, c);
+            c.parentNode = this; c.parentElement = this; return c;
+        },
+        removeChild(c) {
+            const i = this.childNodes.indexOf(c);
+            if (i >= 0) this.childNodes.splice(i, 1);
+            c.parentNode = null; c.parentElement = null; return c;
+        },
+        querySelectorAll() { return []; },
+    });
+    // A canvas the interposition can reparent: real mock context surface plus
+    // childNodes/parentNode and no-op event wiring.
+    const mkDomCanvas = () => {
+        const c = createMockCanvas(100, 100);
+        c.childNodes = [];
+        c.parentNode = null;
+        c.getBoundingClientRect = () => ({ left: 0, top: 0, width: c.width, height: c.height, x: 0, y: 0, right: c.width, bottom: c.height });
+        c.addEventListener = () => {};
+        c.removeEventListener = () => {};
+        return c;
+    };
+
     const withFakeDOM = (parent, fn) => {
         const origDoc = globalThis.document;
         globalThis.document = {
-            createElement: (tag) => tag === 'canvas' ? createMockCanvas(100, 100) : { style: {} },
+            createElement: (tag) => tag === 'canvas' ? mkDomCanvas() : mkDomEl(tag),
         };
         try { return fn(); } finally { globalThis.document = origDoc; }
     };
+    // Expose the element factory to centerLabel tests that mount into a
+    // container they create themselves.
+    withFakeDOM.el = mkDomEl;
 
     it('does not attach a ResizeObserver when width + height are explicit', () => {
         setupROMock();
@@ -2993,6 +3048,232 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
                 chart.unmount();
             });
         } finally { teardownROMock(); }
+    });
+
+    // -----------------------------------------------------------------------
+    // centerLabel (donut only) -- v1.5.0
+    // -----------------------------------------------------------------------
+
+    describe('centerLabel', () => {
+        // A1 -- fail closed at CONSTRUCTION (before mount).
+        it('A1: throws when centerLabel is set on a hole-less chart', () => {
+            assert.throws(
+                () => createPieChart({ values: [1, 2], centerLabel: '42' }),
+                /centerLabel requires a donut hole/);
+            assert.throws(
+                () => createDonutChart({ values: [1], innerRadius: 0, centerLabel: true }),
+                /innerRadius resolved to 0/);
+            assert.throws(
+                () => createDonutChart({ values: [1], centerLabel: { minFontSize: 40, maxFontSize: 10 } }),
+                /minFontSize .* exceeds maxFontSize/);
+        });
+
+        // A1b -- a single pathological font bound must fail closed. `+'12x'`/`+NaN`
+        // is NaN and `NaN > x` is false, so the min>max guard alone would let it
+        // through and emit "NaNpx" / font-size="NaN". (reviewer finding 2)
+        it('A1b: throws on a non-finite or non-positive font bound', () => {
+            for (const bad of [{ maxFontSize: NaN }, { maxFontSize: '12x' }, { maxFontSize: 0 }, { maxFontSize: -5 }]) {
+                assert.throws(
+                    () => createDonutChart({ values: [1, 2], centerLabel: bad }),
+                    /maxFontSize must be a finite number/, JSON.stringify(bad));
+            }
+            for (const bad of [{ minFontSize: NaN }, { minFontSize: 'foo' }, { minFontSize: -1 }]) {
+                assert.throws(
+                    () => createDonutChart({ values: [1, 2], centerLabel: bad }),
+                    /minFontSize must be a finite number/, JSON.stringify(bad));
+            }
+        });
+
+        // A1c -- centerLabel needs a DOM parent to interpose into. The guard must
+        // fire at the TOP of mount(), before the ResizeObserver / scene / effects
+        // are allocated (unmount early-returns on !mounted, so a late throw would
+        // strand them). (reviewer finding 3; leak side proven in torture A6c)
+        it('A1c: mounting a centerLabel donut onto a parentless canvas throws', () => {
+            withFakeDOM(null, () => {
+                const chart = createDonutChart({
+                    values: [1, 2], width: 300, height: 300, innerRadius: 0.5,
+                    centerLabel: '42', legend: false, schedule: (fn) => fn(),
+                });
+                const bareCanvas = withFakeDOM.el('canvas');   // tagName CANVAS, parentNode null
+                assert.throws(() => chart.mount(bareCanvas),
+                    /centerLabel requires mount\(\) into a DOM element/);
+            });
+        });
+
+        // A1d -- `centerLabel: true` defaults format to the visible-slice total
+        // (state.visibleTotal), and it updates when a slice is toggled off.
+        it('A1d: centerLabel:true renders the live visible-slice total', () => {
+            withFakeDOM(null, () => {
+                const chart = createDonutChart({
+                    values: [3, 4, 5], width: 400, height: 400,
+                    centerLabel: true, legend: false, schedule: (fn) => fn(),
+                });
+                chart.mount(withFakeDOM.el('div'));
+                assert.equal(chart.centerLabel.childNodes[0].textContent, '12');
+                chart.setSliceVisible(2, false);   // hide the "5" slice
+                assert.equal(chart.centerLabel.childNodes[0].textContent, '7');
+            });
+        });
+
+        // A2 -- exact custom-property + overlay values.
+        it('A2: writes exact --cl-* props, width, position and clamp font-size', () => {
+            withFakeDOM(null, () => {
+                const container = withFakeDOM.el('div');
+                const chart = createDonutChart({
+                    values: [1, 2], width: 400, height: 400,
+                    centerLabel: '1,234', legend: false, schedule: (fn) => fn(),
+                });
+                chart.mount(container);
+                const g = chart._internal.geometry;
+                assert.equal(g.rInner, 92);
+                const ov = chart.centerLabel;
+                assert.ok(ov, 'centerLabel overlay exists');
+                const p = ov.style._props;
+                assert.equal(p.get('--cl-fit'), '216.85px');
+                assert.equal(p.get('--cl-digits'), '5');
+                assert.equal(p.get('--cl-max'), '104.09px');
+                assert.equal(p.get('--cl-min'), '8px');
+                assert.equal(ov.style.width, '130.11px');
+                assert.equal(ov.style.left, '200px');
+                assert.equal(ov.style.top, '200px');
+                assert.equal(ov.style.fontSize,
+                    'clamp(var(--cl-min), calc(var(--cl-fit) / var(--cl-digits)), var(--cl-max))');
+                assert.equal(ov.childNodes[0].textContent, '1,234');
+                chart.unmount();
+            });
+        });
+
+        // A3 -- digit monotonicity + reactivity; fit tracks geometry not text.
+        it('A3: digits track text length; --cl-fit is text-invariant; resize updates fit', () => {
+            withFakeDOM(null, () => {
+                const container = withFakeDOM.el('div');
+                const text = signal('7');
+                const w = signal(400);
+                const h = signal(400);
+                const chart = createDonutChart({
+                    values: [1, 2], width: w, height: h,
+                    centerLabel: { text }, legend: false, schedule: (fn) => fn(),
+                });
+                chart.mount(container);
+                const ov = chart.centerLabel;
+                const p = ov.style._props;
+                assert.equal(p.get('--cl-digits'), '1');
+                assert.equal(p.get('--cl-fit'), '216.85px');
+
+                // Count setProperty calls per update.
+                let spCount = 0;
+                const orig = ov.style.setProperty.bind(ov.style);
+                ov.style.setProperty = (k, v) => { spCount++; orig(k, v); };
+
+                text.set('1234567');
+                assert.equal(p.get('--cl-digits'), '7');
+                assert.equal(p.get('--cl-fit'), '216.85px'); // unchanged: fit is geometry-only
+                assert.equal(spCount, 4, 'exactly 4 setProperty per update');
+
+                spCount = 0;
+                chart.redraw();
+                assert.equal(spCount, 0, 'redraw() writes no custom properties');
+
+                // Resize: rInner 92 -> 42 (200x200, default margin 16). Actual
+                // geometry gives fit '98.99px' (see report: spec's '108.42px'/
+                // 'rInner 46' assumed rInner scales as exactly half rOuter and
+                // ignored the fixed 16px margin).
+                spCount = 0;
+                w.set(200); h.set(200);
+                assert.equal(chart._internal.geometry.rInner, 42);
+                assert.equal(p.get('--cl-fit'), '98.99px');
+                assert.equal(p.get('--cl-digits'), '7'); // digits unchanged by resize
+                chart.unmount();
+            });
+        });
+
+        // A4 -- SVG export path (string-spliced, not a scene node).
+        it('A4: exportSVG emits centered <text>; canvas never fillTexts the label', () => {
+            withFakeDOM(null, () => {
+                const container = withFakeDOM.el('div');
+                const chart = createDonutChart({
+                    values: [1, 2], width: 400, height: 400,
+                    centerLabel: '1,234', legend: false, schedule: (fn) => fn(),
+                });
+                chart.mount(container);
+                const svg = chart.exportSVG();
+                const tags = svg.match(/<text\b/g) || [];
+                assert.equal(tags.length, 1);
+                assert.ok(svg.includes('text-anchor="middle"'));
+                assert.ok(svg.includes('dominant-baseline="central"'));
+                assert.ok(svg.includes('font-size="43.37"'));
+                // The canvas draw path must never paint the label text.
+                const ctx = chart.canvas.getContext('2d');
+                const painted = ctx.calls.some((c) => c[0] === 'fillText' && c[1][0] === '1,234');
+                assert.equal(painted, false, 'label must not be drawn to canvas');
+                chart.unmount();
+
+                // With a subLabel: exactly two <text>.
+                const c2 = createDonutChart({
+                    values: [1, 2], width: 400, height: 400,
+                    centerLabel: { text: '1,234', subLabel: 'total' },
+                    legend: false, schedule: (fn) => fn(),
+                });
+                c2.mount(withFakeDOM.el('div'));
+                const svg2 = c2.exportSVG();
+                assert.equal((svg2.match(/<text\b/g) || []).length, 2);
+                c2.unmount();
+
+                // Without centerLabel: zero <text>.
+                const c3 = createDonutChart({
+                    values: [1, 2], width: 400, height: 400,
+                    legend: false, schedule: (fn) => fn(),
+                });
+                c3.mount(withFakeDOM.el('div'));
+                assert.equal((c3.exportSVG().match(/<text\b/g) || []).length, 0);
+                c3.unmount();
+            });
+        });
+
+        // A4b -- the subLabel must track the CLAMPED main size, not the raw
+        // fit/digits ratio. DOM uses `0.42em` (resolves against the overlay's
+        // clamped font-size); SVG emits `main * 0.42`. Both must agree.
+        // (reviewer finding 1) Also guards format()'s String() coercion parity.
+        it('A4b: subLabel size = 0.42x the clamped main, DOM and SVG in agreement', () => {
+            withFakeDOM(null, () => {
+                const chart = createDonutChart({
+                    values: [1, 2], width: 400, height: 400,
+                    centerLabel: { text: '1,234', subLabel: 'total' },
+                    legend: false, schedule: (fn) => fn(),
+                });
+                chart.mount(withFakeDOM.el('div'));
+                // DOM: overlay > [main, sub]; the sub uses em, not a raw calc().
+                const sub = chart.centerLabel.childNodes[1];
+                assert.equal(sub.style.fontSize, '0.42em');
+                // SVG: two font-sizes, sub === round(main * 0.42).
+                const sizes = [...chart.exportSVG().matchAll(/font-size="([\d.]+)"/g)].map((m) => +m[1]);
+                assert.equal(sizes.length, 2);
+                assert.equal(sizes[1], Math.round(sizes[0] * 0.42 * 100) / 100);
+            });
+        });
+
+        // A5 -- kernel isolation. No bundler ships in-repo, so this is a
+        // source-region reachability proxy (documented in the report): the
+        // tokens '--cl-fit' and 'centerLabel' must occur ONLY inside the polar
+        // kernel region, so a line/bar/heatmap entry point cannot reach them.
+        it('A5: --cl-fit and centerLabel are confined to the polar kernel region', () => {
+            const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+            const regionStart = src.indexOf('// ---- Center label (donut only)');
+            const regionEnd = src.indexOf('// Each factory is a one-line composition');
+            assert.ok(regionStart > 0 && regionEnd > regionStart, 'polar region markers found');
+            for (const token of ['--cl-fit', 'centerLabel']) {
+                let idx = src.indexOf(token);
+                let count = 0;
+                while (idx >= 0) {
+                    count++;
+                    assert.ok(idx >= regionStart && idx < regionEnd,
+                        token + ' at index ' + idx + ' escapes the polar kernel region [' +
+                        regionStart + ',' + regionEnd + ')');
+                    idx = src.indexOf(token, idx + 1);
+                }
+                assert.ok(count > 0, token + ' should appear in the polar kernel');
+            }
+        });
     });
 });
 
@@ -3286,6 +3567,440 @@ describe('createBarChart -- hover tint (v1.1.0)', () => {
         // 2 bars + 1 tooltip color-swatch = 3 (no tint overlay)
         assert.equal(countCalls(ctx, 'fillRect'), 3);
         chart.unmount();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// createBarChart -- horizontal orientation (v1.5.0)  [assertions A1-A11, A15]
+// ---------------------------------------------------------------------------
+//
+// The vertical bar path must stay byte-identical (A1 hash parity). The band
+// scale keeps its object identity (chart.xScale) but binds to the Y pixel
+// range; the value scale (chart.yScale) binds to X. Category 0 sits at the
+// TOP of the plot. See ROADMAP / CHANGELOG [1.5.0].
+
+import { createHash as _sha256 } from 'node:crypto';
+
+describe('createBarChart -- horizontal orientation (v1.5.0)', () => {
+    const approx = (a, b, eps = 1e-6) =>
+        assert.ok(Math.abs(a - b) <= eps, 'expected ' + a + ' ~= ' + b + ' (eps ' + eps + ')');
+
+    const walkTexts = (root) => {
+        const out = [];
+        const walk = (n) => {
+            if (!n) return;
+            if (n.kind === 'text') out.push(n);
+            if (Array.isArray(n.children)) n.children.forEach(walk);
+        };
+        walk(root);
+        return out;
+    };
+    const walkLines = (root) => {
+        const out = [];
+        const walk = (n) => {
+            if (!n) return;
+            if (n.kind === 'line') out.push(n);
+            if (Array.isArray(n.children)) n.children.forEach(walk);
+        };
+        walk(root);
+        return out;
+    };
+
+    const A2_MARGIN = { top: 20, right: 20, bottom: 30, left: 60 };
+    const mkH = (extra) => createBarChart(Object.assign({
+        orientation: 'horizontal',
+        width: 400, height: 300, margin: A2_MARGIN,
+        paddingInner: 0.15, paddingOuter: 0.1,
+        schedule: (fn) => fn(),
+    }, extra));
+
+    // -- A1: hash parity ----------------------------------------------------
+    // Goldens captured from the LIVE (unedited) functions, which equal 1.4.1
+    // (git-verified: no diff hunk touches lines < 5698 in those functions).
+    it('A1: the five hot functions are byte-identical to the 1.4.1 goldens', () => {
+        const GOLDENS = {
+            makeBarDrawFn:    '8334a641cde16bcf965fff15086add6f0e8f3d2335cc37da445bc66f3353f5cd',
+            _roundRectPath:   'b2fc2526043208109e37df8b1beb25070c2bede5e611901c099da01a81c029b1',
+            computeBarStacks: 'a871e0b8c9c78bfea7a81f07b85360f8388733ff0e0d6b98fbdcc5053126c450',
+            makeBandScale:    '2d4c05870d594954d04010621020aebbb6acccaa58d878ab57f54a78b02e566d',
+            updateBandScale:  '777785a8c92ce5bd6b20ce1bcbff58407cb5eb549e8fc3a412afb8dabdf2644e',
+        };
+        for (const name of Object.keys(GOLDENS)) {
+            const fn = _testHelpers[name];
+            assert.equal(typeof fn, 'function', name + ' must be reachable via _testHelpers');
+            const h = _sha256('sha256').update(fn.toString()).digest('hex');
+            assert.equal(h, GOLDENS[name], name + ' changed -- hash parity broken');
+        }
+        // Signature width unchanged.
+        assert.equal(_testHelpers.makeBarDrawFn.length, 12);
+        // No orientation dispatch leaked into the vertical closure. NOTE: the
+        // literal "0 occurrences of 'horizontal'" from the plan is impossible
+        // -- the 1.4.1 source already contains the comment "no horizontal
+        // offset; vertical extent...". The hash above is the true guard; here
+        // we assert no NEW orientation machinery (makeHBarDrawFn / swapAxes /
+        // opts.horizontal) appears inside the vertical draw fn.
+        const src = _testHelpers.makeBarDrawFn.toString();
+        assert.ok(!src.includes('makeHBarDrawFn'), 'vertical closure must not reference the horizontal sibling');
+        assert.ok(!src.includes('swapAxes'), 'vertical closure must not reference swapAxes');
+        assert.ok(!src.includes('.horizontal'), 'vertical closure must not read opts.horizontal');
+    });
+
+    // -- A2: band scale on Y -----------------------------------------------
+    it('A2: band scale binds to the Y range; category 0 at top', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = mkH({ data: [{ x: 'A', y: 10 }, { x: 'B', y: 20 }, { x: 'C', y: 15 }, { x: 'D', y: 25 }] });
+        chart.mount(canvas);
+        const bs = chart.xScale;
+        approx(bs.step, 61.72839506172840, 1e-6);
+        approx(bs.bandWidth, 52.46913580246914, 1e-6);
+        approx(bs.map(0), 52.40740740740741, 1e-6);
+        approx(bs.map(3), 237.5925925925926, 1e-6);
+        assert.ok(bs.map(0) < bs.map(3), 'category 0 must sit above category 3 (top-down)');
+        chart.unmount();
+    });
+
+    // -- A3: hit-test keys off canvasY -------------------------------------
+    it('A3: horizontal hit-test snaps on the Y axis; vertical control unchanged', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = mkH({ data: [{ x: 'A', y: 10 }, { x: 'B', y: 20 }, { x: 'C', y: 15 }, { x: 'D', y: 25 }] });
+        chart.mount(canvas);
+        const bs = chart.xScale; // band scale, now on Y
+        chart.moveCrosshair(200, bs.map(0));
+        assert.equal(chart.crosshair.peek().snapIdx, 0);
+        chart.moveCrosshair(200, bs.map(3));
+        assert.equal(chart.crosshair.peek().snapIdx, 3);
+        // The free (X/value) axis does not change the category snap: a
+        // DIFFERENT in-plot X with cat3's Y still snaps to cat3. (A cursor left
+        // of the plot rect is correctly a miss -- that is moveCrosshair's plot-
+        // rect gate, not the hit-test's job -- so probe with an in-plot X.)
+        chart.moveCrosshair(350, bs.map(3));
+        assert.equal(chart.crosshair.peek().snapIdx, 3, 'hit must key off Y, not X');
+        // snapPixelX is the band-axis pixel (a Y here).
+        approx(chart.crosshair.peek().snapPixelX, bs.map(3), 1e-6);
+        chart.unmount();
+
+        // Vertical control: identical data, band on X, classic behaviour.
+        const c2 = createBarChart({
+            data: [{ x: 'A', y: 10 }, { x: 'B', y: 20 }, { x: 'C', y: 15 }, { x: 'D', y: 25 }],
+            width: 400, height: 300, margin: A2_MARGIN,
+            paddingInner: 0.15, paddingOuter: 0.1, schedule: (fn) => fn(),
+        });
+        c2.mount(createMockCanvas(400, 300));
+        c2.moveCrosshair(c2.xScale.map(0), 150);
+        assert.equal(c2.crosshair.peek().snapIdx, 0);
+        c2.moveCrosshair(c2.xScale.map(3), 150);
+        assert.equal(c2.crosshair.peek().snapIdx, 3);
+        c2.unmount();
+    });
+
+    // -- A3b: horizontal tooltip tracks the FREE (value/X) axis -------------
+    // Regression (reviewer S2): the mousemove dedup gated only on mousePixelY,
+    // so sliding the cursor along the value axis inside one band (snapIdx + Y
+    // unchanged) early-returned and froze mousePixelX -- the horizontal tooltip
+    // box X (anchored on mousePixelX) stopped following the cursor.
+    it('A3b: horizontal crosshair updates mousePixelX along the value axis', () => {
+        const chart = mkH({ data: [{ x: 'A', y: 10 }, { x: 'B', y: 20 }, { x: 'C', y: 15 }] });
+        chart.mount(createMockCanvas(400, 300));
+        const yBand = chart.xScale.map(1); // category 1's band-axis (Y) pixel
+        chart.moveCrosshair(100, yBand);
+        assert.equal(chart.crosshair.peek().snapIdx, 1);
+        assert.equal(chart.crosshair.peek().mousePixelX, 100);
+        // Slide along X within the SAME band: must NOT be dedup'd; box X follows.
+        chart.moveCrosshair(300, yBand);
+        assert.equal(chart.crosshair.peek().snapIdx, 1, 'still the same category');
+        assert.equal(chart.crosshair.peek().mousePixelX, 300,
+            'tooltip X must track the cursor along the value axis');
+        // Vertical control: dedup still keys off mousePixelY (unchanged behaviour).
+        const v = createBarChart({
+            data: [{ x: 'A', y: 10 }, { x: 'B', y: 20 }, { x: 'C', y: 15 }],
+            width: 400, height: 300, margin: A2_MARGIN,
+            paddingInner: 0.15, paddingOuter: 0.1, schedule: (fn) => fn(),
+        });
+        v.mount(createMockCanvas(400, 300));
+        v.moveCrosshair(v.xScale.map(1), 80);
+        assert.equal(v.crosshair.peek().snapIdx, 1);
+        assert.equal(v.crosshair.peek().mousePixelY, 80);
+        v.moveCrosshair(v.xScale.map(1), 200); // same band, new Y -> box Y follows
+        assert.equal(v.crosshair.peek().mousePixelY, 200);
+        v.unmount();
+    });
+
+    // -- A4: rect geometry (value on X) ------------------------------------
+    it('A4: bars extend along X from the value baseline', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = mkH({ data: [{ x: 'A', y: 10 }, { x: 'B', y: -10 }], cornerRadius: 0 });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        const rects = callsOf(ctx, 'fillRect').map((c) => c[1]);
+        assert.equal(rects.length, 2);
+        const ys = chart.yScale;
+        const base = ys.map(0);
+        const bw = chart.xScale.bandWidth;
+        const expectH = bw * (1 - 0.08); // groupInnerPad default, 1 series
+        // Positive bar (cat0=10): left === map(0), width === |map(10)-map(0)|.
+        const pos = rects[0], neg = rects[1];
+        approx(pos[0], base, 1e-6);
+        approx(pos[2], Math.abs(ys.map(10) - base), 1e-6);
+        approx(pos[3], expectH, 1e-6);
+        // Negative bar (cat1=-10): left === map(-10), shares the map(0) edge.
+        approx(neg[0], ys.map(-10), 1e-6);
+        approx(neg[2], Math.abs(ys.map(-10) - base), 1e-6);
+        approx(neg[0] + neg[2], base, 1e-6);
+        approx(neg[3], expectH, 1e-6);
+        chart.unmount();
+    });
+
+    // -- A5: corner side ----------------------------------------------------
+    it('A5: rounded corners cap the end opposite the baseline; vertical control differs', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = mkH({ data: [{ x: 'A', y: 10 }, { x: 'B', y: -10 }], cornerRadius: 6 });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        const radii = callsOf(ctx, 'roundRect').map((c) => c[1][4]);
+        assert.equal(radii.length, 2);
+        assert.deepEqual(radii[0], [0, 6, 6, 0], 'positive bar rounds the right end');
+        assert.deepEqual(radii[1], [6, 0, 0, 6], 'negative bar rounds the left end');
+        chart.unmount();
+
+        // Vertical control: caps the TOP for positive, BOTTOM for negative.
+        const c2 = createBarChart({
+            data: [{ x: 'A', y: 10 }, { x: 'B', y: -10 }], cornerRadius: 6,
+            width: 400, height: 300, margin: A2_MARGIN, schedule: (fn) => fn(),
+        });
+        const cv2 = createMockCanvas(400, 300);
+        c2.mount(cv2);
+        const ctx2 = cv2.getContext('2d');
+        ctx2.calls.length = 0;
+        c2.redraw();
+        const radii2 = callsOf(ctx2, 'roundRect').map((c) => c[1][4]);
+        assert.deepEqual(radii2[0], [6, 6, 0, 0], 'vertical positive rounds the top');
+        assert.deepEqual(radii2[1], [0, 0, 6, 6], 'vertical negative rounds the bottom');
+        c2.unmount();
+    });
+
+    // -- A6: grouped-Y ------------------------------------------------------
+    it('A6: grouped series stack along Y within a category, no overlap', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = mkH({
+            series: [
+                { name: 'S0', data: [{ x: 'A', y: 5 }, { x: 'B', y: 6 }] },
+                { name: 'S1', data: [{ x: 'A', y: 7 }, { x: 'B', y: 8 }] },
+                { name: 'S2', data: [{ x: 'A', y: 9 }, { x: 'B', y: 4 }] },
+            ],
+        });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        const rects = callsOf(ctx, 'fillRect').map((c) => c[1]);
+        // 3 series x 2 cats = 6 bars. cat0 bars are the ones for the 3 series
+        // at catIdx 0 -- they appear as every-other in series-major order.
+        const bw = chart.xScale.bandWidth;
+        const groupH = bw / 3;
+        const c0 = chart.xScale.map(0);
+        // Series i draws cat0 as rects[i*2 + 0].
+        const centres = [];
+        for (let i = 0; i < 3; i++) {
+            const r = rects[i * 2];
+            const centre = r[1] + r[3] / 2;
+            centres.push(centre);
+            approx(centre, c0 + (i - 1) * groupH, 1e-6);
+            approx(r[3], groupH * (1 - 0.08), 1e-6);
+        }
+        assert.ok(centres[0] < centres[1] && centres[1] < centres[2], 'series 0 sits topmost');
+        // No overlap: each bar's [top,bottom] is disjoint.
+        for (let i = 0; i < 2; i++) {
+            const a = rects[i * 2], b = rects[(i + 1) * 2];
+            assert.ok(a[1] + a[3] <= b[1] + 1e-9, 'grouped bars must not overlap');
+        }
+        chart.unmount();
+    });
+
+    // -- A7: stacked-X ------------------------------------------------------
+    it('A7: stacked segments tile along X with no gap', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = mkH({
+            stack: true,
+            series: [
+                { name: 'A', data: [{ x: 'A', y: 3 }, { x: 'B', y: 5 }] },
+                { name: 'B', data: [{ x: 'A', y: 7 }, { x: 'B', y: 5 }] },
+            ],
+        });
+        chart.mount(canvas);
+        assert.ok(chart.yScale.dMax >= 10, 'stack total (10) must be in the domain');
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        const rects = callsOf(ctx, 'fillRect').map((c) => c[1]);
+        // Series-major: seg0 cat0 = rects[0], seg1 cat0 = rects[2].
+        const seg0 = rects[0], seg1 = rects[2];
+        approx(seg0[0] + seg0[2], seg1[0], 0); // exact edge tiling, no epsilon
+        // Union spans map(0)..map(10).
+        approx(seg0[0], chart.yScale.map(0), 1e-6);
+        approx(seg1[0] + seg1[2], chart.yScale.map(10), 1e-6);
+        // Bar Y centres identical across the two segments (same band row).
+        approx(seg0[1] + seg0[3] / 2, seg1[1] + seg1[3] / 2, 1e-6);
+        chart.unmount();
+    });
+
+    // -- A8: left band axis -------------------------------------------------
+    it('A8: the categorical axis moves to the left, labels right-aligned', () => {
+        const canvas = createMockCanvas(400, 300);
+        const cats = ['A', 'B', 'C', 'D'];
+        const chart = mkH({ data: cats.map((c, i) => ({ x: c, y: (i + 1) * 5 })) });
+        chart.mount(canvas);
+        const pb = chart._internal.plotBoundsBox;
+        const bs = chart.xScale;
+        const texts = walkTexts(chart.scene.root).filter((t) => t._visible);
+        const catTexts = texts.filter((t) => cats.includes(t._text));
+        assert.equal(catTexts.length, cats.length, 'exactly n category labels');
+        for (const t of catTexts) {
+            assert.equal(t._align, 'right');
+            assert.equal(t._baseline, 'middle');
+            approx(t._x, pb.x - 6, 1e-6);
+            const i = cats.indexOf(t._text);
+            approx(t._y, bs.map(i), 1e-6);
+        }
+        assert.equal(catTexts.filter((t) => t._align === 'center').length, 0,
+            'no category label may be center-aligned');
+        // Tick lines off the left spine: dx === -4, dy === 0. Band spine along Y.
+        const lines = walkLines(chart.scene.root).filter((l) => l._visible);
+        const bandTicks = lines.filter((l) => l._dx === -4 && l._dy === 0);
+        assert.ok(bandTicks.length >= cats.length, 'left tick lines present with dx=-4,dy=0');
+        const spine = lines.find((l) => l._dx === 0 && Math.abs(l._dy - pb.h) < 1e-6 && Math.abs(l._x - pb.x) < 1e-6);
+        assert.ok(spine, 'band spine at x=plot.x, dx=0, dy=plot.h');
+        chart.unmount();
+    });
+
+    // -- A9: bottom value axis ---------------------------------------------
+    it('A9: the value axis moves to the bottom with numeric ticks', () => {
+        const canvas = createMockCanvas(400, 300);
+        const cats = ['A', 'B', 'C', 'D'];
+        const chart = mkH({ data: cats.map((c, i) => ({ x: c, y: (i + 1) * 5 })) });
+        chart.mount(canvas);
+        const pb = chart._internal.plotBoundsBox;
+        const ys = chart.yScale;
+        const texts = walkTexts(chart.scene.root).filter((t) => t._visible && t._align === 'center');
+        assert.ok(texts.length >= 2 && texts.length <= 12, 'between 2 and 12 value ticks');
+        for (const t of texts) {
+            assert.equal(t._baseline, 'top');
+            const v = parseFloat(t._text);
+            assert.ok(!Number.isNaN(v), 'value label parses as a number: ' + t._text);
+            assert.ok(!cats.includes(t._text), 'value label must not be a category name');
+            approx(t._x, ys.map(v), 1e-6);
+        }
+        chart.unmount();
+    });
+
+    // -- A10: SVG parity ----------------------------------------------------
+    it('A10: exportSVG mirrors the horizontal bars and axis anchors', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = mkH({ data: [{ x: 'A', y: 10 }, { x: 'B', y: -10 }], cornerRadius: 0 });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        const rects = callsOf(ctx, 'fillRect').map((c) => c[1]);
+        const svg = chart.exportSVG();
+        // One <rect> per bar.
+        const svgRects = [...svg.matchAll(/<rect\s+x="([\d.eE+-]+)"\s+y="([\d.eE+-]+)"\s+width="([\d.eE+-]+)"\s+height="([\d.eE+-]+)"/g)]
+            .map((m) => [+m[1], +m[2], +m[3], +m[4]]);
+        // The 2 bar rects must be present among the SVG rects (there may also
+        // be the tooltip swatch etc., but not here since no hover).
+        for (const r of rects) {
+            const hit = svgRects.some((s) =>
+                // exportSVG rounds coordinates to 3 decimals for compact output,
+                // so compare at that precision (max rounding error 5e-4), not 1e-6.
+                Math.abs(s[0] - r[0]) < 2e-3 && Math.abs(s[1] - r[1]) < 2e-3 &&
+                Math.abs(s[2] - r[2]) < 2e-3 && Math.abs(s[3] - r[3]) < 2e-3);
+            assert.ok(hit, 'canvas bar rect ' + JSON.stringify(r) + ' must appear in SVG');
+        }
+        // The distinguishing fact is which axis the CATEGORY labels sit on, not
+        // a global end-anchor count -- a vertical chart's LEFT VALUE axis also
+        // right-aligns its numeric labels (text-anchor="end"). Horizontal moves
+        // the band (category) axis to the left, so 'A'/'B' become end-anchored;
+        // the bottom value ticks are middle-anchored.
+        const catAnchor = (s, label) => {
+            const m = s.match(new RegExp('<text\\b([^>]*)>' + label + '</text>'));
+            return m ? (m[1].match(/text-anchor="([^"]+)"/) || [])[1] : null;
+        };
+        assert.equal(catAnchor(svg, 'A'), 'end', 'horizontal category label on left band axis');
+        assert.equal(catAnchor(svg, 'B'), 'end');
+        assert.ok((svg.match(/text-anchor="middle"/g) || []).length >= 2, 'bottom value ticks are centered');
+        chart.unmount();
+
+        // Vertical control: the CATEGORY labels sit on the bottom band axis and
+        // are centered ("middle"), not on a left band axis. (Its left VALUE axis
+        // still emits end-anchored numerics -- that is unchanged 1.4.1 behaviour,
+        // so a global end-count is the wrong discriminator.)
+        const c2 = createBarChart({
+            data: [{ x: 'A', y: 10 }, { x: 'B', y: -10 }],
+            width: 400, height: 300, margin: A2_MARGIN, schedule: (fn) => fn(),
+        });
+        c2.mount(createMockCanvas(400, 300));
+        const vsvg = c2.exportSVG();
+        assert.equal(catAnchor(vsvg, 'A'), 'middle', 'vertical category label on bottom band axis');
+        assert.equal(catAnchor(vsvg, 'B'), 'middle');
+        c2.unmount();
+    });
+
+    // -- A11: fail closed ---------------------------------------------------
+    it('A11: unsupported horizontal combinations throw at construction', () => {
+        const base = { data: [{ x: 'A', y: 1 }], schedule: (fn) => fn() };
+        const cases = [
+            ['diagonal orientation', { orientation: 'diagonal' }],
+            ['horizontal + log', { orientation: 'horizontal', yScale: { type: 'log' } }],
+            ['horizontal + pan', { orientation: 'horizontal', pan: true }],
+            ['horizontal + zoom', { orientation: 'horizontal', zoom: true }],
+            ['horizontal + brush', { orientation: 'horizontal', brush: true }],
+            ['horizontal + grid', { orientation: 'horizontal', grid: true }],
+        ];
+        for (const [label, extra] of cases) {
+            assert.throws(
+                () => createBarChart(Object.assign({}, base, extra)),
+                (err) => /lite-charts:/.test(err.message) && /orientation/.test(err.message),
+                label + ' must throw a named error',
+            );
+        }
+        // A horizontal grid restricted to X only is still rejected (grid.y
+        // defaults on for an object grid); grid:{y:false} would be allowed but
+        // is out of scope. Sanity: plain horizontal (no extras) does NOT throw.
+        assert.doesNotThrow(() => {
+            const c = createBarChart(Object.assign({}, base, { orientation: 'horizontal' }));
+            const cv = createMockCanvas(400, 300);
+            c.mount(cv);
+            c.unmount();
+        });
+    });
+
+    // -- A15: bundle isolation (source-region reachability proxy) -----------
+    it('A15: orientation machinery is confined to the axis-chart kernel', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        // The polar (pie/donut/radar) and grid (heatmap) kernel BODIES must
+        // never reference the horizontal-bar tokens. Region: [polarStart,
+        // testHelpersStart). The trailing `_testHelpers` export legitimately
+        // re-exports axis-kernel internals for white-box tests and is tree-
+        // shaken from any real bundle, so it is excluded (same approach as A5).
+        const polarStart = src.indexOf('createBasePolarChart');
+        const testHelpersStart = src.indexOf('export const _testHelpers = {');
+        assert.ok(polarStart > 0, 'polar kernel marker found');
+        assert.ok(testHelpersStart > polarStart, '_testHelpers marker found after polar');
+        for (const token of ['makeHBarDrawFn', 'axesSwapped', '_buildAxisBarY']) {
+            let idx = src.indexOf(token);
+            let count = 0;
+            while (idx >= 0) {
+                count++;
+                assert.ok(idx < polarStart || idx >= testHelpersStart,
+                    token + ' at ' + idx + ' escapes into the polar/grid kernel bodies '
+                    + '[' + polarStart + ', ' + testHelpersStart + ')');
+                idx = src.indexOf(token, idx + 1);
+            }
+            assert.ok(count > 0, token + ' should exist in the axis-chart kernel');
+        }
     });
 });
 

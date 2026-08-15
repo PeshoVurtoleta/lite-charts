@@ -1377,6 +1377,108 @@ const makeBarDrawFn = (state, refs, plotBoundsBox, xBandScale, yScale, seriesIdx
 };
 
 // ---------------------------------------------------------------------------
+// Horizontal bar draw (v1.5.0)
+// ---------------------------------------------------------------------------
+//
+// Sibling of makeBarDrawFn with the two axes exchanged: the band scale
+// (xBandScale) is bound to the Y pixel range and the value scale (yScale) to
+// the X pixel range. Selected ONCE at mount by _makeBarDraw, so the vertical
+// closure never gains a byte and this closure never evaluates a vertical
+// branch. Scalar-only locals; fillStyle set once outside the loop; shared
+// _roundRectPath; same 12-arg signature. Category 0 sits at the TOP of the
+// plot (band range runs top-down, matching heatmap / reading order).
+const makeHBarDrawFn = (state, refs, plotBoundsBox, xBandScale, yScale, seriesIdx, totalSeries, baseline, innerPadFrac, cornerRadius, hoverTintRef, crosshairDataRef) => (ctx) => {
+    if (!refs.visibleRef.value) return;
+    const n = state.n;
+    if (n === 0) return;
+
+    const xs = state.xs;     // category indices (Float32, integer values)
+    const ys = state.ys;     // values
+    const pb = plotBoundsBox;
+    const plotL = pb.x;
+    const plotR = pb.x + pb.w;
+
+    const stacked = state.stackBottoms !== null && state.stackTops !== null
+                 && state.stackBottoms !== undefined && state.stackTops !== undefined;
+
+    // yScale is the VALUE scale (bound to X pixels here), so baselinePx is an X.
+    const baselinePx = yScale.map(baseline);
+    let barH, offsetY;
+    if (stacked) {
+        barH = xBandScale.bandWidth * (1 - innerPadFrac);
+        offsetY = 0;
+    } else {
+        const groupHeight = xBandScale.bandWidth / totalSeries;
+        offsetY = (seriesIdx - (totalSeries - 1) / 2) * groupHeight;
+        barH = groupHeight * (1 - innerPadFrac);
+    }
+
+    ctx.fillStyle = refs.colorRef.value;
+
+    const tintColor = hoverTintRef && hoverTintRef.value ? hoverTintRef.value : null;
+    const hoveredCat = (crosshairDataRef && crosshairDataRef.visible)
+        ? (crosshairDataRef.snapIdx | 0)
+        : -1;
+
+    const useRound = cornerRadius > 0;
+
+    for (let i = 0; i < n; i++) {
+        const y = ys[i];
+        if (y !== y) continue; // skip NaN
+        const catIdx = xs[i] | 0;
+
+        let left, w;
+        if (stacked) {
+            const sb = state.stackBottoms[catIdx];
+            const stt = state.stackTops[catIdx];
+            if (stt <= sb) continue;  // zero-width segment (e.g. value <= 0)
+            const xL = yScale.map(sb);
+            const xR = yScale.map(stt);
+            left = xL;
+            w = xR - xL;
+        } else {
+            const xPx = yScale.map(y);
+            left = xPx < baselinePx ? xPx : baselinePx;
+            w = Math.abs(xPx - baselinePx);
+        }
+
+        // Clamp to plot rect (X axis).
+        if (left < plotL) { w -= (plotL - left); left = plotL; }
+        if (left + w > plotR) { w = plotR - left; }
+        if (w <= 0) continue;
+
+        const barY = xBandScale.map(catIdx) + offsetY - barH / 2;
+
+        // Round the end OPPOSITE the baseline. Positive bars grow rightward so
+        // the right corners (rTR/rBR) round; negative bars round the left.
+        let rTL = 0, rTR = 0, rBR = 0, rBL = 0;
+        if (useRound) {
+            const isPositive = stacked || y >= baseline;
+            if (isPositive) { rTR = cornerRadius; rBR = cornerRadius; }
+            else            { rTL = cornerRadius; rBL = cornerRadius; }
+        }
+
+        if (useRound) {
+            _roundRectPath(ctx, left, barY, w, barH, rTL, rTR, rBR, rBL);
+            ctx.fill();
+        } else {
+            ctx.fillRect(left, barY, w, barH);
+        }
+
+        if (hoveredCat === catIdx && tintColor) {
+            ctx.fillStyle = tintColor;
+            if (useRound) {
+                _roundRectPath(ctx, left, barY, w, barH, rTL, rTR, rBR, rBL);
+                ctx.fill();
+            } else {
+                ctx.fillRect(left, barY, w, barH);
+            }
+            ctx.fillStyle = refs.colorRef.value;  // restore for next bar
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Bar x-axis (v1.1.0): categorical labels at band centers
 // ---------------------------------------------------------------------------
 //
@@ -1387,14 +1489,19 @@ const makeBarDrawFn = (state, refs, plotBoundsBox, xBandScale, yScale, seriesIdx
 const buildBarAxis = (parent, opts) => {
     // opts: {
     //   xBandScale, plotBoundsBox, plotBoundsSignal, scaleVersion,
-    //   tickColor (ref), labelColor (ref), font, categoriesRef
+    //   tickColor (ref), labelColor (ref), font, categoriesRef,
+    //   side: 'bottom' (default, vertical bars) | 'left' (horizontal bars)
     // }
+    // v1.5.0: a 'left' side draws the same categorical axis rotated onto the Y
+    // range for horizontal bars. Per-side constants are hoisted above the
+    // rebuild loop (cold path); the loop picks one coordinate pair per flag.
+    const isLeft = opts.side === 'left';
     const axisGroup = parent.add(group({}));
     const spineNode = axisGroup.add(lineNode({
         stroke: opts.tickColor,
         strokeWidth: 1,
     }));
-    const tickPool = [];   // small vertical tick lines under spine
+    const tickPool = [];   // small tick lines off the spine
     const labelPool = [];
 
     const ensurePools = (count) => {
@@ -1415,8 +1522,8 @@ const buildBarAxis = (parent, opts) => {
                 // multi-character category names were offset right by half a
                 // glyph width. Found while wiring SVG export (which surfaces
                 // the alignment via `text-anchor`).
-                align: 'center',
-                baseline: 'top',
+                align: isLeft ? 'right' : 'center',
+                baseline: isLeft ? 'middle' : 'top',
             })));
         }
     };
@@ -1429,37 +1536,31 @@ const buildBarAxis = (parent, opts) => {
         const cats = opts.categoriesRef.value;
         const n = cats.length;
 
-        const yLine = pb.y + pb.h;
-        spineNode.set({
-            visible: true,
-            x: pb.x,
-            y: yLine,
-            dx: pb.w,
-            dy: 0,
-        });
+        if (isLeft) {
+            spineNode.set({ visible: true, x: pb.x, y: pb.y, dx: 0, dy: pb.h });
+        } else {
+            spineNode.set({ visible: true, x: pb.x, y: pb.y + pb.h, dx: pb.w, dy: 0 });
+        }
 
         ensurePools(n);
 
-        // Adaptive label step: target ~6 labels per 480px of plot width.
-        const maxLabels = Math.max(2, (pb.w / 80) | 0);
+        // Adaptive label step: budget per available span along the band axis.
+        const maxLabels = Math.max(2, ((isLeft ? pb.h / 24 : pb.w / 80)) | 0);
         const labelStep = n <= maxLabels ? 1 : Math.ceil(n / maxLabels);
 
         for (let i = 0; i < n; i++) {
-            const cx = bs.map(i);
-            tickPool[i].set({
-                visible: true,
-                x: cx,
-                y: yLine,
-                dx: 0,
-                dy: 4,
-            });
+            const c = bs.map(i);  // band center: an X for bottom, a Y for left
+            if (isLeft) {
+                tickPool[i].set({ visible: true, x: pb.x, y: c, dx: -4, dy: 0 });
+            } else {
+                tickPool[i].set({ visible: true, x: c, y: pb.y + pb.h, dx: 0, dy: 4 });
+            }
             if (i % labelStep === 0) {
-                labelPool[i].set({
-                    visible: true,
-                    x: cx,
-                    y: yLine + 6,
-                    text: cats[i],
-                });
+                if (isLeft) {
+                    labelPool[i].set({ visible: true, x: pb.x - 6, y: c, text: cats[i] });
+                } else {
+                    labelPool[i].set({ visible: true, x: c, y: pb.y + pb.h + 6, text: cats[i] });
+                }
             } else {
                 labelPool[i].set({ visible: false });
             }
@@ -1793,6 +1894,31 @@ const VALID_LEGEND_POSITIONS = { top: 1, bottom: 1, left: 1, right: 1 };
 // `Math.PI * 2` allocations on every mousemove redraw.
 const _EMPTY_DASH = Object.freeze([]);
 const _TWO_PI = Math.PI * 2;
+
+// v1.5.0: crosshair guide line, factored into two orientation-specific
+// helpers so drawCrosshair is a single branch-free call per frame. The kernel
+// selects one at setup (_guide). Both take the band-axis pixel as the second
+// arg: an X for the vertical guide, a Y for the horizontal guide.
+const _strokeGuideV = (ctx, x, pb, color, dash) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(x, pb.y);
+    ctx.lineTo(x, pb.y + pb.h);
+    ctx.stroke();
+    ctx.setLineDash(_EMPTY_DASH);
+};
+const _strokeGuideH = (ctx, y, pb, color, dash) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(pb.x, y);
+    ctx.lineTo(pb.x + pb.w, y);
+    ctx.stroke();
+    ctx.setLineDash(_EMPTY_DASH);
+};
 
 // ---------------------------------------------------------------------------
 // Tooltip / crosshair text formatters
@@ -2968,7 +3094,21 @@ const _initBarOpts = (config) => {
     } else {
         hoverTintValue = 'rgba(255,255,255,0.18)';
     }
+    // v1.5.0: orientation. 'vertical' (default) keeps the band axis on X and
+    // the value axis on Y; 'horizontal' swaps them. Resolved ONCE here into a
+    // boolean the kernel reads at setup -- the per-frame draw closures never
+    // consult it. Any third value fails closed at construction.
+    let horizontal;
+    if (config.orientation == null || config.orientation === 'vertical') {
+        horizontal = false;
+    } else if (config.orientation === 'horizontal') {
+        horizontal = true;
+    } else {
+        throw new Error("lite-charts: orientation must be 'vertical' or 'horizontal', got " +
+            JSON.stringify(config.orientation));
+    }
     return {
+        horizontal,
         baseline: config.baseline != null ? config.baseline : 0,
         paddingInner: config.paddingInner != null ? config.paddingInner : 0.15,
         paddingOuter: config.paddingOuter != null ? config.paddingOuter : 0.1,
@@ -3001,8 +3141,25 @@ const _updateXScaleBand = (xScale, dxMin, dxMax, rMin, rMax, ctx) =>
     updateBandScale(xScale, ctx.categoriesRef.value.length, rMin, rMax,
                     ctx.opts.paddingInner, ctx.opts.paddingOuter);
 
-const _buildAxisBar = (parent, opts, ctx) =>
-    buildBarAxis(parent, {
+// The X-axis builder. Vertical bars get the categorical band axis along the
+// bottom; horizontal bars get the numeric VALUE axis along the bottom (the
+// band axis moves to the left, built by _buildAxisBarY). buildAxis with
+// orientation:'x' already centers bottom labels.
+const _buildAxisBar = (parent, opts, ctx) => {
+    if (ctx.opts.horizontal) {
+        return buildAxis(parent, {
+            orientation: 'x',
+            scale: ctx.yScale,
+            plotBoundsBox: opts.plotBoundsBox,
+            plotBoundsSignal: opts.plotBoundsSignal,
+            scaleVersion: opts.scaleVersion,
+            tickColor: opts.tickColor,
+            labelColor: opts.labelColor,
+            font: opts.font,
+            format: 'number',
+        });
+    }
+    return buildBarAxis(parent, {
         xBandScale: opts.scale,
         plotBoundsBox: opts.plotBoundsBox,
         plotBoundsSignal: opts.plotBoundsSignal,
@@ -3011,19 +3168,40 @@ const _buildAxisBar = (parent, opts, ctx) =>
         labelColor: opts.labelColor,
         font: opts.font,
         categoriesRef: ctx.categoriesRef,
+        side: 'bottom',
     });
+};
+
+// The Y-axis builder (kernel seam renderer.buildYAxis). Vertical bars keep the
+// numeric value axis (buildAxis verbatim); horizontal bars put the categorical
+// band axis on the left. buildAxis ignores the 3rd (ctx) arg, so wiring this
+// as buildYAxis leaves line/area/scatter/bubble untouched.
+const _buildAxisBarY = (parent, opts, ctx) => {
+    if (!ctx.opts.horizontal) return buildAxis(parent, opts);
+    return buildBarAxis(parent, {
+        xBandScale: ctx.xScale,
+        plotBoundsBox: opts.plotBoundsBox,
+        plotBoundsSignal: opts.plotBoundsSignal,
+        scaleVersion: opts.scaleVersion,
+        tickColor: opts.tickColor,
+        labelColor: opts.labelColor,
+        font: opts.font,
+        categoriesRef: ctx.categoriesRef,
+        side: 'left',
+    });
+};
 
 const _makeBarDraw = (state, refs, plotBoundsBox, seriesIdx, totalSeries, ctx) =>
-    makeBarDrawFn(state, refs, plotBoundsBox,
+    (ctx.opts.horizontal ? makeHBarDrawFn : makeBarDrawFn)(state, refs, plotBoundsBox,
                   ctx.xScale, ctx.yScale,
                   seriesIdx, totalSeries,
                   ctx.opts.baseline, ctx.opts.groupInnerPad,
                   ctx.opts.cornerRadius, ctx.opts.hoverTintRef,
                   ctx.crosshairDataRef);
 
-const _bandHitTest = (canvasX, /*canvasY*/_cy, primary, xScale, ctx) => {
+const _bandHitTest = (canvasX, canvasY, primary, xScale, ctx) => {
     if (ctx.categoriesRef.value.length === 0) return null;
-    const idx = xScale.invert(canvasX);
+    const idx = xScale.invert(ctx.opts.horizontal ? canvasY : canvasX);
     if (idx < 0) return null;
     return {
         snapIdx: idx,
@@ -3056,7 +3234,9 @@ const BAR_RENDERER = {
     updateXScale: _updateXScaleBand,
     projectToPixels: false,
     enableXGrid: false,
+    axesSwapped: (o) => o.horizontal,   // v1.5.0: horizontal orientation
     buildXAxis: _buildAxisBar,
+    buildYAxis: _buildAxisBarY,         // v1.5.0: band axis moves left when horizontal
     makeDrawFn: _makeBarDraw,
     hitTest: _bandHitTest,
     drawPerSeriesMarkers: false,
@@ -3892,6 +4072,38 @@ const createBaseAxisChart = (config, renderer) => {
     // for area / bar / future renderers.
     const chartOpts = renderer.initOpts ? renderer.initOpts(config) : null;
 
+    // v1.5.0: horizontal bar charts are supported only in the orthogonal,
+    // interaction-free subset. Any combination whose kernel math still assumes
+    // the standard orientation (log domain flooring, pan/zoom/brush pixel
+    // mapping, grid rule derivation from yScale) fails CLOSED at construction,
+    // naming the combination. Deferred to 1.5.x. These read `config` directly
+    // because the derived pan/zoom/grid flags are resolved further down.
+    if (chartOpts && chartOpts.horizontal) {
+        if (yScaleType === 'log') {
+            throw new Error('lite-charts: horizontal orientation with a log yScale ' +
+                'is not supported (planned for v1.5.x)');
+        }
+        if (config.pan || config.zoom || config.brush) {
+            throw new Error('lite-charts: horizontal orientation with pan/zoom/brush ' +
+                'is not supported (planned for v1.5.x)');
+        }
+        const gridYOn = config.grid === true
+            || (config.grid && typeof config.grid === 'object' && config.grid.y !== false);
+        if (gridYOn) {
+            throw new Error('lite-charts: horizontal orientation with a grid ' +
+                'is not supported (planned for v1.5.x)');
+        }
+    }
+
+    // v1.5.0: one setup-time boolean drives the axis-role swap at three cold
+    // sites (updateXScale range, value-scale range, buildYAxis seam) plus the
+    // crosshair/tooltip anchor. Non-swapping renderers never define
+    // axesSwapped, so this is `false` and every downstream branch is dead.
+    const swapAxes = renderer.axesSwapped ? renderer.axesSwapped(chartOpts) : false;
+    // Crosshair guide selected once here; drawCrosshair calls it per frame with
+    // zero branch.
+    const _guide = swapAxes ? _strokeGuideH : _strokeGuideV;
+
     // Singleton ctx passed to all renderer methods. Mutated in place so the
     // hot path (hitTest, lookupRow on every mousemove) doesn't allocate.
     const rendererCtx = {
@@ -4031,6 +4243,10 @@ const createBaseAxisChart = (config, renderer) => {
         snapIdx: -1,
         snapDomainX: 0,
         snapPixelX: 0,
+        // v1.5.0: free-axis cursor pixel on both axes. mousePixelY anchors the
+        // tooltip box for vertical charts; mousePixelX anchors it (box X) for
+        // horizontal charts where snapPixelX is the band-axis Y.
+        mousePixelX: 0,
         mousePixelY: 0,
         // v1.2.0-alpha.2: which series the hit belongs to. -1 means
         // "not series-scoped" (line / area / bar / scatter never set this).
@@ -4051,6 +4267,7 @@ const createBaseAxisChart = (config, renderer) => {
         crosshairData.snapIdx = v.snapIdx != null ? v.snapIdx : -1;
         crosshairData.snapDomainX = v.snapDomainX != null ? v.snapDomainX : 0;
         crosshairData.snapPixelX = v.snapPixelX != null ? v.snapPixelX : 0;
+        crosshairData.mousePixelX = v.mousePixelX != null ? v.mousePixelX : 0;
         crosshairData.mousePixelY = v.mousePixelY != null ? v.mousePixelY : 0;
         crosshairVersion.update((x) => (x + 1) | 0);
     };
@@ -4404,10 +4621,14 @@ const createBaseAxisChart = (config, renderer) => {
                 }
             }
 
+            // v1.5.0: when the axes are swapped (horizontal bars) the band
+            // scale is bound to the Y pixel range instead of X. The scale
+            // OBJECT is unchanged -- only the pixel range it maps into swaps.
             renderer.updateXScale(
                 xScale,
                 xLo, xHi,
-                plotBoundsBox.x, plotBoundsBox.x + plotBoundsBox.w,
+                swapAxes ? plotBoundsBox.y : plotBoundsBox.x,
+                swapAxes ? plotBoundsBox.y + plotBoundsBox.h : plotBoundsBox.x + plotBoundsBox.w,
                 rendererCtx,
             );
             if (yScaleType === 'log') {
@@ -4429,6 +4650,12 @@ const createBaseAxisChart = (config, renderer) => {
                 if (!(lo > 0)) lo = hi * 1e-9;
                 if (!(hi > lo)) hi = lo * 10;
                 updateLogScale(yScale, lo, hi, plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
+            } else if (swapAxes) {
+                // v1.5.0: horizontal bars bind the value scale to the X pixel
+                // range (lo -> left plot edge, hi -> right; not flipped).
+                // horizontal + log is rejected at construction, so the log
+                // branch above never runs swapped.
+                updateLinearScale(yScale, yLo, yHi, plotBoundsBox.x, plotBoundsBox.x + plotBoundsBox.w);
             } else {
                 updateLinearScale(yScale, yLo, yHi, plotBoundsBox.y + plotBoundsBox.h, plotBoundsBox.y);
             }
@@ -4503,7 +4730,11 @@ const createBaseAxisChart = (config, renderer) => {
             font: () => axisStyleRefs.font.value,
             format: resolvedXType === 'time' ? 'time' : 'number',
         }, rendererCtx);
-        const yAxis = buildAxis(scene.root, {
+        // v1.5.0: Y-axis via an optional renderer seam. buildAxis ignores the
+        // 3rd (ctx) arg, so line/area/scatter/bubble are untouched; the bar
+        // renderer's _buildAxisBarY puts the band axis on the left when the
+        // orientation is horizontal.
+        const yAxis = (renderer.buildYAxis || buildAxis)(scene.root, {
             orientation: 'y',
             scale: yScale,
             plotBoundsBox,
@@ -4513,7 +4744,7 @@ const createBaseAxisChart = (config, renderer) => {
             labelColor: () => axisStyleRefs.labelColor.value,
             font: () => axisStyleRefs.font.value,
             format: 'number',
-        });
+        }, rendererCtx);
         disposers.push(xAxis.dispose);
         disposers.push(yAxis.dispose);
 
@@ -5056,15 +5287,22 @@ const createBaseAxisChart = (config, renderer) => {
         // that moves from series A's point to series B's point (same row
         // index, different series) still re-renders the tooltip.
         const hitSeriesIdx = hit.snapSeriesIdx != null ? hit.snapSeriesIdx : -1;
+        // Dedup on the FREE axis's cursor pixel: vertical anchors the tooltip
+        // box Y on mousePixelY (box X is snapPixelX, fixed per snap), horizontal
+        // anchors box X on mousePixelX (box Y is snapPixelX). Checking only
+        // mousePixelY would freeze a horizontal tooltip as the cursor slides
+        // along the value axis inside one band (snapIdx + Y unchanged).
         if (crosshairData.visible
             && crosshairData.snapIdx === hit.snapIdx
             && crosshairData.snapSeriesIdx === hitSeriesIdx
-            && crosshairData.mousePixelY === canvasY) return;
+            && (swapAxes ? crosshairData.mousePixelX === canvasX
+                         : crosshairData.mousePixelY === canvasY)) return;
         crosshairData.visible = true;
         crosshairData.snapIdx = hit.snapIdx;
         crosshairData.snapDomainX = hit.snapDomainX;
         crosshairData.snapPixelX = hit.snapPixelX;
         crosshairData.snapSeriesIdx = hitSeriesIdx;
+        crosshairData.mousePixelX = canvasX;
         crosshairData.mousePixelY = canvasY;
         crosshairVersion.update((x) => (x + 1) | 0);
     };
@@ -5077,6 +5315,7 @@ const createBaseAxisChart = (config, renderer) => {
         crosshairData.snapDomainX = 0;
         crosshairData.snapPixelX = 0;
         crosshairData.snapSeriesIdx = -1;
+        crosshairData.mousePixelX = 0;
         crosshairData.mousePixelY = 0;
         crosshairVersion.update((x) => (x + 1) | 0);
     };
@@ -5091,16 +5330,12 @@ const createBaseAxisChart = (config, renderer) => {
         const pb = plotBoundsBox;
         const x = state.snapPixelX;
 
-        // --- Vertical crosshair line ---
+        // --- Crosshair guide line ---
+        // _guide is selected once at setup: a vertical line for standard
+        // orientation, a horizontal line when the axes are swapped. `x` is the
+        // band-axis pixel either way (an X normally, a Y when horizontal).
         if (crosshairOpts) {
-            ctx.strokeStyle = crosshairColorRef.value;
-            ctx.lineWidth = 1;
-            ctx.setLineDash(crosshairDash);
-            ctx.beginPath();
-            ctx.moveTo(x, pb.y);
-            ctx.lineTo(x, pb.y + pb.h);
-            ctx.stroke();
-            ctx.setLineDash(_EMPTY_DASH);
+            _guide(ctx, x, pb, crosshairColorRef.value, crosshairDash);
         }
 
         // --- Per-series marker circles ---
@@ -5207,11 +5442,15 @@ const createBaseAxisChart = (config, renderer) => {
 
         // Position: right of the crosshair, flip left if the box would clip
         // the right plot edge. Vertically centered on the cursor, clamped to
-        // the plot rect.
-        let boxX = state.snapPixelX + gap;
-        if (boxX + boxW > pb.x + pb.w) boxX = state.snapPixelX - gap - boxW;
+        // the plot rect. v1.5.0: when the axes are swapped, the box X anchors
+        // on the free-axis cursor (mousePixelX) and the box Y centres on the
+        // band-axis pixel (snapPixelX, a Y here).
+        const anchorX = swapAxes ? state.mousePixelX : state.snapPixelX;
+        const anchorY = swapAxes ? state.snapPixelX : state.mousePixelY;
+        let boxX = anchorX + gap;
+        if (boxX + boxW > pb.x + pb.w) boxX = anchorX - gap - boxW;
         if (boxX < pb.x) boxX = pb.x;
-        let boxY = state.mousePixelY - boxH / 2;
+        let boxY = anchorY - boxH / 2;
         if (boxY < pb.y) boxY = pb.y;
         if (boxY + boxH > pb.y + pb.h) boxY = pb.y + pb.h - boxH;
 
@@ -5698,6 +5937,188 @@ const populatePolarLegend = (legendEl, state, sliceVisibility, resolvedColors, d
     }
 };
 
+// ---- Center label (donut only) -------------------------------------------
+//
+// A DOM overlay centered in the donut hole. It is NOT a scene node -- it never
+// enters the per-frame draw path. `makeSliceDrawFn` and the scene walk gain
+// ZERO bytes: the only writer is Effect 5, created solely when centerLabel is
+// configured. Font size is done by CSS `clamp()` reading four custom
+// properties the kernel writes only on mount / resize / data change.
+//
+// The polar kernel interposes its OWN position:relative `labelHost` wrapper
+// (never the shared `installLegend`, which axis/bar/heatmap kernels also use)
+// so the overlay's absolute coordinates are canvas-relative regardless of
+// legend position -- no offsetLeft reads, no DPR term (geometry is logical px).
+//
+// Everything below is reachable ONLY from createBasePolarChart: the line/bar/
+// heatmap bundles never pull `--cl-fit` / centerLabel in.
+
+const CL_SQRT2 = 1.4142135623730951;  // inscribed-square side = rInner * SQRT2
+const CL_ADV = 0.6;                    // nominal glyph advance (em) for fit sizing
+const CL_HEIGHT_FRAC = 0.8;            // cap = fraction of hole height, no subLabel
+const CL_HEIGHT_FRAC_SUB = 0.45;       // cap fraction when a subLabel is present
+const CL_DEFAULT_MIN = 8;              // px floor default
+const CL_FONT_SIZE =
+    'clamp(var(--cl-min), calc(var(--cl-fit) / var(--cl-digits)), var(--cl-max))';
+// 0.42em resolves against the overlay's COMPUTED (clamped) font-size, matching
+// the SVG path's `size * 0.42` where size is already clamped. Using the raw
+// `--cl-fit / --cl-digits` ratio here would ignore the clamp and render the sub
+// larger than a capped main -- and diverge from the SVG export.
+const CL_SUB_FONT_SIZE = '0.42em';
+
+// Round to 2 decimals + 'px'. The only allocations on the cold update path.
+const _clEmitPx = (v) => Math.round(v * 100) / 100 + 'px';
+
+// Normalize config.centerLabel into a frozen options shape, or null when
+// falsy. FAIL CLOSED: centerLabel on a chart with no hole is a configuration
+// error, thrown at CONSTRUCTION (before mount). `null` is not zero.
+const _normalizeCenterLabel = (raw, innerRadiusConfig) => {
+    if (!raw) return null;
+    if (!(typeof innerRadiusConfig === 'number' && innerRadiusConfig > 0)) {
+        throw new Error(
+            'lite-charts: centerLabel requires a donut hole -- innerRadius resolved to 0 ' +
+            '(a pie has no hole). Use createDonutChart or set innerRadius > 0.');
+    }
+    let opts;
+    if (typeof raw === 'string' || typeof raw === 'function') {
+        opts = { text: raw };
+    } else if (typeof raw === 'object') {
+        opts = raw;
+    } else {
+        opts = {};   // centerLabel: true
+    }
+    const hasText = opts.text != null;
+    const textAcc = asAccessor(hasText ? opts.text : '');
+    const subAcc = opts.subLabel != null ? asAccessor(opts.subLabel) : null;
+    let format = typeof opts.format === 'function' ? opts.format : null;
+    // `centerLabel: true` (or {}): default to the total of visible slices.
+    if (!format && !hasText) format = (state) => String(state.visibleTotal);
+    const minFontSize = opts.minFontSize != null ? +opts.minFontSize : CL_DEFAULT_MIN;
+    const maxFontSize = opts.maxFontSize != null ? +opts.maxFontSize : Infinity;
+    // FAIL CLOSED on a pathological single bound: `+'12x'` / `+NaN` is NaN, and
+    // `NaN > x` is false, so the min>max check below would silently pass and we
+    // would emit "NaNpx" / font-size="NaN". Reject each supplied bound up front.
+    if (opts.minFontSize != null && !(Number.isFinite(minFontSize) && minFontSize >= 0)) {
+        throw new Error(
+            'lite-charts: centerLabel minFontSize must be a finite number >= 0 (got ' +
+            opts.minFontSize + ')');
+    }
+    if (opts.maxFontSize != null && !(Number.isFinite(maxFontSize) && maxFontSize > 0)) {
+        throw new Error(
+            'lite-charts: centerLabel maxFontSize must be a finite number > 0 (got ' +
+            opts.maxFontSize + ')');
+    }
+    if (opts.minFontSize != null && opts.maxFontSize != null && minFontSize > maxFontSize) {
+        throw new Error(
+            'lite-charts: centerLabel minFontSize (' + minFontSize +
+            ') exceeds maxFontSize (' + maxFontSize + ')');
+    }
+    return Object.freeze({
+        textAcc,
+        subAcc,
+        format,
+        color: opts.color != null ? opts.color : null,
+        font: opts.font != null ? opts.font : null,
+        minFontSize,
+        maxFontSize,
+    });
+};
+
+// Build the labelHost wrapper + overlay + main (+ optional sub) elements.
+// Every STATIC style (including the clamp() font-size) is set once here.
+// Returns null when there is no document (headless): the caller then skips
+// the whole overlay path. Color is resolved and applied at mount.
+const _buildCenterLabelDOM = (opts) => {
+    if (typeof document === 'undefined') return null;
+    const labelHost = document.createElement('div');
+    labelHost.className = 'lite-charts-label-host';
+    labelHost.style.position = 'relative';
+    labelHost.style.display = 'block';
+    labelHost.style.lineHeight = '0';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'lite-charts-center-label';
+    const s = overlay.style;
+    s.position = 'absolute';
+    s.pointerEvents = 'none';
+    s.transform = 'translate(-50%,-50%)';
+    s.overflow = 'hidden';
+    s.textAlign = 'center';
+    s.lineHeight = '1.1';
+    s.whiteSpace = 'nowrap';
+    if (opts.font) s.font = opts.font;   // family/weight only; size wins below
+    s.fontSize = CL_FONT_SIZE;
+
+    const main = document.createElement('div');
+    main.className = 'lite-charts-center-label-main';
+    overlay.appendChild(main);
+
+    let sub = null;
+    if (opts.subAcc) {
+        sub = document.createElement('div');
+        sub.className = 'lite-charts-center-label-sub';
+        sub.style.fontSize = CL_SUB_FONT_SIZE;
+        overlay.appendChild(sub);
+    }
+    return { labelHost, overlay, main, sub };
+};
+
+// Cold DOM writer: position/size the overlay and set the four sizing custom
+// properties + text. Exactly four setProperty calls. Skips (hides) when the
+// hole has collapsed -- an inverted geometry is unverified state.
+const _updateCenterLabel = (els, text, subText, geometry, opts) => {
+    const overlay = els.overlay;
+    const rInner = geometry.rInner;
+    if (!(rInner > 0)) { overlay.style.display = 'none'; return; }
+    const st = overlay.style;
+    st.display = 'block';
+    const inscribed = rInner * CL_SQRT2;
+    const fit = inscribed / CL_ADV;
+    const digits = Math.max(1, String(text).length);
+    const hf = els.sub ? CL_HEIGHT_FRAC_SUB : CL_HEIGHT_FRAC;
+    const maxCap = Math.min(opts.maxFontSize, inscribed * hf);
+    const minCap = Math.min(opts.minFontSize, maxCap);   // clamp the floor to the cap
+    st.left = _clEmitPx(geometry.cx);
+    st.top = _clEmitPx(geometry.cy);
+    st.width = _clEmitPx(inscribed);
+    st.maxWidth = _clEmitPx(inscribed);
+    st.setProperty('--cl-fit', _clEmitPx(fit));
+    st.setProperty('--cl-digits', String(digits));
+    st.setProperty('--cl-max', _clEmitPx(maxCap));
+    st.setProperty('--cl-min', _clEmitPx(minCap));
+    els.main.textContent = text;
+    if (els.sub) els.sub.textContent = subText != null ? subText : '';
+};
+
+// Cold export helper: emit the center label as SVG <text> (+ a second <text>
+// for the subLabel). NOT a scene node -- exportSVG string-splices this in so
+// the canvas draw walker never paints it. Font-size uses the SAME clamp math
+// as the DOM path, resolved to a concrete px number (SVG has no custom props).
+const _centerLabelToSVG = (text, subText, geometry, opts, fill) => {
+    const rInner = geometry.rInner;
+    if (!(rInner > 0)) return '';
+    const inscribed = rInner * CL_SQRT2;
+    const fit = inscribed / CL_ADV;
+    const digits = Math.max(1, String(text).length);
+    const hf = subText != null ? CL_HEIGHT_FRAC_SUB : CL_HEIGHT_FRAC;
+    const maxCap = Math.min(opts.maxFontSize, inscribed * hf);
+    const minCap = Math.min(opts.minFontSize, maxCap);
+    const raw = fit / digits;
+    const size = Math.round((raw < minCap ? minCap : raw > maxCap ? maxCap : raw) * 100) / 100;
+    fill = fill || '#111111';
+    let out = '<text x="' + _emitNumber(geometry.cx) + '" y="' + _emitNumber(geometry.cy) +
+        '" text-anchor="middle" dominant-baseline="central" font-size="' + size +
+        '" fill="' + _escapeXML(fill) + '">' + _escapeXML(text) + '</text>';
+    if (subText != null) {
+        const subSize = Math.round(size * 0.42 * 100) / 100;
+        const dy = Math.round(size * 1.25 * 100) / 100;
+        out += '<text x="' + _emitNumber(geometry.cx) + '" y="' + _emitNumber(geometry.cy + dy) +
+            '" text-anchor="middle" dominant-baseline="central" font-size="' + subSize +
+            '" fill="' + _escapeXML(fill) + '">' + _escapeXML(subText) + '</text>';
+    }
+    return out;
+};
+
 // ---- SLICE_RENDERER (used by both PIE and DONUT factories) ---------------
 //
 // Pie and donut share the same renderer -- the only difference is the
@@ -5754,6 +6175,15 @@ const createBasePolarChart = (config, renderer) => {
         throw new Error('lite-charts: polar chart requires `data` (array of {label,value,color}) or `values` (number[])');
     }
 
+    const innerRadiusConfig = config.innerRadius != null ? config.innerRadius : 0;
+
+    // ---- Center label (donut only) ------------------------------------
+    // Normalized ONCE at construction. The fail-closed throws (no hole /
+    // inverted font bounds) fire HERE -- before any signal is allocated below
+    // -- so a rejected config leaks nothing into the registry (cf. C0/LC-05:
+    // a construction throw after `_own(signal())` orphans those nodes).
+    const centerLabelOpts = _normalizeCenterLabel(config.centerLabel, innerRadiusConfig);
+
     // Dimensions: explicit (number or signal) or auto-observed at mount.
     const widthExplicit = config.width != null;
     const heightExplicit = config.height != null;
@@ -5772,7 +6202,6 @@ const createBasePolarChart = (config, renderer) => {
     const marginBottom = margin.bottom != null ? margin.bottom : DEFAULT_PIE_MARGIN.bottom;
     const marginLeft   = margin.left   != null ? margin.left   : DEFAULT_PIE_MARGIN.left;
 
-    const innerRadiusConfig = config.innerRadius != null ? config.innerRadius : 0;
 
     // ---- Chart state --------------------------------------------------
     const state = makePolarState();
@@ -5805,6 +6234,7 @@ const createBasePolarChart = (config, renderer) => {
     const fontRef             = { value: config.font != null ? config.font : '11px sans-serif' };
     const tooltipBgRef        = { value: 'rgba(255,255,255,0.96)' };
     const tooltipBorderRef    = { value: '#cccccc' };
+    const centerLabelColorRef = { value: '#111111' };
     // Highlight: index of slice under cursor; -1 = none. Read on every
     // draw; mutated by mouse handler.
     const highlightRef        = { value: -1 };
@@ -5858,6 +6288,8 @@ const createBasePolarChart = (config, renderer) => {
     let canvasCreated = false;
     let legendEl = null;
     let legendWrapper = null;
+    let labelHost = null;        // centerLabel: interposed position:relative wrapper
+    let centerLabelEls = null;   // { labelHost, overlay, main, sub } or null
     let disposers = [];
     let mounted = false;
 
@@ -5899,6 +6331,17 @@ const createBasePolarChart = (config, renderer) => {
             canvasCreated = false;
         } else {
             throw new Error('lite-charts: mount() target must be an HTMLElement or HTMLCanvasElement');
+        }
+
+        // FAIL CLOSED before any allocation: a centerLabel needs a DOM parent to
+        // interpose the overlay host into. Check it HERE -- before _wireAutoSize,
+        // createScene, and the effects below -- so a rejected mount strands no
+        // ResizeObserver / scene / effect (unmount early-returns on !mounted, so a
+        // late throw would leak them; same LC-05 class as the construction guard).
+        if (centerLabelOpts && (typeof document === 'undefined' || !canvas.parentNode)) {
+            throw new Error(
+                'lite-charts: centerLabel requires mount() into a DOM element ' +
+                '(no parent node to host the overlay)');
         }
 
         // Auto-resize wire-up: if width/height were omitted, observe the
@@ -6041,6 +6484,41 @@ const createBasePolarChart = (config, renderer) => {
             }
         }
 
+        // ---- Center label (donut only) --------------------------------
+        // Interpose a position:relative labelHost between canvas and its
+        // current parent (container OR legend wrapper), move the canvas in,
+        // append the overlay as a canvas-relative sibling. Built ONLY when
+        // centerLabel was configured. Effect 5 is the sole writer.
+        if (centerLabelOpts) {
+            // Availability already fail-closed at the top of mount(); parent is
+            // guaranteed non-null here.
+            const parent = canvas.parentNode;
+            const built = _buildCenterLabelDOM(centerLabelOpts);
+            if (built) {
+                labelHost = built.labelHost;
+                centerLabelEls = built;
+                parent.insertBefore(labelHost, canvas);
+                labelHost.appendChild(canvas);
+                labelHost.appendChild(built.overlay);
+                centerLabelColorRef.value = resolveColor(
+                    centerLabelOpts.color != null ? centerLabelOpts.color : '#111111', container);
+                built.overlay.style.color = centerLabelColorRef.value;
+
+                // Effect 5: text/subLabel + dataVersion + plotBounds -> overlay.
+                // Never touches the scene. Fires only on mount / resize
+                // (rAF-throttled) / data-visibility change / text-signal write.
+                disposers.push(effect(() => {
+                    dataVersion();
+                    plotBoundsSignal();
+                    const t = centerLabelOpts.format
+                        ? String(centerLabelOpts.format(state))
+                        : String(centerLabelOpts.textAcc());
+                    const sub = centerLabelOpts.subAcc ? String(centerLabelOpts.subAcc()) : null;
+                    _updateCenterLabel(centerLabelEls, t, sub, geometry, centerLabelOpts);
+                }));
+            }
+        }
+
         mounted = true;
         return chart;
     };
@@ -6055,6 +6533,19 @@ const createBasePolarChart = (config, renderer) => {
             try { scene.dispose(); } catch (e) { /* swallow */ }
             scene = null;
         }
+        // Un-interpose the labelHost FIRST so the canvas is restored to its
+        // pre-mount parent -- the existing legend/canvas removal below then
+        // fires exactly as it did before centerLabel existed.
+        if (labelHost && labelHost.parentNode && canvas) {
+            const host = labelHost.parentNode;
+            if (centerLabelEls && centerLabelEls.overlay && centerLabelEls.overlay.parentNode === labelHost) {
+                labelHost.removeChild(centerLabelEls.overlay);
+            }
+            host.insertBefore(canvas, labelHost);
+            host.removeChild(labelHost);
+        }
+        labelHost = null;
+        centerLabelEls = null;
         if (legendWrapper && legendWrapper.parentNode) {
             legendWrapper.parentNode.removeChild(legendWrapper);
         } else if (legendEl && legendEl.parentNode) {
@@ -6211,7 +6702,19 @@ const createBasePolarChart = (config, renderer) => {
             const bg = (opts && opts.background !== undefined)
                 ? opts.background
                 : (config.background != null ? config.background : null);
-            return _exportSceneToSVG(scene, w, h, bg);
+            const svg = _exportSceneToSVG(scene, w, h, bg);
+            // Center label is a DOM overlay, not a scene node -- splice it into
+            // the SVG string (export-only) so the canvas draw walker never
+            // paints it. Zero cost on the draw path.
+            if (centerLabelOpts) {
+                const t = centerLabelOpts.format
+                    ? String(centerLabelOpts.format(state))
+                    : String(centerLabelOpts.textAcc());
+                const sub = centerLabelOpts.subAcc ? String(centerLabelOpts.subAcc()) : null;
+                const frag = _centerLabelToSVG(t, sub, geometry, centerLabelOpts, centerLabelColorRef.value);
+                if (frag) return svg.slice(0, -6) + frag + '</svg>';
+            }
+            return svg;
         },
         redraw: () => { if (scene) scene.markDirty(); },
         moveCrosshair,
@@ -6234,12 +6737,20 @@ const createBasePolarChart = (config, renderer) => {
                     swatches[i].style.background = resolvedColors[i];
                 }
             }
+            // Re-resolve the center label color against the (possibly retheme'd)
+            // container and repaint the overlay.
+            if (centerLabelOpts && centerLabelEls) {
+                centerLabelColorRef.value = resolveColor(
+                    centerLabelOpts.color != null ? centerLabelOpts.color : '#111111', container);
+                centerLabelEls.overlay.style.color = centerLabelColorRef.value;
+            }
             if (scene) scene.markDirty();
         },
         get scene() { return scene; },
         get canvas() { return canvas; },
         get geometry() { return geometry; },
         get legend() { return legendEl; },
+        get centerLabel() { return centerLabelEls ? centerLabelEls.overlay : null; },
         plotBounds: plotBoundsSignal,
         crosshair: crosshairFacade,
         sliceVisibility,
@@ -6249,6 +6760,7 @@ const createBasePolarChart = (config, renderer) => {
             plotBoundsBox,
             sliceVisibility,
             dataVersion,
+            centerLabelOpts,
         },
     };
 
@@ -7133,6 +7645,12 @@ export const _testHelpers = {
     updateLogScale,
     makeBandScale,
     updateBandScale,
+    // v1.5.0: exposed for the hash-parity guard (A1). The horizontal-bar work
+    // must leave these five byte-identical to 1.4.1.
+    makeBarDrawFn,
+    makeHBarDrawFn,
+    _roundRectPath,
+    computeBarStacks,
     buildAccessor,
     buildRawAccessor,
     niceYDomain,
