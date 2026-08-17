@@ -5,7 +5,46 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.1] -- unreleased
+## [1.6.0] -- 2026-08
+
+X-axis log scale. Additive; no public API change beyond enabling the config.
+
+### Added -- `xScale: { type: 'log' }`
+
+- **Base-10 log on the x-axis** for the continuous axis-kernel charts (line,
+  area, scatter, bubble). Symmetric with the y-axis log scale that shipped in
+  1.4.0: decade ticks via `lite-axis.logTicks`, `map(x <= 0) = NaN` so line /
+  area break segments and markers skip, and log-space pan/zoom
+  (`_applyPanLog` / `_applyZoomLog` / `_clampToBoundsLog` already accepted an
+  `xLog` flag). Point projection was made log-aware for x in the 1.5.1 patch,
+  so this release is mostly construction + the reactive domain wiring.
+- **Fail-closed on every unverified state.** A log x-domain with no positive
+  extent throws at mount, naming the domain (mirrors the y `_logDomainError`
+  path; leaks no signal on the rejected mount). `xScale: { type: 'log' }`
+  combined with a categorical (bar / band) or time x-axis throws at
+  construction, before any signal is allocated -- a scale is one type.
+- **The common linear-x path is byte-unchanged.** The x-log branch is a single
+  cold `if (resolvedXType === 'log')` in the reactive scale effect; every
+  linear-x chart projects and ticks exactly as before.
+
+### Coverage
+
+- 15 new boundary tests (368 -> 383): mounted-chart projection == `xScale.map`,
+  non-positive -> NaN, decade ticks, fail-closed no-positive-extent (throws +
+  zero signal leak), the two construction guards (bar, time), log-correct pan
+  and zoom, a linear-x regression guard, exportSVG parity, and a documentation
+  test pinning the known pre-existing mixed-sign-domain behavior.
+- The T6.A13 torture gate gained an `xLog && !yLog` projection body mirror
+  (`<= 16 B/op` absolute, `<= 2.0 B/op` differential vs linear-x, `maxMajor: 0`).
+
+### Known / deferred
+
+- A mixed-sign log domain (min `<= 0`, max `> 0`) floors to positive for
+  rendering but leaves `_dataDomain` min unfloored, so the first pan/zoom
+  gesture produces a NaN (fail-closed) view. This is pre-existing and identical
+  on the y-axis; a future patch floors both axes together.
+
+## [1.5.1] -- 2026-08
 
 A correctness patch. One hot function; no public API change.
 
@@ -36,8 +75,9 @@ A correctness patch. One hot function; no public API change.
   linear-scale projection, and is proven to exercise the log path (one `log()`
   per sample per op) rather than no-op through the paint path.
 - **Scope.** Bars are unaffected (`projectToPixels: false` -- bar series are
-  never projected through this loop). `xScale: { type: 'log' }` still throws at
-  construction; x-axis log is a separate feature, not enabled here.
+  never projected through this loop). `xScale: { type: 'log' }` still threw at
+  construction as of this release; x-axis log is a separate feature, wired in
+  1.6.0.
 
 ## [1.5.0] -- 2026-08
 

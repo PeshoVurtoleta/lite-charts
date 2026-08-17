@@ -250,5 +250,28 @@ export function run() {
             () => `A13: y-log projection allocated ${gLog.bytesPerOp.toFixed(3)} B/op > 16`);
         check(Math.abs(gLog.bytesPerOp - gLin.bytesPerOp) <= 2.0,
             () => `A13: y-log ${gLog.bytesPerOp.toFixed(3)} B/op vs linear-y ${gLin.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
+
+        // v1.6.0: the MIRROR hot body -- (xLog && !yLog). x-log is a distinct
+        // branch in scaleSeriesToPixels from y-log; now that x-log is a user-
+        // facing scale it gets the same absolute <=16 B/op + differential-vs-
+        // linear-x proof. x in [1, 1000]: three positive decades, so the log-x
+        // branch takes the Math.log path every sample (never the NaN guard).
+        const xsPos = new Float32Array(N);
+        for (let i = 0; i < N; i++) xsPos[i] = (i / N) * 999 + 1;
+        const stateX = { xs: xsPos, ys, n: N, pxs: new Float32Array(N), pys: new Float32Array(N) };
+        const xLog = updateLogScale(makeLogScale(), 1, 1000, 56, 776);
+        const xLinPos = updateLinearScale(makeLinearScale('linear'), 1, 1000, 56, 776);
+        const poolBeforeX = stateX.pxs.buffer.byteLength;
+        const hotXLog = () => { scaleSeriesToPixels(stateX, xLog, yLin); };
+        const hotXLin = () => { scaleSeriesToPixels(stateX, xLinPos, yLin); };
+        const gXLog = runOpsGate(hotXLog, { ops: 40000, warmup: 1000 });
+        const gXLin = runOpsGate(hotXLin, { ops: 40000, warmup: 1000 });
+        check(stateX.pxs.buffer.byteLength === poolBeforeX,
+            () => `A13: x-log pixel pool grew ${poolBeforeX} -> ${stateX.pxs.buffer.byteLength}`);
+        if (!gXLog.report.ok) die(allocFailMsg('A13.xlog-project', gXLog.report, gXLog.summary));
+        check(gXLog.bytesPerOp <= 16.0,
+            () => `A13: x-log projection allocated ${gXLog.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gXLog.bytesPerOp - gXLin.bytesPerOp) <= 2.0,
+            () => `A13: x-log ${gXLog.bytesPerOp.toFixed(3)} B/op vs linear-x ${gXLin.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
     }
 }

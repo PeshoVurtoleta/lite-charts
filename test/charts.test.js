@@ -6002,11 +6002,10 @@ describe('log pan/zoom math (v1.4.1 -- C0 / LC-01..LC-05)', () => {
         });
     });
 
-    describe('LC-05 -- x-log is fail-closed at construction', () => {
-        it('createLineChart with xScale { type: "log" } throws', () => {
-            assert.throws(
+    describe('v1.6.0 -- x-log is supported (was LC-05 fail-closed)', () => {
+        it('createLineChart with xScale { type: "log" } constructs without throwing', () => {
+            assert.doesNotThrow(
                 () => createLineChart({ data: [{ x: 1, y: 1 }], xScale: { type: 'log' }, schedule: (fn) => fn() }),
-                /not supported yet/,
             );
         });
     });
@@ -6027,6 +6026,388 @@ describe('log pan/zoom math (v1.4.1 -- C0 / LC-01..LC-05)', () => {
             });
             c.mount(createMockCanvas(400, 300));
             assert.ok(c.yScale.dMin > 0 && Number.isFinite(c.yScale.dMax), 'positive domain');
+            c.destroy();
+        });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.6.0 -- x-axis log scale: QA boundary suite for PLAN_v1.6.0_xlog.md's
+// falsifiable assertions A1-A7, plus an exportSVG parity check and a
+// mixed-sign documentation test. Mirrors the existing y-log tests' structure
+// (LC-01..05, LC-04's `_logDomainError` throw, the y-log SVG decade test)
+// applied to the x-axis, which the coder's diff newly supports.
+// ---------------------------------------------------------------------------
+
+describe('v1.6.0 -- x-axis log scale', () => {
+    // Local interactive mock canvas -- mirrors the one in
+    // 'pan + zoom integration (v1.4.0-alpha.2)' below. Adds
+    // addEventListener/dispatch so the real pointerdown/pointermove/wheel
+    // listener paths (the ones that call _applyPanLog/_applyZoomLog) run.
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+
+    describe('A1 -- x-log point projection on a MOUNTED chart equals xScale.map(v)', () => {
+        // `state.pxs` (the mounted chart's real hot-path storage) is a
+        // Float32Array -- see Charts.js `xs:/*Float32Array*/`. `xScale.map()`
+        // computes in float64. Measured round-trip error at these magnitudes
+        // is ~5e-6 (Float32 has ~7 significant decimal digits); 1e-3 is
+        // ~200x that noise floor, so it still catches a real projection bug
+        // (e.g. a linear/log mixup, which is off by orders of magnitude)
+        // while tolerating the storage format's own precision.
+        const PX32_TOL = 1e-3;
+
+        it('line chart: pxs[i] === xScale.map(x[i]) within float32 storage precision, spot-check a decade boundary', () => {
+            const data = [{ x: 1, y: 1 }, { x: 10, y: 2 }, { x: 100, y: 3 }, { x: 1000, y: 4 }];
+            const c = createLineChart({
+                data, xScale: { type: 'log' },
+                width: 400, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            assert.strictEqual(c.xScale.type, 'log');
+            assert.strictEqual(c.xScale.dMin, 1);
+            assert.strictEqual(c.xScale.dMax, 1000);
+            const state = c._internal.seriesStates[0];
+            for (let i = 0; i < data.length; i++) {
+                const expected = c.xScale.map(data[i].x);
+                assert.ok(Math.abs(state.pxs[i] - expected) < PX32_TOL,
+                    'pxs[' + i + ']=' + state.pxs[i] + ' vs map=' + expected);
+            }
+            // Known decade boundary: x=100 sits 2/3 of the way across the
+            // 3-decade domain [1,1000] -- must land exactly there, not at
+            // the LINEAR fraction (100-1)/(1000-1) ~= 0.099.
+            const frac = (state.pxs[2] - state.pxs[0]) / (state.pxs[3] - state.pxs[0]);
+            assert.ok(Math.abs(frac - 2 / 3) < 1e-4, 'decade fraction should be 2/3, got ' + frac);
+            c.destroy();
+        });
+
+        it('scatter chart: same log-projection law on a MOUNTED x-log scatter', () => {
+            const data = [{ x: 1, y: 1 }, { x: 10, y: 2 }, { x: 1000, y: 4 }];
+            const c = createScatterChart({
+                data, xScale: { type: 'log' },
+                width: 400, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            const state = c._internal.seriesStates[0];
+            for (let i = 0; i < data.length; i++) {
+                const expected = c.xScale.map(data[i].x);
+                assert.ok(Math.abs(state.pxs[i] - expected) < PX32_TOL,
+                    'pxs[' + i + ']=' + state.pxs[i] + ' vs map=' + expected);
+            }
+            c.destroy();
+        });
+    });
+
+    describe('A2 -- a non-positive x sample on a MOUNTED x-log chart projects to NaN (polyline break)', () => {
+        it('x<=0 samples project to NaN pixels; positive samples stay finite', () => {
+            const data = [{ x: -5, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 2 }, { x: 10, y: 3 }];
+            const c = createLineChart({
+                data, xScale: { type: 'log' },
+                width: 400, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            const state = c._internal.seriesStates[0];
+            assert.ok(Number.isNaN(state.pxs[0]), 'x=-5 must project to NaN');
+            assert.ok(Number.isNaN(state.pxs[1]), 'x=0 must project to NaN');
+            assert.ok(!Number.isNaN(state.pxs[2]), 'x=1 must stay finite');
+            assert.ok(!Number.isNaN(state.pxs[3]), 'x=10 must stay finite');
+            c.destroy();
+        });
+    });
+
+    describe('A3 -- an x-log axis emits DECADE ticks (powers of 10, not linear-spaced)', () => {
+        it('SVG-exported x-axis tick labels invert to powers of 10 across the domain', () => {
+            const data = [];
+            for (let i = 0; i <= 6; i++) data.push({ x: Math.pow(10, i), y: i + 1 });
+            const c = createLineChart({
+                data, xScale: { type: 'log' },
+                width: 700, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(700, 300));
+            const svg = c.exportSVG();
+            // x-axis labels are bottom-anchored (align: 'center' -> SVG
+            // text-anchor="middle"); y-axis labels are right-anchored
+            // ("end") -- this regex only matches the x-axis.
+            const re = /<text x="([-\d.]+)"[^>]*text-anchor="middle"[^>]*>([^<]+)<\/text>/g;
+            let m;
+            let count = 0;
+            while ((m = re.exec(svg))) {
+                const px = parseFloat(m[1]);
+                const domainVal = c.xScale.invert(px);
+                const log10 = Math.log10(domainVal);
+                assert.ok(Math.abs(log10 - Math.round(log10)) < 0.01,
+                    'tick label "' + m[2] + '" inverts to ' + domainVal + ' (log10=' + log10 + '), not a decade boundary');
+                count++;
+            }
+            assert.ok(count >= 3, 'should emit at least 3 x-axis decade tick labels, got ' + count);
+            c.destroy();
+        });
+    });
+
+    describe('A4 -- fail-closed: an x-domain with no positive extent throws at MOUNT, names the x-domain, leaks no signal', () => {
+        it('all-non-positive x data throws naming the x-domain', () => {
+            const c = createLineChart({
+                data: [{ x: -5, y: 1 }, { x: -1, y: 2 }, { x: 0, y: 3 }],
+                xScale: { type: 'log' },
+                width: 400, height: 300,
+                schedule: (fn) => fn(),
+            });
+            assert.throws(
+                () => c.mount(createMockCanvas(400, 300)),
+                (err) => /needs positive data/.test(err.message) && /x-domain/.test(err.message),
+            );
+            c.destroy();
+        });
+
+        it('repeated failed mounts + destroy() leak zero signal nodes (mirrors the y LC-04 discipline)', () => {
+            const before = stats().activeNodes;
+            for (let i = 0; i < 25; i++) {
+                const c = createLineChart({
+                    data: [{ x: -5, y: 1 }, { x: -1, y: 2 }],
+                    xScale: { type: 'log' },
+                    width: 400, height: 300,
+                    schedule: (fn) => fn(),
+                });
+                let threw = null;
+                try {
+                    c.mount(createMockCanvas(400, 300));
+                } catch (e) {
+                    threw = e;
+                }
+                assert.ok(threw, 'mount should have thrown on cycle ' + i);
+                c.destroy();
+            }
+            const delta = stats().activeNodes - before;
+            assert.equal(delta, 0, 'failed x-log mounts should leak zero signal nodes once destroy() runs');
+        });
+    });
+
+    describe('A5 -- construction guards throw for x-log + incompatible x types', () => {
+        it('x-log + bar (band x) throws, naming the categorical incompatibility', () => {
+            assert.throws(
+                () => createBarChart({
+                    data: [{ x: 'Jan', y: 10 }, { x: 'Feb', y: 20 }],
+                    xScale: { type: 'log' },
+                    schedule: (fn) => fn(),
+                }),
+                /categorical \(band\) x-axis/,
+            );
+        });
+
+        it('x-log + time-valued x (Date) throws, naming the time incompatibility', () => {
+            assert.throws(
+                () => createLineChart({
+                    data: [{ x: new Date('2024-01-01'), y: 1 }, { x: new Date('2024-01-02'), y: 2 }],
+                    xScale: { type: 'log' },
+                    schedule: (fn) => fn(),
+                }),
+                /time-valued x data/,
+            );
+        });
+
+        it('x-log + time-valued x (epoch-ms on a "time" key) throws too', () => {
+            assert.throws(
+                () => createLineChart({
+                    data: [{ time: 1700000000000, y: 1 }, { time: 1700000100000, y: 2 }],
+                    x: 'time',
+                    xScale: { type: 'log' },
+                    schedule: (fn) => fn(),
+                }),
+                /time-valued x data/,
+            );
+        });
+    });
+
+    describe('A6 -- pan + zoom stay log-correct on an all-positive x-log domain', () => {
+        it('drag pans the x-domain by the decade law, not linearly', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: 0 }, { x: 1000, y: 100 }],
+                xScale: { type: 'log' },
+                pan: true,
+                panBounds: 'free',
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            assert.strictEqual(c.xScale.dMin, 1);
+            assert.strictEqual(c.xScale.dMax, 1000);
+
+            // Drag 50px LEFT (250 -> 200).
+            canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+            canvas.dispatch('pointermove', { clientX: 200, clientY: 150, pointerId: 1 });
+            canvas.dispatch('pointerup', { clientX: 200, clientY: 150, pointerId: 1 });
+
+            const v = c.view();
+            assert.ok(v != null, 'view should be set after drag');
+            // Independent oracle: the decade law directly from
+            // _applyPanLog's formula (dLog = dxPx * (lx1-lx0)/plotW).
+            const lx0 = Math.log(1), lx1 = Math.log(1000);
+            const dLog = -50 * (lx1 - lx0) / 500;
+            const expXMin = Math.exp(lx0 - dLog);
+            const expXMax = Math.exp(lx1 - dLog);
+            assert.ok(Math.abs(v.xMin - expXMin) < 1e-6, 'xMin ' + v.xMin + ' != ' + expXMin);
+            assert.ok(Math.abs(v.xMax - expXMax) < 1e-6, 'xMax ' + v.xMax + ' != ' + expXMax);
+            // Falsifiability: this must NOT equal what LINEAR pan math would
+            // have produced on the same drag (the bug this test would catch).
+            const dxData = -50 * (1000 - 1) / 500;
+            const linXMin = 1 - dxData;
+            assert.ok(Math.abs(v.xMin - linXMin) > 1, 'log pan must differ from linear pan (' + v.xMin + ' vs ' + linXMin + ')');
+            c.destroy();
+        });
+
+        it('wheel-zoom preserves the log anchor and shrinks the log-space span', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: 0 }, { x: 1000, y: 100 }],
+                xScale: { type: 'log' },
+                zoom: true,
+                panBounds: 'free',
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            c.setView({ xMin: 1, xMax: 1000, yMin: 0, yMax: 100 });
+            const before = c.view();
+            const beforeLogSpan = Math.log10(before.xMax) - Math.log10(before.xMin);
+
+            // Zoom in (deltaY < 0) centered at plot-center (x=250).
+            canvas.dispatch('wheel', { clientX: 250, clientY: 150, deltaY: -100, preventDefault: () => {} });
+            const after = c.view();
+            const afterLogSpan = Math.log10(after.xMax) - Math.log10(after.xMin);
+            assert.ok(afterLogSpan < beforeLogSpan, 'zoom-in should shrink the log-space x-span');
+            assert.ok(after.xMin > 0 && after.xMax > 0, 'zoomed log domain must stay positive');
+            c.destroy();
+        });
+    });
+
+    describe('A7 -- existing linear-x charts are unchanged (no behavioral drift)', () => {
+        it('a linear-x line chart projects the same known pixel as pre-v1.6.0', () => {
+            const c = createLineChart({
+                data: [{ x: 0, y: 0 }, { x: 50, y: 1 }, { x: 100, y: 2 }],
+                width: 400, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            assert.strictEqual(c.xScale.type, 'linear');
+            // x=50 is the domain midpoint -> pixel midpoint, exactly, always.
+            assert.strictEqual(c.xScale.map(50), 200);
+            const state = c._internal.seriesStates[0];
+            assert.strictEqual(state.pxs[1], 200);
+            c.destroy();
+        });
+
+        it('a linear-x axis still emits linearly-spaced (not decade) ticks', () => {
+            const c = createLineChart({
+                data: [{ x: 0, y: 0 }, { x: 1000000, y: 1 }],
+                width: 700, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(700, 300));
+            const svg = c.exportSVG();
+            const re = /<text x="([-\d.]+)"[^>]*text-anchor="middle"[^>]*>([^<]+)<\/text>/g;
+            let m;
+            let sawNonDecade = false;
+            while ((m = re.exec(svg))) {
+                const px = parseFloat(m[1]);
+                const domainVal = c.xScale.invert(px);
+                if (domainVal > 0) {
+                    const log10 = Math.log10(domainVal);
+                    if (Math.abs(log10 - Math.round(log10)) > 0.01) sawNonDecade = true;
+                }
+            }
+            assert.ok(sawNonDecade, 'a linear axis over [0, 1e6] should NOT produce only decade-aligned ticks');
+            c.destroy();
+        });
+    });
+
+    describe('exportSVG on an x-log chart', () => {
+        it('produces valid, well-formed SVG without throwing', () => {
+            const data = [{ x: 1, y: 1 }, { x: 10, y: 10 }, { x: 100, y: 5 }, { x: 1000, y: 50 }];
+            const c = createLineChart({
+                data, xScale: { type: 'log' },
+                width: 400, height: 300,
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(400, 300));
+            const svg = c.exportSVG();
+            assert.ok(svg.startsWith('<svg'));
+            assert.ok(svg.endsWith('</svg>'));
+            const m = svg.match(/ d="([^"]+)"/);
+            assert.ok(m, 'should find a path d attribute for the x-log line');
+            c.destroy();
+        });
+    });
+
+    describe('mixed-sign x-log domain + pan -- documents a known PRE-EXISTING characteristic (parity with y, OUT OF SCOPE for v1.6.0)', () => {
+        // The reviewer confirmed this is a pre-existing gap at exact parity
+        // with the y-axis (same Math.log(<=0) -> NaN characteristic) and is
+        // OUT OF SCOPE for v1.6.0. This test does NOT assert "correct"
+        // behavior -- it pins down what the code ACTUALLY does today, so a
+        // silent regression (or a silent "fix" that should ship with its own
+        // test) is caught either way. Do not "fix" this to make it pass.
+        it('mixed-sign x-domain (xMin<=0, xMax>0): mount succeeds (floors to positive); the FIRST pan produces a NaN view (fail-closed, not fail-silent)', () => {
+            const c = createLineChart({
+                data: [{ x: -5, y: 1 }, { x: 1, y: 2 }, { x: 1000, y: 3 }],
+                xScale: { type: 'log' },
+                pan: true,
+                panBounds: 'free',
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            // Mount succeeds: xMax > 0, so the domain floors xMin up to a
+            // tiny positive substitute (same floor-substitution as y/LC-04).
+            c.mount(canvas);
+            assert.ok(c.xScale.dMin > 0 && Number.isFinite(c.xScale.dMax), 'mount floors to a positive domain');
+            const dMinBefore = c.xScale.dMin, dMaxBefore = c.xScale.dMax;
+
+            // First pan: _dataDomain.xMin is the RAW (unfloored, <=0)
+            // snapshot, so _applyPanLog's Math.log(xMin<=0) is NaN.
+            canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+            canvas.dispatch('pointermove', { clientX: 200, clientY: 150, pointerId: 1 });
+            canvas.dispatch('pointerup', { clientX: 200, clientY: 150, pointerId: 1 });
+
+            const v = c.view();
+            assert.ok(Number.isNaN(v.xMin) && Number.isNaN(v.xMax),
+                'documenting current behavior: mixed-sign x-log pan yields a NaN view, not a silent linear fallback');
+            // The scale itself does NOT update on a NaN-domain re-run (the
+            // reactive effect bails/fail-safes rather than drawing garbage)
+            // -- it stays at its last valid (pre-drag) state.
+            assert.strictEqual(c.xScale.dMin, dMinBefore);
+            assert.strictEqual(c.xScale.dMax, dMaxBefore);
             c.destroy();
         });
     });

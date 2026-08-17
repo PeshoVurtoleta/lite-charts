@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>@zakkster/lite-charts -- v1.5.0</title>
+    <title>@zakkster/lite-charts -- v1.6.0</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -815,7 +815,7 @@
         <div class="brand">
             <span class="brand-logo"></span>
             <span class="brand-name">@zakkster/lite-charts</span>
-            <span class="brand-version">v1.5.0</span>
+            <span class="brand-version">v1.6.0</span>
         </div>
         <button class="theme-toggle" id="theme-toggle">
             <span class="indicator"></span>
@@ -831,7 +831,7 @@
          ================================================================= -->
     <section>
         <div class="hero-intro">
-            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.5.0</span>
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.6.0</span>
             <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
             <p>
                 Single-file ESM. Three peer deps. Signal-native data, dimensions, theme,
@@ -1278,6 +1278,45 @@
             <div>
                 <div class="caption centered">log y (decades evenly spaced)</div>
                 <div class="chart-area" id="log-log-chart"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         X-axis log scale -- v1.6.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// x-axis log scale -- v1.6.0</span>
+                <h2>Now the other axis, too.</h2>
+                <p>
+                    As of v1.6.0 the same opt-in works on x:
+                    <span class="mono">xScale: { type: 'log' }</span>, on the
+                    continuous kernels (line / area / scatter / bubble). The
+                    classic reason is a Bode-style response: a low-pass
+                    magnitude sampled across five decades of frequency. On
+                    linear x the whole audible band is crushed into the left
+                    edge; on log x the rolloff reads as the shape it is.
+                </p>
+                <p>
+                    Symmetric with the y-axis: decade ticks via
+                    <span class="mono">lite-axis.logTicks</span>, log-space
+                    pan/zoom, and <span class="mono">map(x &lt;= 0) = NaN</span>.
+                    Fail-closed -- a non-positive x-domain throws at mount, and
+                    <span class="mono">xScale: { type: 'log' }</span> on a
+                    categorical (bar) or time x-axis throws at construction.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card two-col-grid">
+            <div>
+                <div class="caption centered">linear x</div>
+                <div class="chart-area" id="xlog-linear-chart"></div>
+            </div>
+            <div>
+                <div class="caption centered">log x (decades evenly spaced)</div>
+                <div class="chart-area" id="xlog-log-chart"></div>
             </div>
         </div>
     </section>
@@ -2643,6 +2682,55 @@
     });
     logLogChart.mount(document.getElementById('log-log-chart'));
     ALL_CHARTS.push(logLogChart);
+
+    // ---------------------------------------------------------------------
+    // X-AXIS LOG SCALE -- v1.6.0
+    //
+    // A first-order low-pass magnitude |H(f)| = 1 / sqrt(1 + (f/fc)^2),
+    // fc = 1000, sampled across five decades of frequency (1..1e5 Hz). On a
+    // linear x-axis the corner and the entire audible band collapse against
+    // the left edge; on a log x-axis it is the familiar flat-then-rolloff
+    // Bode shape, evenly spaced by decade. Built once at init -- no per-frame
+    // allocation. All-positive x-domain, so the log axis is well-defined.
+
+    const xLogData = (() => {
+        const fc = 1000;
+        const out = new Array(51);
+        for (let i = 0; i <= 50; i++) {
+            const f = Math.pow(10, i / 10);      // 1 .. 1e5, ten samples/decade
+            out[i] = {x: f, y: 1 / Math.sqrt(1 + (f / fc) * (f / fc))};
+        }
+        return out;
+    })();
+
+    const xLogLinearChart = createLineChart({
+        data: xLogData,
+        width: responsiveWidth('xlog-linear-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-amber',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    xLogLinearChart.mount(document.getElementById('xlog-linear-chart'));
+    ALL_CHARTS.push(xLogLinearChart);
+
+    const xLogLogChart = createLineChart({
+        data: xLogData,
+        xScale: {type: 'log'},                  // <-- the v1.6.0 opt-in
+        width: responsiveWidth('xlog-log-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-emerald',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    xLogLogChart.mount(document.getElementById('xlog-log-chart'));
+    ALL_CHARTS.push(xLogLogChart);
 
     // ---------------------------------------------------------------------
     // PAN + ZOOM -- v1.4.0-alpha.2 (interactive view)

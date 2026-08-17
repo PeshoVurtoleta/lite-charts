@@ -17,15 +17,26 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.5.1 -- a correctness patch over the v1.5.0 presentation cut
-(a dynamic donut center label sized by CSS `clamp()`, and horizontal bar
-orientation). v1.5.1 fixes log-scale point projection: a `yScale: { type:
-'log' }` line/area/scatter/bubble chart placed its data points with linear
-math, throwing them off-canvas -- the axis, ticks, and pan/zoom were always
-correct, only the point projection was wrong. No public API change.
-**368/368 tests pass** plus a torture/stress gate (`npm run torture`).
+**Status:** v1.6.0 -- x-axis log scale. `xScale: { type: 'log' }` now works on
+every axis-kernel chart (line / area / scatter / bubble): base-10 log
+projection, decade ticks, and log-correct pan/zoom -- the same treatment the
+y-axis has had since v1.4.0. Fail-closed: a log x-domain with no positive
+extent throws at mount (naming the domain), and x-log on a categorical (bar)
+or time x-axis throws at construction. Additive; no public API change beyond
+enabling the config. **383/383 tests pass** plus a torture/stress gate
+(`npm run torture`).
 
-**New in v1.5.0:**
+**New in v1.6.0:**
+- **`xScale: { type: 'log' }`** -- base-10 log on the x-axis for any
+  axis-kernel chart. Ticks via `lite-axis.logTicks` (decade boundaries);
+  `map(x <= 0)` is NaN, so line / area break segments and markers skip.
+  Pan and zoom operate in log space -- the interaction plumbing was already
+  symmetric with the y-axis, so this wiring was mostly enabling what the
+  kernels already supported. Fail-closed: throws at mount on a non-positive
+  x-domain, and at construction on a bar (band) or time x-axis (a scale is
+  one type). See "Log scale" below.
+
+**Inherited from v1.5.0 (+ the v1.5.1 patch):**
 - **`centerLabel` on `createDonutChart`** -- a number rendered in the
   donut hole as a `pointer-events:none` DOM overlay (not canvas text),
   so its font resizes itself. Font size is owned by CSS `clamp()`: the
@@ -43,6 +54,12 @@ correct, only the point projection was wrong. No public API change.
   this cut: `horizontal` combined with `pan` / `zoom` / `brush` / a value
   `grid` / a log value axis throws at construction. See "Horizontal
   orientation" below.
+- **Log-scale point projection fix (v1.5.1 patch).** `scaleSeriesToPixels`
+  projected `yScale: { type: 'log' }` points with linear math, throwing
+  line / area / scatter / bubble points off-canvas (the axis and ticks were
+  correct; only the points were wrong). The projection loop is now log-aware
+  on both axes; the all-linear path is byte-identical. Present since y-log
+  shipped in v1.4.1. (This is what made the v1.6.0 x-log projection correct.)
 
 **Inherited from v1.4.0 (+ the v1.4.1 patch):**
 - **`yScale: { type: 'log' }`** -- log scale on the y-axis for any
@@ -67,7 +84,8 @@ correct, only the point projection was wrong. No public API change.
   space (`_applyPanLog` / `_applyZoomLog`) with a domain floor;
   before, the first gesture drove the domain wrong or negative
   (findings LC-01..LC-05). `updateLogScale` throws on a non-positive
-  domain; `xScale: { type: 'log' }` throws until it is fully wired.
+  domain. The same log-space pan/zoom now applies to `xScale: { type:
+  'log' }` as of v1.6.0 (see "New in v1.6.0" above).
 
 **Inherited from v1.3.0:**
 - **`chart.exportSVG()`** on every chart. Safe at 100k+ points
@@ -1005,8 +1023,8 @@ extent in the relevant axis.
   chart, so pan magnitude was wrong and a large gesture could drive the
   domain non-positive. v1.4.1 (finding C0) operates in log space: a drag
   of `d` px on an `n`-decade axis multiplies both bounds by `10^(n*d/plotH)`
-  and no gesture can produce a non-positive domain. `xScale: { type: 'log' }`
-  is fail-closed (throws) until it is wired in v1.5.0.
+  and no gesture can produce a non-positive domain. As of v1.6.0 the same
+  log-space pan/zoom math applies to `xScale: { type: 'log' }` on the x-axis.
 - **Bar charts** inherit pan/zoom typing via `Omit<LineChartConfig,
   ...>` but their band x-axis isn't ideal for panning. Visually
   weird; not documented as supported in alpha.2.
@@ -1014,10 +1032,12 @@ extent in the relevant axis.
   Different interaction models -- pie has no x/y space; heatmap uses
   band scales on both axes.
 
-## Log scale (v1.4.0-alpha.0)
+## Log scale (y: v1.4.0-alpha.0; x: v1.6.0)
 
 Opt in with `yScale: { type: 'log' }` on any axis-kernel chart
-(line, area, bar, bubble, scatter):
+(line, area, bar, bubble, scatter). As of v1.6.0 the same option
+works on the x-axis via `xScale: { type: 'log' }` for the continuous
+kernels (line, area, scatter, bubble -- not the categorical bar):
 
 ```js
 const chart = createLineChart({
@@ -1047,9 +1067,13 @@ of the data has positive y values.
   from zero, and log has no meaningful zero. The library doesn't
   block the combination, but the visual won't be what most readers
   expect.
-- **Log on x-axis** isn't wired yet (v1.4.0-alpha.0 is y-axis only).
-  The plumbing is symmetric; x-axis log is a small follow-up if
-  needed.
+- **Log on x-axis (v1.6.0).** `xScale: { type: 'log' }` enables base-10
+  log on the x-axis for the continuous kernels (line, area, scatter,
+  bubble). Same decade ticks, same `map(x <= 0) = NaN` segment-break
+  behavior, and log-space pan/zoom. Fail-closed: a non-positive x-domain
+  throws at mount (naming the domain); x-log combined with a categorical
+  (bar / band) or time x-axis throws at construction -- a scale is one
+  type. Log + bar stays a y-axis-only notion since bar x is categorical.
 
 ## SVG export (v1.3.0)
 
@@ -1196,11 +1220,12 @@ forward plan and the development history that led here. Headlines:
 | **v1.2.0** | Heatmap polish (row + column highlight, quantile binning, auto-contrast value labels); `chart.destroy()` terminal teardown on every kernel. 245 tests. |
 | **v1.3.0** | `chart.exportSVG()` across all nine charts via a Canvas2D-shim that walks the live scene tree. Pixel-identical to canvas paint (minus DPR scaling). Pre-existing bar-label centering bug found and fixed. 259 tests. |
 | **v1.4.0** | Three interaction primitives on axis-kernel charts: log scale on y (`yScale: { type: 'log' }`), pan + zoom (`pan` / `zoom`, `chart.view`), brushing (`brush`, `chart.brush`). Plus four pre-existing allocation traps closed during a bare-metal audit. 320 tests. Shipped across alphas .0-.3; see CHANGELOG for the per-alpha breakdown. |
-| **v1.4.1** | Correctness patch: log-aware pan/zoom math (`_applyPanLog` / `_applyZoomLog`, log-space arithmetic + a domain floor), per-axis branching, and fail-closed scale validation -- a log chart could not be panned or zoomed before (findings LC-01..LC-05). `updateLogScale` throws on an invalid domain; `xScale: { type: 'log' }` throws until wired. 341 tests + a torture/stress gate (`npm run torture`). |
+| **v1.4.1** | Correctness patch: log-aware pan/zoom math (`_applyPanLog` / `_applyZoomLog`, log-space arithmetic + a domain floor), per-axis branching, and fail-closed scale validation -- a log chart could not be panned or zoomed before (findings LC-01..LC-05). `updateLogScale` throws on an invalid domain; `xScale: { type: 'log' }` still threw at this point (wired in v1.6.0). 341 tests + a torture/stress gate (`npm run torture`). |
 | **v1.5.0** | Presentation cut. Donut `centerLabel` -- a number in the hole as a CSS-`clamp()`-sized DOM overlay (digit count drives the font; zero per-frame JS). Horizontal bar `orientation` -- category band on Y, byte-identical vertical draw path, fail-closed vs `pan` / `zoom` / `brush` / value `grid` / log axis. Additive, no public API breaks vs 1.4.1. 363 tests + torture gate. |
-| **v1.5.1** (this) | Correctness patch. `scaleSeriesToPixels` -- the hot per-extract projection loop for every `projectToPixels` renderer (line / area / scatter / bubble) -- inlined linear `v * slope + intercept` for both axes, so a `yScale: { type: 'log' }` chart drew its axis and ticks correctly but placed every point at the wrong pixel (present since y-log shipped in 1.4.1). The loop is now log-aware on both axes via four cold-selected flat bodies; the all-linear path is byte-identical (proven by a 12k-point `Object.is` parity gate). Bars unaffected (`projectToPixels: false`); `xScale: { type: 'log' }` still throws. 368 tests + a pure-kernel torture gate (T6.A13). |
+| **v1.5.1** | Correctness patch. `scaleSeriesToPixels` -- the hot per-extract projection loop for every `projectToPixels` renderer (line / area / scatter / bubble) -- inlined linear `v * slope + intercept` for both axes, so a `yScale: { type: 'log' }` chart drew its axis and ticks correctly but placed every point at the wrong pixel (present since y-log shipped in 1.4.1). The loop is now log-aware on both axes via four cold-selected flat bodies; the all-linear path is byte-identical (proven by a 12k-point `Object.is` parity gate). Bars unaffected (`projectToPixels: false`); `xScale: { type: 'log' }` still threw. 368 tests + a pure-kernel torture gate (T6.A13). |
 | **companion** | `@zakkster/lite-charts-gl` v0.1.0+ -- separate WebGL2 package built on `@zakkster/lite-gl`. Scatter / bubble / density charts targeting the 100k-1M point range. lite-charts core stays canvas-only and node-testable. |
-| v1.6.0 (candidates) | x-log wiring (currently fail-closed); horizontal bars with `pan` / `zoom` / `brush` / value grid; configurable brush modifier; brush IDs across all visible series; time-series variants; annotation layer; legend virtualization via `lite-virtual`. |
+| **v1.6.0** (this) | X-axis log scale. `xScale: { type: 'log' }` now works on the continuous axis-kernel charts (line / area / scatter / bubble): base-10 log projection, decade ticks via `logTicks`, and log-space pan/zoom -- symmetric with the y-axis, built on the v1.5.1 projection fix. Fail-closed: a non-positive x-domain throws at mount naming the domain; x-log on a categorical (bar / band) or time x-axis throws at construction. Common linear-x path byte-unchanged. 383 tests + the T6.A13 torture gate extended to the x-log projection body. |
+| v1.6.x / v1.7.0 (candidates) | horizontal bars with `pan` / `zoom` / `brush` / value grid; configurable brush modifier; brush IDs across all visible series; time-series variants; annotation layer; legend virtualization via `lite-virtual`; flooring `_dataDomain` min on log axes so a mixed-sign domain doesn't NaN the first gesture (x and y together). |
 
 ## Ecosystem
 

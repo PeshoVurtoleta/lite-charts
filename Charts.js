@@ -3984,16 +3984,12 @@ const createBaseAxisChart = (config, renderer) => {
         throw new Error('lite-charts: chart factories require a config object');
     }
 
-    // v1.4.1 (C0 / LC-05): x-log is not wired -- the x-scale is always linear
-    // (`createXScale: makeLinearScale`), while a few draw/extract paths branch on
-    // `xScale.type === 'log'`. Half-honoured is worse than unsupported: it would
-    // pan and label an x-log chart with linear math. Fail CLOSED here, at the very
-    // top of construction (before any signal is allocated, so nothing leaks),
-    // until C1 wires it -- rather than render a silently-wrong axis.
-    if (config.xScale && config.xScale.type === 'log') {
-        throw new Error('lite-charts: xScale { type: \'log\' } is not supported yet ' +
-            '(planned for v1.5.0); use a linear or time x-scale');
-    }
+    // v1.6.0: x-axis log scale is wired end-to-end (projection, ticks, pan/zoom,
+    // draw/hit all branch on `xScale.type === 'log'`). The blanket fail-closed
+    // guard from v1.4.1/C0 is gone; the narrower mutual-exclusion guards a log
+    // x-scale genuinely needs (log + band x, log + time x) sit just below, after
+    // accessors resolve but before any signal is allocated, so a rejected config
+    // still leaks nothing.
 
     // -- Normalize series shape (data shorthand -> single-element series array) --
     // We pre-resolve interpolation here so an invalid mode throws at chart
@@ -4030,6 +4026,39 @@ const createBaseAxisChart = (config, renderer) => {
     const yKey = config.y != null ? config.y : 'y';
     const xAccessor = renderer.buildXAccessor(xKey);
     const yAccessor = buildAccessor(yKey);
+
+    // v1.6.0: x-log mutual-exclusion guards. A log x-scale is only meaningful on
+    // a continuous numeric axis. Two combinations are contradictions, not
+    // configurations, so they fail CLOSED here -- after accessors resolve (the
+    // time guard probes data) but BEFORE any signal is allocated, so a rejected
+    // config leaks no arena slot. (Same discipline as the y-log / horizontal
+    // guards further down.)
+    const _xLogRequested = !!(config.xScale && config.xScale.type === 'log');
+    if (_xLogRequested) {
+        // (1) band x (bar charts): x is categorical, there is no numeric domain
+        // to take a logarithm of. renderer.forceXType === 'band' identifies a
+        // bar renderer regardless of what the data would otherwise infer.
+        if (renderer.forceXType === 'band') {
+            throw new Error('lite-charts: xScale { type: \'log\' } is not compatible with a ' +
+                'categorical (band) x-axis -- bar charts have no continuous x-domain; ' +
+                'put the log scale on the value axis (yScale) instead');
+        }
+        // (2) time x: a scale is one type. If the x data is time-valued (Date or
+        // an epoch-ms field), a log request contradicts the declared/inferred
+        // time nature. Probe the first non-empty series, mirroring the inference
+        // loop below.
+        let _xLogInferred = null;
+        for (let i = 0; i < normalized.length && !_xLogInferred; i++) {
+            const d = untrack(normalized[i].dataAccessor);
+            if (Array.isArray(d) && d.length > 0) {
+                _xLogInferred = inferXScaleType(d[0], xKey);
+            }
+        }
+        if (_xLogInferred === 'time') {
+            throw new Error('lite-charts: xScale { type: \'log\' } is not compatible with ' +
+                'time-valued x data -- a scale is one type; use a linear or time x-scale');
+        }
+    }
 
     // -- Dimensions (static, signal, or auto-observed from container) --
     // If width/height are omitted from config, the kernel creates internal
@@ -4081,7 +4110,11 @@ const createBaseAxisChart = (config, renderer) => {
     }
     // For bar charts, x is categorical -- override the inferred type to 'band'.
     if (renderer.forceXType) resolvedXType = renderer.forceXType;
-    const xScale = renderer.createXScale(resolvedXType);
+    // v1.6.0: a log x-scale uses the shared log kernel (same shape as log-y), the
+    // same allocation-free `map`/`invert`/`updateLogScale` the y-axis already
+    // proves. renderer.forceXType (bar -> 'band') has already won above, so band
+    // is never log; every other renderer builds its normal linear/time scale.
+    const xScale = resolvedXType === 'log' ? makeLogScale() : renderer.createXScale(resolvedXType);
 
     // v1.4.0-alpha.0: y-scale type. `yScale: { type: 'log' }` opts in to a
     // base-10 log scale; default is linear. Log y is supported on every
@@ -4650,16 +4683,34 @@ const createBaseAxisChart = (config, renderer) => {
                 }
             }
 
-            // v1.5.0: when the axes are swapped (horizontal bars) the band
-            // scale is bound to the Y pixel range instead of X. The scale
-            // OBJECT is unchanged -- only the pixel range it maps into swaps.
-            renderer.updateXScale(
-                xScale,
-                xLo, xHi,
-                swapAxes ? plotBoundsBox.y : plotBoundsBox.x,
-                swapAxes ? plotBoundsBox.y + plotBoundsBox.h : plotBoundsBox.x + plotBoundsBox.w,
-                rendererCtx,
-            );
+            // v1.6.0: a log x-scale takes the same fail-closed domain-floor as
+            // log-y, applied to the X pixel range (left -> right, NOT flipped like
+            // y's bottom -> top). x-log + band and x-log + swapped are rejected at
+            // construction, so this branch is never band and never swapped; the
+            // linear/time/band renderers keep the unchanged updateXScale seam.
+            if (resolvedXType === 'log') {
+                let xlo = xLo, xhi = xHi;
+                if (!(xhi > 0)) {
+                    // No positive extent: flag and bail this run (mount() throws).
+                    _logDomainError = 'lite-charts: a log x-axis needs positive data, but the x-domain [' +
+                        xLo + ', ' + xHi + '] has no positive values';
+                    return;
+                }
+                if (!(xlo > 0)) xlo = xhi * 1e-9;
+                if (!(xhi > xlo)) xhi = xlo * 10;
+                updateLogScale(xScale, xlo, xhi, plotBoundsBox.x, plotBoundsBox.x + plotBoundsBox.w);
+            } else {
+                // v1.5.0: when the axes are swapped (horizontal bars) the band
+                // scale is bound to the Y pixel range instead of X. The scale
+                // OBJECT is unchanged -- only the pixel range it maps into swaps.
+                renderer.updateXScale(
+                    xScale,
+                    xLo, xHi,
+                    swapAxes ? plotBoundsBox.y : plotBoundsBox.x,
+                    swapAxes ? plotBoundsBox.y + plotBoundsBox.h : plotBoundsBox.x + plotBoundsBox.w,
+                    rendererCtx,
+                );
+            }
             if (yScaleType === 'log') {
                 // C0 (LC-04): `updateLogScale` now fails closed, so the domain is
                 // made valid HERE rather than substituted inside it. Non-positive

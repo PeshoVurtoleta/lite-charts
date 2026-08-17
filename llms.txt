@@ -10,7 +10,25 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.5.1 (current): a correctness patch, no public API change. Fixes
+> v1.6.0 (current): x-axis log scale. additive, no public API change beyond
+> enabling the config. xScale:{type:'log'} now works on the CONTINUOUS
+> axis-kernel charts (line/area/scatter/bubble; NOT bar -- band x is not
+> continuous). base-10 log, decade ticks via lite-axis.logTicks, map(x<=0)=NaN
+> (segments break, markers skip), and log-space pan/zoom -- symmetric with the
+> y-axis log that shipped in v1.4.0. the interaction helpers (_applyPanLog/
+> _applyZoomLog/_clampToBoundsLog) already took an xLog flag; point projection
+> was made x-log-aware in the v1.5.1 patch; so v1.6.0 is mostly construction +
+> the reactive domain wiring. FAILS CLOSED: a log x-domain with no positive
+> extent throws at MOUNT naming the domain (mirrors the y _logDomainError path,
+> leaks no signal); xScale:{type:'log'} + a categorical (bar/band) or time
+> x-axis throws at CONSTRUCTION before any signal alloc (a scale is one type).
+> the common linear-x path is byte-unchanged (one cold if in the scale effect).
+> 15 new tests (368->383); T6.A13 torture gate extended with an xLog-only
+> projection body (<=16 B/op abs, <=2.0 B/op vs linear-x, maxMajor:0). KNOWN/
+> pre-existing: a mixed-sign log domain (min<=0,max>0) floors to positive for
+> render but leaves _dataDomain min unfloored, so the first gesture NaNs the
+> view (fail-closed); identical on y; a later patch floors both axes together.
+> v1.5.1: a correctness patch, no public API change. Fixes
 > log-scale point projection. scaleSeriesToPixels -- the per-extract hot loop
 > that maps domain values to pixels for every projectToPixels renderer
 > (line/area/scatter/bubble) -- inlined linear v*slope+intercept for both
@@ -23,9 +41,9 @@
 > non-positive samples break the polyline exactly as map() does; no per-point
 > branch, no allocation; the linear/linear body is byte-identical (12k-point
 > Object.is parity gate). Bars unaffected (BAR_RENDERER projectToPixels:false).
-> xScale:{type:'log'} still throws at construction (x-log is a separate
-> feature). Torture gate T6.A13 bounds the log branch at maxMajor:0, <=2.0 B/op
-> vs the identical linear projection.
+> xScale:{type:'log'} still threw at construction as of 1.5.1 (x-log was a
+> separate feature, wired in v1.6.0 above). Torture gate T6.A13 bounds the log
+> branch at maxMajor:0, <=2.0 B/op vs the identical linear projection.
 > v1.5.0: a presentation cut, additive over v1.4.1, both opt-in,
 > no public API breaks. (1) createDonutChart `centerLabel` -- a number in
 > the donut hole as a pointer-events:none DOM overlay (NOT canvas text),
@@ -98,8 +116,9 @@
 > interaction primitives (different interaction models). Log + pan/zoom
 > is LOG-AWARE as of v1.4.1 (C0): _applyPanLog/_applyZoomLog work in
 > log space (drag d px on n-decade axis multiplies bounds by 10^(n*d/H)),
-> per-axis branching, a log floor stops drift to 0/Infinity; x-log throws
-> until v1.5. Linear path is byte-identical (parity-tested). Forward plan: the
+> per-axis branching, a log floor stops drift to 0/Infinity; the same log-space
+> pan/zoom applies to x-log as of v1.6.0. Linear path is byte-identical
+> (parity-tested). Forward plan: the
 > view-signal shape was chosen specifically to drop unchanged into a
 > future @zakkster/lite-charts-gl companion package (separate npm
 > package on @zakkster/lite-gl); that work is post-v1.4. See README
@@ -196,7 +215,8 @@
 > not documented as supported. Log-aware as of v1.4.1 (C0): _applyPanLog/
 > _applyZoomLog work in log space per-axis (linear path byte-identical),
 > with a floor that keeps a free pan from drifting the domain to 0/Inf;
-> x-log throws until v1.5. Polar/radar/heatmap kernels don't get pan/zoom.
+> x-log is supported as of v1.6.0 (same log-space math). Polar/radar/heatmap
+> kernels don't get pan/zoom.
 > Brushing (originally alpha.2) shifts to alpha.3: modifier-key drag
 > emits brushSignal for cross-chart filtering; will coexist with
 > pan/zoom (no modifier = pan, shift = brush). 304/304 tests pass.
@@ -1247,13 +1267,13 @@ charts dynamically.
   established (mock-WebGL2-context unit tests + real-GPU
   Playwright). Bench target: 1M scatter points at 60fps with
   signal-driven pan/zoom.
-- v1.6.0 (candidates): x-log wiring (currently fail-closed at
-  construction); horizontal bars with pan/zoom/brush/value grid;
-  time-series specialized variants (auto-formatted time axes,
+- v1.6.x / v1.7.0 (candidates): horizontal bars with pan/zoom/brush/value
+  grid; time-series specialized variants (auto-formatted time axes,
   hour/day/week binning helpers); legend virtualization via
   `@zakkster/lite-virtual` (for charts with hundreds of series);
   annotation layer (text + arrow + region annotations bound to
-  data-space coordinates).
+  data-space coordinates); flooring _dataDomain min on log axes so a
+  mixed-sign domain doesn't NaN the first gesture (x and y together).
 - v2.0.0 (possible): renderer-agnostic kernel refactor (if
   lite-charts-gl proves out, fold the renderer choice into core);
   deeper SSR support.
