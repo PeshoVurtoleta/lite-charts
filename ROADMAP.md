@@ -5,7 +5,65 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.5.0 (current)
+## v1.6.1 (current)
+
+A correctness patch closing the one gap v1.6.0 shipped as known/deferred.
+No public API change; the per-frame draw path is byte-unchanged.
+
+- **Mixed-sign log domains pan/zoom cleanly.** A `type: 'log'` domain spanning
+  zero (`min <= 0, max > 0`) rendered correctly but NaN'd the view on the first
+  pan or zoom: the reactive scale effect floored the domain to its positive
+  part for *drawing* but wrote the raw non-positive min into `_dataDomain`, the
+  snapshot the gesture math reads -- so `_clampToBoundsLog` / `axisSpan` took
+  `log()` of a value `<= 0`. `_dataDomain.xMin` / `.yMin` is now floored to the
+  same positive part the render path uses (`dxMax * 1e-9` / `yBase[1] * 1e-9`,
+  same `> 0` predicate, from the data extent), on both axes. Two cold `if`s in
+  the scale effect.
+- **Fail-closed preserved.** A log domain with no positive extent still throws
+  at mount -- the floor is guarded on `max > 0`, so it never masks that throw.
+- 7 new tests (383 -> 390): y-pan, x/y positive-domain regression, x/y
+  no-positive-extent throw, x/y zoom-path; the pre-existing x-pan
+  characterization test reconciled to assert the finite (moved) view.
+  Load-bearing verified by reverting the fix (exactly 4 gesture tests fail).
+  Torture gate green, ASCII clean.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.6.0
+
+Log scale on the **x**-axis, closing the "log y only" gap the earlier cuts
+left open. Additive, opt-in, no public API break beyond enabling the config:
+
+- **`xScale: { type: 'log' }`** on the continuous axis-kernel charts
+  (line / area / scatter / bubble; NOT bar -- a band x-axis is not
+  continuous). Base-10 log, decade ticks via `lite-axis.logTicks`,
+  `map(x <= 0) = NaN` (segments break, markers skip), and log-space
+  pan/zoom -- symmetric with the y-axis log that shipped in v1.4.0.
+- Most of the surface was already wired: the interaction helpers
+  (`_applyPanLog` / `_applyZoomLog` / `_clampToBoundsLog`) already took an
+  `xLog` flag, and point projection was made x-log-aware in the v1.5.1
+  patch. v1.6.0 is the construction path + the reactive domain wiring.
+- **Fails closed.** A log x-domain with no positive extent throws at
+  MOUNT naming the domain (mirrors the y `_logDomainError` path, leaks no
+  signal). `xScale: { type: 'log' }` combined with a categorical (bar/band)
+  or time x-axis throws at CONSTRUCTION before any signal alloc -- a scale
+  is one type. The common linear-x path is byte-unchanged (one cold `if`
+  in the scale effect).
+- 15 new tests (368 -> 383); torture gate T6.A13 extended with an
+  xLog-only projection body.
+- **Known / deferred** (see the local brief): a mixed-sign log domain
+  (`min <= 0, max > 0`) floors to positive for render but leaves the
+  `_dataDomain` min unfloored, so the first pan/zoom gesture NaNs the
+  view (fail-closed). Identical on x and y; a v1.6.1 patch floors both
+  axes together.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.5.0
 
 A presentation cut, additive over v1.4.1, both features opt-in and no
 public API breaks:
@@ -263,33 +321,42 @@ history below for details.
 
 ## Forward plan
 
-### v1.4.0 (next) -- Interaction primitives
+### Shipped (was "next" in earlier drafts of this file)
 
-Will ship in alphas before a combined release.
+The v1.4 interaction-primitives arc is complete and released:
 
-- **v1.4.0-alpha.0 -- Log scale.** `yScale: { type: 'log' }` (and
-  `xScale` for time-series with exponential x). Adds a sibling to
-  `makeLinearScale` whose `map`/`invert` use `Math.log` /
-  `Math.exp`. Tick generation routes to `lite-axis`'s already-shipped
-  `logTicks` (decade boundaries plus optional 2x / 5x sub-ticks
-  per decade). Domain handling: non-positive data is the caller's
-  responsibility -- chart will draw what it can if any positive
-  values exist and warn-and-fallback to linear otherwise.
-- **v1.4.0-alpha.1 -- Pan + zoom.** Mouse-drag pans, wheel zooms.
-  Driven by a new `view` signal carrying `{ xMin, xMax, yMin, yMax }`
-  so a bounded-history undo/redo is one signal snapshot away.
-  Constrains to the data domain by default; `panBounds: 'free'`
-  opts out. The view signal becomes the chart-side analog of
-  `lite-camera-max`'s camera signal -- shape is intentionally
-  symmetric so users can drop the chart's view-signal into a
-  lite-gl `project` function unchanged (see lite-gl track below).
-- **v1.4.0-alpha.2 -- Brushing.** Modifier-key drag (shift) selects
-  a region; emits a `brushSignal` carrying `{ x: [min, max], y: [min,
-  max], ids: number[] }` that downstream code can subscribe to for
-  cross-chart filtering. Coexists with pan/zoom (no modifier = pan,
-  shift = brush).
+- **Log scale** -- `yScale: { type: 'log' }` shipped in v1.4.0-alpha.0;
+  the v1.4.1 patch made log-axis pan/zoom correct and fail-closed
+  (LC-01..LC-05). `xScale: { type: 'log' }` shipped in **v1.6.0** (see
+  the top of this file).
+- **Pan + zoom** -- shipped v1.4.0-alpha.1. The `view` signal carries
+  `{ xMin, xMax, yMin, yMax }`; shape is intentionally symmetric with
+  `lite-camera-max`'s camera signal for the lite-gl track below.
+- **Brushing** -- shipped v1.4.0-alpha.2. Shift-drag emits a
+  `BrushSelection` for cross-chart filtering; coexists with pan/zoom.
 
-### Companion track -- `@zakkster/lite-charts-gl` (post-v1.4.0)
+### Next -- polish + reach
+
+Each item below has a grounded working brief in `briefs/` (local scratch,
+not shipped in `files[]`). They are independent; pick by appetite.
+
+- **Horizontal-bar interactions** (`briefs/horizontal-bar-interactions.md`).
+  `pan` / `zoom` / `brush` and a value grid on horizontal bars, which
+  currently fail closed at construction. The value axis is continuous
+  under `swapAxes`; the band axis stays categorical.
+- **Time-series specialized variants** (`briefs/time-series-variants.md`) --
+  `createTimeLineChart` etc. with built-in date tick generation,
+  weekday/weekend shading, market-hours awareness for finance dashboards.
+- **Legend virtualization** (`briefs/legend-virtualization.md`) -- via
+  `@zakkster/lite-virtual` for charts with 100+ series (real-time
+  monitoring dashboards). Renders only visible legend rows.
+- **Annotation layer** (`briefs/annotation-layer.md`) -- arbitrary lines,
+  ranges, and text labels pinned to data coordinates. Reactive,
+  theme-aware.
+
+### Companion track -- `@zakkster/lite-charts-gl` (separate package)
+
+See `briefs/lite-charts-gl-companion.md`.
 
 The GPU sibling for chart types currently bottlenecked by point count.
 A separate package -- lite-charts proper stays canvas-only and ASCII-
@@ -328,22 +395,14 @@ the lifecycle API (mount/unmount/destroy/exportSVG).
 re-projection. lite-gl's README claims it; the integration test
 proves it.
 
-### v1.6.0 -- Scale + polish
+### Version-numbering note
 
-> v1.5.0 instead shipped the donut center label and horizontal bar
-> orientation (see the top of this file). The items below rolled forward
-> to the next minor, joined by x-log wiring and horizontal bars with the
-> interaction set (`pan` / `zoom` / `brush` / value grid) that 1.5.0
-> deliberately fail-closes on.
-
-- **Time-series specialized variants** -- `createTimeLineChart` etc.
-  with built-in date tick generation, weekday/weekend shading,
-  market-hours awareness for finance dashboards.
-- **Legend virtualization** -- via `@zakkster/lite-virtual` for charts
-  with 100+ series (real-time monitoring dashboards). Renders only
-  visible legend rows.
-- **Annotation layer** -- arbitrary lines, ranges, and text labels
-  pinned to data coordinates. Reactive, theme-aware.
+The "v1.6.0 -- Scale + polish" grab-bag from earlier drafts has been
+unbundled: **x-log** shipped as v1.6.0 on its own; the remaining items
+(horizontal-bar interactions, time-series variants, legend virtualization,
+annotations) are now independent entries in the "Next -- polish + reach"
+list above, each with its own brief, to be released as whichever minor
+they land in rather than one combined cut.
 
 ### v2.0.0 -- (possible)
 

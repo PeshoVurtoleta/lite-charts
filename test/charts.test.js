@@ -6370,14 +6370,15 @@ describe('v1.6.0 -- x-axis log scale', () => {
         });
     });
 
-    describe('mixed-sign x-log domain + pan -- documents a known PRE-EXISTING characteristic (parity with y, OUT OF SCOPE for v1.6.0)', () => {
-        // The reviewer confirmed this is a pre-existing gap at exact parity
-        // with the y-axis (same Math.log(<=0) -> NaN characteristic) and is
-        // OUT OF SCOPE for v1.6.0. This test does NOT assert "correct"
-        // behavior -- it pins down what the code ACTUALLY does today, so a
-        // silent regression (or a silent "fix" that should ship with its own
-        // test) is caught either way. Do not "fix" this to make it pass.
-        it('mixed-sign x-domain (xMin<=0, xMax>0): mount succeeds (floors to positive); the FIRST pan produces a NaN view (fail-closed, not fail-silent)', () => {
+    describe('mixed-sign x-log domain + pan -- v1.6.1 floors the pan-bounds envelope (parity with y)', () => {
+        // v1.6.1: this was the pre-existing gap the v1.6.0 brief deferred. The
+        // reactive scale effect floored the domain to its positive part for
+        // RENDER but wrote the RAW (<=0) min into `_dataDomain`, so the first
+        // pan's Math.log(xMin<=0) NaN'd the view. v1.6.1 floors
+        // `_dataDomain.xMin` to the same positive part (dxMax * 1e-9) when the
+        // x-axis is log and has a positive extent. Mixed-sign x-log pan now
+        // stays finite instead of NaN'ing.
+        it('mixed-sign x-domain (xMin<=0, xMax>0): mount floors to positive; the first pan stays finite (view min > 0), not NaN', () => {
             const c = createLineChart({
                 data: [{ x: -5, y: 1 }, { x: 1, y: 2 }, { x: 1000, y: 3 }],
                 xScale: { type: 'log' },
@@ -6392,22 +6393,300 @@ describe('v1.6.0 -- x-axis log scale', () => {
             // tiny positive substitute (same floor-substitution as y/LC-04).
             c.mount(canvas);
             assert.ok(c.xScale.dMin > 0 && Number.isFinite(c.xScale.dMax), 'mount floors to a positive domain');
-            const dMinBefore = c.xScale.dMin, dMaxBefore = c.xScale.dMax;
+            const dMinBeforePan = c.xScale.dMin;
 
-            // First pan: _dataDomain.xMin is the RAW (unfloored, <=0)
-            // snapshot, so _applyPanLog's Math.log(xMin<=0) is NaN.
+            // First pan: `_dataDomain.xMin` is now the floored (positive)
+            // snapshot, so _applyPanLog's Math.log stays finite.
             canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
             canvas.dispatch('pointermove', { clientX: 200, clientY: 150, pointerId: 1 });
             canvas.dispatch('pointerup', { clientX: 200, clientY: 150, pointerId: 1 });
 
             const v = c.view();
-            assert.ok(Number.isNaN(v.xMin) && Number.isNaN(v.xMax),
-                'documenting current behavior: mixed-sign x-log pan yields a NaN view, not a silent linear fallback');
-            // The scale itself does NOT update on a NaN-domain re-run (the
-            // reactive effect bails/fail-safes rather than drawing garbage)
-            // -- it stays at its last valid (pre-drag) state.
-            assert.strictEqual(c.xScale.dMin, dMinBefore);
-            assert.strictEqual(c.xScale.dMax, dMaxBefore);
+            assert.ok(Number.isFinite(v.xMin) && Number.isFinite(v.xMax),
+                'v1.6.1: mixed-sign x-log pan yields a finite view, not NaN');
+            assert.ok(v.xMin > 0, 'v1.6.1: the panned x-log view min stays positive');
+            // The scale updates to the panned domain (no NaN bail).
+            assert.ok(c.xScale.dMin > 0 && Number.isFinite(c.xScale.dMax),
+                'the scale tracks the finite panned domain');
+            // Reviewer note: `dMin > 0` alone is weak -- mount already floors
+            // dMin to a positive substitute (dxMax*1e-9) BEFORE any pan, so a
+            // build that dropped the fix entirely (dragActive bailing on NaN
+            // and the scale staying pinned at its pre-drag value) would still
+            // pass a bare `> 0` check. Load-bearing version: assert the scale
+            // actually MOVED off its pre-pan value -- pre-fix, the reactive
+            // effect bails on the NaN view and dMin/dMax stay frozen at the
+            // mount-time snapshot; post-fix they track the new panned domain.
+            assert.notStrictEqual(c.xScale.dMin, dMinBeforePan,
+                'v1.6.1: the x-scale must have actually MOVED to the panned domain, not merely stayed positive');
+            c.destroy();
+        });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.6.1 -- mixed-sign log-domain floor: y-axis parity + the zoom path.
+//
+// Brief: briefs/v1.6.1-mixedsign-log-floor.md, assertions A1-A5. The x-axis
+// half (A2) and the reconciled/strengthened assertion live in the
+// "mixed-sign x-log domain + pan" describe just above. This block covers
+// the reviewer-flagged gaps: A1 (y-axis, previously asserted only by x/y
+// symmetry -- zero direct coverage), A3 (an explicit regression guard that a
+// purely-positive log domain is NOT touched by the new floor), A4 (the
+// fail-closed throw survives, both axes, exact [-10,-1] domain from the
+// brief), and A5 (the wheel-zoom path, which reads `_dataDomain` through
+// `axisSpan()` at Charts.js ~5068-5081 -- a code path `_clampToBoundsLog`
+// alone does not exercise).
+// ---------------------------------------------------------------------------
+
+describe('v1.6.1 -- mixed-sign log-domain floor (y-axis parity + zoom path)', () => {
+    // Same interactive mock canvas shape as the x-log describe above (each
+    // pan/zoom describe block in this file defines its own local copy --
+    // matches the established convention, see 'pan + zoom integration').
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+
+    describe('A1 -- mixed-sign y-log domain + pan: the floor applies to the y-branch too (previously zero direct coverage)', () => {
+        it('mixed-sign y-domain (yMin<=0, yMax>0): mount floors to positive; a ~40px vertical drag stays finite (view yMin > 0), not NaN', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: -5 }, { x: 2, y: 1 }, { x: 3, y: 1000 }],
+                yScale: { type: 'log' },
+                pan: true,
+                panBounds: 'free',
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            // Mount succeeds: yMax > 0, so the y-domain floors yMin up to a
+            // tiny positive substitute (render-floor branch, unconditional
+            // on the v1.6.1 fix -- this line alone is NOT the regression).
+            c.mount(canvas);
+            assert.ok(c.yScale.dMin > 0 && Number.isFinite(c.yScale.dMax), 'mount floors to a positive y-domain');
+            const dMinBeforePan = c.yScale.dMin;
+
+            // ~40px vertical drag. Pre-fix, `_dataDomain.yMin` still holds
+            // the RAW (<=0) snapshot: `_applyPanLog`'s `Math.log(start.yMin)`
+            // is `NaN`, `_expClampedInto` propagates it, and the resulting
+            // view is `{ yMin: NaN, yMax: NaN, ... }`. The reactive scale
+            // effect then re-runs against a NaN domain -- `!(hi > 0)` is true
+            // for NaN, which pre-v1.6.1 would misfire the "no positive
+            // extent" bail (or, depending on the exact NaN propagation path,
+            // simply leave the scale pinned at its pre-drag value while the
+            // view itself reports NaN). Post-fix, `_dataDomain.yMin` is the
+            // floored positive snapshot, so this stays finite throughout.
+            canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+            canvas.dispatch('pointermove', { clientX: 250, clientY: 190, pointerId: 1 });
+            canvas.dispatch('pointerup', { clientX: 250, clientY: 190, pointerId: 1 });
+
+            const v = c.view();
+            assert.ok(v != null, 'view should be set after drag');
+            assert.ok(
+                Number.isFinite(v.xMin) && Number.isFinite(v.xMax) &&
+                Number.isFinite(v.yMin) && Number.isFinite(v.yMax),
+                'v1.6.1: mixed-sign y-log pan yields a fully finite view, not NaN',
+            );
+            assert.ok(v.yMin > 0, 'v1.6.1: the panned y-log view min stays positive');
+            assert.ok(c.yScale.dMin > 0 && Number.isFinite(c.yScale.dMax), 'the y-scale tracks a finite panned domain');
+            // Load-bearing, not a rubber stamp: the scale must have actually
+            // moved off its pre-pan value (mirrors the strengthened x-axis
+            // assertion above -- see that comment for why bare `> 0` is weak).
+            assert.notStrictEqual(c.yScale.dMin, dMinBeforePan,
+                'v1.6.1: the y-scale must have actually MOVED to the panned domain, not merely stayed positive');
+            c.destroy();
+        });
+    });
+
+    describe('A3 -- regression: a purely-positive log domain is byte-unchanged by the v1.6.1 floor', () => {
+        // panBounds defaults to 'data' (NOT 'free') when omitted -- unlike the
+        // A1/A2/A6 tests above, this exercises `_clampToBoundsLog` directly
+        // against `_dataDomain`. The initial effective view (no prior
+        // setView/pan) is the full data domain, so ANY pan-translate keeps
+        // the SAME log-space width as the data domain: `vw >= dw` is
+        // trivially true at the very first drag, so `_clampAxisLog` resets
+        // the view straight back to `_dataDomain[loKey]/[hiKey]` via
+        // `Math.exp(Math.log(dataDom[loKey]))`. If the v1.6.1 guard were
+        // ever wrongly unconditional (flooring a domain whose min is
+        // ALREADY positive), this would resolve to ~1e-6 (max*1e-9) instead
+        // of the true data min -- a multiple-orders-of-magnitude difference
+        // this test would catch. This is the black-box observable proxy for
+        // `_dataDomain` itself, which is not exposed to tests.
+        it('x-log domain [1, 1000] (already positive): pan-bounds clamp resolves to the EXACT data min/max, not a floor substitute', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: 0 }, { x: 1000, y: 100 }],
+                xScale: { type: 'log' },
+                pan: true, // panBounds defaults to 'data'
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            assert.strictEqual(c.xScale.dMin, 1, 'pre-pan: unfloored data min');
+
+            canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+            canvas.dispatch('pointermove', { clientX: 180, clientY: 150, pointerId: 1 });
+            canvas.dispatch('pointerup', { clientX: 180, clientY: 150, pointerId: 1 });
+
+            const v = c.view();
+            assert.ok(v != null, 'view should be set after drag');
+            assert.ok(Math.abs(v.xMin - 1) < 1e-9,
+                'v1.6.1 regression: a positive-min x-domain must clamp to the EXACT data min (1), got ' + v.xMin);
+            assert.ok(Math.abs(v.xMax - 1000) < 1e-6,
+                'clamp should resolve to the exact data max (1000), got ' + v.xMax);
+            c.destroy();
+        });
+
+        it('y-log domain [1, 1000] (already positive): same exact-clamp parity on y', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: 1 }, { x: 2, y: 1000 }],
+                yScale: { type: 'log' },
+                pan: true, // panBounds defaults to 'data'
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            assert.strictEqual(c.yScale.dMin, 1, 'pre-pan: unfloored data min');
+
+            canvas.dispatch('pointerdown', { clientX: 250, clientY: 150, button: 0, pointerId: 1 });
+            canvas.dispatch('pointermove', { clientX: 250, clientY: 90, pointerId: 1 });
+            canvas.dispatch('pointerup', { clientX: 250, clientY: 90, pointerId: 1 });
+
+            const v = c.view();
+            assert.ok(v != null, 'view should be set after drag');
+            assert.ok(Math.abs(v.yMin - 1) < 1e-9,
+                'v1.6.1 regression: a positive-min y-domain must clamp to the EXACT data min (1), got ' + v.yMin);
+            assert.ok(Math.abs(v.yMax - 1000) < 1e-6,
+                'clamp should resolve to the exact data max (1000), got ' + v.yMax);
+            c.destroy();
+        });
+    });
+
+    describe('A4 -- fail-closed preserved: a no-positive-extent log domain [-10, -1] still throws at mount (v1.6.1 must not swallow this)', () => {
+        it('x-domain [-10, -1] (no positive extent) on a log x-axis still throws, naming the x-domain', () => {
+            const c = createLineChart({
+                data: [{ x: -10, y: 1 }, { x: -1, y: 2 }],
+                xScale: { type: 'log' },
+                width: 400, height: 300,
+                schedule: (fn) => fn(),
+            });
+            assert.throws(
+                () => c.mount(createMockCanvas(400, 300)),
+                (err) => /needs positive data/.test(err.message) && /x-domain/.test(err.message) &&
+                    /-10/.test(err.message) && /-1/.test(err.message),
+                'must still throw the _logDomainError message, naming the x-domain and its bounds',
+            );
+            c.destroy();
+        });
+
+        it('y-domain [-10, -1] (no positive extent) on a log y-axis still throws, naming the y-domain', () => {
+            const c = createLineChart({
+                data: [{ x: 1, y: -10 }, { x: 2, y: -1 }],
+                yScale: { type: 'log' },
+                width: 400, height: 300,
+                schedule: (fn) => fn(),
+            });
+            assert.throws(
+                () => c.mount(createMockCanvas(400, 300)),
+                (err) => /needs positive data/.test(err.message) && /y-domain/.test(err.message) &&
+                    /-10/.test(err.message) && /-1/.test(err.message),
+                'must still throw the _logDomainError message, naming the y-domain and its bounds',
+            );
+            c.destroy();
+        });
+    });
+
+    describe('A5 -- the zoom (wheel) path also stays finite on a mixed-sign log domain (covers axisSpan() at ~5068-5081, not just _clampToBoundsLog)', () => {
+        it('wheel-zoom on a mixed-sign y-log domain, with NO prior pan, stays finite', () => {
+            // `zoom: true` alone (no `pan: true`) is deliberate: it isolates
+            // the zoom listener's own `_readEffectiveView` fallback --
+            // viewSig is still null at the first wheel event, so
+            // `_readEffectiveView` reads `_dataDomain` DIRECTLY (Charts.js
+            // ~4976-4979), not through any prior pan-produced view. This
+            // exercises `axisSpan(_dataDomain.yMin, _dataDomain.yMax, yLog)`
+            // (the zoom-factor cap, ~5080-5081) and `_applyZoomLog`'s own
+            // `Math.log(start.yMin)` independently of the pan gesture path
+            // that A1/A2 already cover.
+            const c = createLineChart({
+                data: [{ x: 1, y: -5 }, { x: 2, y: 10 }, { x: 3, y: 1000 }],
+                yScale: { type: 'log' },
+                zoom: true,
+                panBounds: 'free',
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            assert.ok(c.yScale.dMin > 0 && Number.isFinite(c.yScale.dMax), 'mount floors to a positive y-domain');
+            const dMinBeforeZoom = c.yScale.dMin;
+
+            canvas.dispatch('wheel', { clientX: 250, clientY: 150, deltaY: -100, preventDefault: () => {} });
+
+            const v = c.view();
+            assert.ok(v != null, 'zoom should set a view');
+            assert.ok(
+                Number.isFinite(v.xMin) && Number.isFinite(v.xMax) &&
+                Number.isFinite(v.yMin) && Number.isFinite(v.yMax),
+                'v1.6.1: zoomed mixed-sign y-log view is finite, not NaN',
+            );
+            assert.ok(v.yMin > 0, 'v1.6.1: zoomed y-log view min stays positive');
+            assert.ok(c.yScale.dMin > 0 && Number.isFinite(c.yScale.dMax), 'the y-scale tracks a finite zoomed domain');
+            assert.notStrictEqual(c.yScale.dMin, dMinBeforeZoom,
+                'v1.6.1: the y-scale must have actually MOVED (zoomed in) off its pre-zoom value');
+            c.destroy();
+        });
+
+        it('wheel-zoom on the same mixed-sign x-log setup stays finite too (x/y parity on the zoom path)', () => {
+            const c = createLineChart({
+                data: [{ x: -5, y: 1 }, { x: 1, y: 2 }, { x: 1000, y: 3 }],
+                xScale: { type: 'log' },
+                zoom: true,
+                panBounds: 'free',
+                width: 500, height: 300,
+                margin: { top: 0, right: 0, bottom: 0, left: 0 },
+                schedule: (fn) => fn(),
+            });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            assert.ok(c.xScale.dMin > 0 && Number.isFinite(c.xScale.dMax), 'mount floors to a positive x-domain');
+            const dMinBeforeZoom = c.xScale.dMin;
+
+            canvas.dispatch('wheel', { clientX: 250, clientY: 150, deltaY: -100, preventDefault: () => {} });
+
+            const v = c.view();
+            assert.ok(v != null, 'zoom should set a view');
+            assert.ok(
+                Number.isFinite(v.xMin) && Number.isFinite(v.xMax) &&
+                Number.isFinite(v.yMin) && Number.isFinite(v.yMax),
+                'v1.6.1: zoomed mixed-sign x-log view is finite, not NaN',
+            );
+            assert.ok(v.xMin > 0, 'v1.6.1: zoomed x-log view min stays positive');
+            assert.notStrictEqual(c.xScale.dMin, dMinBeforeZoom,
+                'v1.6.1: the x-scale must have actually MOVED (zoomed in) off its pre-zoom value');
             c.destroy();
         });
     });

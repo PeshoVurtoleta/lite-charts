@@ -4664,6 +4664,18 @@ const createBaseAxisChart = (config, renderer) => {
                 _dataDomain.xMax = dxMax;
                 _dataDomain.yMin = yBase[0];
                 _dataDomain.yMax = yBase[1];
+                // v1.6.1: a log axis pans in log space; its data-domain bound
+                // must be positive or log10() NaNs the first gesture. Floor min
+                // to the same positive part the render path uses (hi * 1e-9 with
+                // the same `> 0` predicate), computed from the DATA extent -- not
+                // the view-overridden xLo/yLo below -- and only when that axis has
+                // a positive extent. No-positive-extent still throws at mount.
+                if (resolvedXType === 'log' && dxMax > 0 && !(dxMin > 0)) {
+                    _dataDomain.xMin = dxMax * 1e-9;
+                }
+                if (yScaleType === 'log' && yBase[1] > 0 && !(yBase[0] > 0)) {
+                    _dataDomain.yMin = yBase[1] * 1e-9;
+                }
             }
 
             // v1.4.0-alpha.2: view-override layer. If pan/zoom is enabled

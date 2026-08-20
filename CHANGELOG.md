@@ -5,6 +5,44 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] -- 2026-08
+
+A correctness patch closing the mixed-sign log-domain gap that 1.6.0 shipped as
+known/deferred. No public API change; the per-frame draw path is byte-unchanged.
+
+### Fixed -- mixed-sign log domain NaN'd the first pan/zoom
+
+- **A `type: 'log'` domain spanning zero (`min <= 0, max > 0`) drew correctly
+  but froze on the first gesture.** The reactive scale effect floored the domain
+  to its positive part for *rendering* (in locals `xlo/xhi`, `lo/hi`) but wrote
+  the raw, possibly non-positive min into `_dataDomain` -- the snapshot the
+  pan/zoom bounds math reads. `_clampToBoundsLog` / `axisSpan` then took `log()`
+  of a value `<= 0`, producing a NaN view that the reactive effect refused to
+  apply. Fix: floor `_dataDomain.xMin` / `.yMin` to the same positive part the
+  render path uses (`dxMax * 1e-9` / `yBase[1] * 1e-9`), with the same `> 0`
+  predicate, computed from the *data* extent (not the view-overridden bounds),
+  and only when that axis is log with a positive extent. Two cold `if`s in the
+  scale effect; symmetric on x and y.
+- **Fail-closed preserved.** A log domain with *no* positive extent still throws
+  at mount, naming the domain. The floor is guarded on `max > 0`, so it never
+  runs on -- and never masks -- the no-positive-extent case; that throw is
+  upstream and fires first.
+- **Zero cost elsewhere.** The linear/time path only gains branches that are
+  never taken on a non-log axis; the per-frame draw path is untouched.
+
+### Coverage
+
+- 7 new boundary tests (383 -> 390): a mixed-sign y-axis pan (the y branch had
+  been asserted only by x/y symmetry), x and y positive-domain regression guards
+  (a purely-positive domain must clamp to its *exact* data min/max, not a floor
+  substitute), x and y no-positive-extent throws (the floor must not swallow
+  them), and the wheel-zoom path on both axes (`axisSpan`, which the pan tests
+  do not exercise). The pre-existing x-pan characterization test was reconciled
+  from "documents a NaN view" to asserting the finite, moved (`min > 0`) view.
+- Load-bearing verified by reverting the fix: without it, exactly those 4
+  gesture tests fail and the 2 regression + 2 throw guards stay green.
+- Torture gate (T6.A13) unchanged and green.
+
 ## [1.6.0] -- 2026-08
 
 X-axis log scale. Additive; no public API change beyond enabling the config.

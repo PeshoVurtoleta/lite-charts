@@ -10,7 +10,23 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.6.0 (current): x-axis log scale. additive, no public API change beyond
+> v1.6.1 (current): mixed-sign log-domain floor -- a correctness patch, no
+> public API change. A type:'log' domain spanning zero (min<=0, max>0) drew
+> correctly but NaN'd the view on the FIRST pan/zoom: the reactive scale effect
+> floored the domain to its positive part for RENDER (local xlo/xhi, lo/hi) but
+> wrote the RAW (<=0) min into _dataDomain, so the gesture math (_clampToBoundsLog,
+> axisSpan) took log() of a value <=0. FIX: floor _dataDomain.xMin/.yMin to the
+> same positive part (dxMax*1e-9 / yBase[1]*1e-9) using the SAME >0 predicate as
+> the render floor, computed from the DATA extent (not the view-overridden
+> xLo/yLo), only when that axis is log AND has a positive extent. Two cold ifs in
+> the scale effect; per-frame draw byte-unchanged; linear/time path only gains
+> never-taken branches. FAILS CLOSED preserved: a log domain with NO positive
+> extent still throws at MOUNT (the floor cannot mask it -- the throw is upstream
+> and fires first). Symmetric on x and y. 7 new tests (383->390): y-pan, x/y
+> positive-domain regression (exact-clamp, not floored), x/y no-positive-extent
+> throw, x/y zoom-path; the pre-existing x-pan characterization test was
+> reconciled to assert the finite (moved, min>0) view. torture ok, ASCII clean.
+> v1.6.0: x-axis log scale. additive, no public API change beyond
 > enabling the config. xScale:{type:'log'} now works on the CONTINUOUS
 > axis-kernel charts (line/area/scatter/bubble; NOT bar -- band x is not
 > continuous). base-10 log, decade ticks via lite-axis.logTicks, map(x<=0)=NaN
@@ -24,10 +40,10 @@
 > x-axis throws at CONSTRUCTION before any signal alloc (a scale is one type).
 > the common linear-x path is byte-unchanged (one cold if in the scale effect).
 > 15 new tests (368->383); T6.A13 torture gate extended with an xLog-only
-> projection body (<=16 B/op abs, <=2.0 B/op vs linear-x, maxMajor:0). KNOWN/
-> pre-existing: a mixed-sign log domain (min<=0,max>0) floors to positive for
-> render but leaves _dataDomain min unfloored, so the first gesture NaNs the
-> view (fail-closed); identical on y; a later patch floors both axes together.
+> projection body (<=16 B/op abs, <=2.0 B/op vs linear-x, maxMajor:0). KNOWN at
+> ship (FIXED in v1.6.1 above): a mixed-sign log domain (min<=0,max>0) floored to
+> positive for render but left _dataDomain min unfloored, so the first gesture
+> NaN'd the view (fail-closed); identical on y; v1.6.1 floors both axes together.
 > v1.5.1: a correctness patch, no public API change. Fixes
 > log-scale point projection. scaleSeriesToPixels -- the per-extract hot loop
 > that maps domain values to pixels for every projectToPixels renderer
