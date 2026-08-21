@@ -572,12 +572,16 @@ export interface BarChartConfig extends Omit<LineChartConfig, 'interpolation' | 
      * left/right from the value baseline; the value axis moves to the bottom
      * and category labels to the left.
      *
-     * Horizontal is a fail-closed subset in v1.5.0: combining it with `pan`,
-     * `zoom`, `brush`, `grid`, or a log `yScale` throws at construction (those
-     * interactions assume the standard axis roles). When horizontal, the
-     * reactive `crosshair().snapPixelX` holds the BAND-axis pixel (a Y
-     * coordinate), consistent with the vertical convention that snapPixelX is
-     * always the category-axis pixel.
+     * v1.8.0: horizontal now supports `pan`, `zoom`, and `grid` -- the linear
+     * pan/zoom kernels are remapped at each gesture boundary and grid emits
+     * vertical value rules. Under horizontal the value axis is Y, so
+     * `view.yMin`/`view.yMax` address the VALUE axis (x holds the band domain
+     * and pans/zooms as an identity). Combining horizontal with `brush` or a
+     * log `yScale` still throws at construction (those still assume the
+     * standard axis roles). When horizontal, the reactive
+     * `crosshair().snapPixelX` holds the BAND-axis pixel (a Y coordinate),
+     * consistent with the vertical convention that snapPixelX is always the
+     * category-axis pixel.
      */
     orientation?: 'vertical' | 'horizontal';
 }

@@ -10,7 +10,29 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.7.0 (current): annotation layer -- additive, no public API change beyond
+> v1.8.0 (current): horizontal-bar interactions -- additive, no public API
+> change beyond enabling existing flags on a new orientation.
+> createBarChart({orientation:'horizontal'}) now accepts pan, zoom, and a value
+> grid. Under the axis-role swap the VALUE axis is on screen-X (bound via
+> yScale) and the BAND axis on screen-Y, so a horizontal drag pans the value
+> domain and the wheel zooms it around the cursor value; the band axis stays
+> pinned. view.yMin/view.yMax address the value axis (the x fields hold the band
+> domain and pan/zoom as an identity). Built by remapping the linear kernels at
+> each gesture boundary: onPanMove uses swapAxes ? _applyPan(view,0,-dx,w,w),
+> onWheel uses swapAxes ? _applyZoom(...,pb.w-(p.x-pb.x),...,1,zoomFactor) with
+> proposedXRatio forced to 1; _applyPan/_applyZoom/_clampToBounds stay
+> BYTE-IDENTICAL (swapAxes is true only for BAR_RENDERER) and the vertical path
+> is unchanged. buildGrid gained one swapAxes option (default false, single
+> shared call site) that flips value gridlines to vertical. Per-frame draw stays
+> 0 B. FAILS CLOSED: horizontal + brush (a value-range + band-ids payload is a
+> separate future cut) and horizontal + a log value axis throw at construction,
+> before any signal alloc. 6 new tests (400->406): value-axis pan (a horizontal
+> drag translates the value scale by exactly dx px), vertical-drag control (no
+> value move), cursor-anchored zoom (value under cursor stable to 1e-9), vertical
+> value grid, fail-closed throws, mount/pan/destroy retention -- each proven
+> load-bearing by measured reversion. torture ok (new horizontal-interaction 0-B
+> case), ASCII clean.
+> v1.7.0: annotation layer -- additive, no public API change beyond
 > the new config. annotations: Annotation[] | (() => Annotation[]) on any
 > axis-kernel chart (line/area/bar/bubble/scatter). Four shapes: line
 > {axis:'x'|'y', value, color?, dash?, width?, label?} (a rule at a data value);
@@ -1314,13 +1336,13 @@ charts dynamically.
   established (mock-WebGL2-context unit tests + real-GPU
   Playwright). Bench target: 1M scatter points at 60fps with
   signal-driven pan/zoom.
-- v1.6.x / v1.7.0 (candidates): horizontal bars with pan/zoom/brush/value
-  grid; time-series specialized variants (auto-formatted time axes,
-  hour/day/week binning helpers); legend virtualization via
-  `@zakkster/lite-virtual` (for charts with hundreds of series);
-  annotation layer (text + arrow + region annotations bound to
-  data-space coordinates); flooring _dataDomain min on log axes so a
-  mixed-sign domain doesn't NaN the first gesture (x and y together).
+- v1.8.x / v1.9.0 (candidates): horizontal-bar brush (a value-range +
+  band-axis category ids payload, and band multi-select -- a different
+  shape than the vertical rect brush, so it was split out of the v1.8.0
+  cut); time-series specialized variants (auto-formatted time axes,
+  hour/day/week binning helpers, weekend/market-hours shading riding the
+  v1.7.0 annotation range primitive); legend virtualization via
+  `@zakkster/lite-virtual` (for charts with hundreds of series).
 - v2.0.0 (possible): renderer-agnostic kernel refactor (if
   lite-charts-gl proves out, fold the renderer choice into core);
   deeper SSR support.

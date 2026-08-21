@@ -4079,13 +4079,14 @@ describe('createBarChart -- horizontal orientation (v1.5.0)', () => {
     // -- A11: fail closed ---------------------------------------------------
     it('A11: unsupported horizontal combinations throw at construction', () => {
         const base = { data: [{ x: 'A', y: 1 }], schedule: (fn) => fn() };
+        // v1.5.0: horizontal pan/zoom/grid are now supported via the axis-role
+        // swap. Only brush (pixel-band mapping not yet remapped) and a log yScale
+        // (domain-flooring kernel still assumes standard orientation) fail closed,
+        // alongside a bad orientation string.
         const cases = [
             ['diagonal orientation', { orientation: 'diagonal' }],
             ['horizontal + log', { orientation: 'horizontal', yScale: { type: 'log' } }],
-            ['horizontal + pan', { orientation: 'horizontal', pan: true }],
-            ['horizontal + zoom', { orientation: 'horizontal', zoom: true }],
             ['horizontal + brush', { orientation: 'horizontal', brush: true }],
-            ['horizontal + grid', { orientation: 'horizontal', grid: true }],
         ];
         for (const [label, extra] of cases) {
             assert.throws(
@@ -4094,15 +4095,15 @@ describe('createBarChart -- horizontal orientation (v1.5.0)', () => {
                 label + ' must throw a named error',
             );
         }
-        // A horizontal grid restricted to X only is still rejected (grid.y
-        // defaults on for an object grid); grid:{y:false} would be allowed but
-        // is out of scope. Sanity: plain horizontal (no extras) does NOT throw.
-        assert.doesNotThrow(() => {
-            const c = createBarChart(Object.assign({}, base, { orientation: 'horizontal' }));
-            const cv = createMockCanvas(400, 300);
-            c.mount(cv);
-            c.unmount();
-        });
+        // Sanity: the now-supported horizontal interactions do NOT throw and mount.
+        for (const extra of [{}, { pan: true }, { zoom: true }, { grid: true }, { pan: true, zoom: true, grid: true }]) {
+            assert.doesNotThrow(() => {
+                const c = createBarChart(Object.assign({}, base, { orientation: 'horizontal' }, extra));
+                const cv = createMockCanvas(400, 300);
+                c.mount(cv);
+                c.unmount();
+            });
+        }
     });
 
     // -- A15: bundle isolation (source-region reachability proxy) -----------
@@ -7608,5 +7609,202 @@ describe('v1.7.0 -- annotation layer', () => {
         chart.unmount();
         chart.destroy();
         assert.doesNotThrow(() => chart.destroy(), 'destroy is idempotent');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.8.0 -- horizontal-bar interactions (value-axis pan / zoom + value grid)
+// ---------------------------------------------------------------------------
+//
+// Horizontal bars swap the axis roles: the VALUE axis is on screen-X (bound
+// via `yScale`), the BAND axis on screen-Y. The interaction layer stays in the
+// standard frame; horizontal support is a `swapAxes ? <remapped> : <current>`
+// selection at each gesture call site (onPanMove / onWheel), with the linear
+// helpers `_applyPan` / `_applyZoom` / `_clampToBounds` left byte-identical.
+//
+// Key invariant used below: a horizontal pan of `dx` px translates the value
+// scale by EXACTLY `dx` px (the plot-width / value-span factors cancel:
+// dyData = dx*span/w, and re-mapping that back through the same `w`-wide range
+// yields a `dx`-pixel shift), independent of margins or the value domain. The
+// band axis stays pinned (dxPx=0 in pan, zoomX=1 in zoom).
+describe('v1.8.0 -- horizontal-bar interactions', () => {
+    // Interactive mock canvas: registers listeners and lets tests dispatch
+    // real pointer/wheel events through the actual listener path.
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+
+    // Horizontal bar, margin 0 so the plot fills the canvas, panBounds:'free'
+    // so a pan past the data extent is not snapped. data max 100 + zero
+    // baseline => value domain [0,100], so value 50 is a clean interior probe.
+    const mkH = (extra) => createBarChart(Object.assign({
+        data: [{ x: 'A', y: 100 }, { x: 'B', y: 50 }],
+        orientation: 'horizontal',
+        width: 400, height: 300,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        panBounds: 'free',
+        schedule: (fn) => fn(),
+    }, extra));
+
+    // -- A1: horizontal pan moves the VALUE axis, band pinned ---------------
+    it('A1: a horizontal drag translates the value scale by dx px; band unchanged', () => {
+        const c = mkH({ pan: true });
+        const canvas = createInteractiveMockCanvas(400, 300);
+        c.mount(canvas);
+
+        // Value axis == yScale (on screen-X); band axis == xScale (on screen-Y).
+        const valuePxBefore = c.yScale.map(50);
+        const bandPxBefore = c.xScale.map(0);
+
+        // Rightward drag of +40px (dy = 0) from plot centre.
+        canvas.dispatch('pointerdown', { clientX: 200, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 240, clientY: 150, pointerId: 1 });
+        canvas.dispatch('pointerup',   { clientX: 240, clientY: 150, pointerId: 1 });
+
+        const valuePxAfter = c.yScale.map(50);
+        const bandPxAfter = c.xScale.map(0);
+
+        assert.ok(Math.abs((valuePxAfter - valuePxBefore) - 40) < 1e-6,
+            'value scale should translate by exactly +40px; got ' + (valuePxAfter - valuePxBefore));
+        assert.ok(Math.abs(bandPxAfter - bandPxBefore) < 1e-9,
+            'band axis must stay pinned under a horizontal pan; moved by ' + (bandPxAfter - bandPxBefore));
+        // Category order intact: the two band cells keep their relative order.
+        assert.ok(c.xScale.map(0) !== c.xScale.map(1), 'band cells remain distinct');
+        c.destroy();
+    });
+
+    // -- A1b: a VERTICAL drag must NOT move the value axis (roles swapped) --
+    it('A1b: a purely vertical drag leaves the value axis untouched', () => {
+        const c = mkH({ pan: true });
+        const canvas = createInteractiveMockCanvas(400, 300);
+        c.mount(canvas);
+
+        const valuePxBefore = c.yScale.map(50);
+        // Vertical drag of +40px (dx = 0). Under the swap, pan ignores dy.
+        canvas.dispatch('pointerdown', { clientX: 200, clientY: 150, button: 0, pointerId: 1 });
+        canvas.dispatch('pointermove', { clientX: 200, clientY: 190, pointerId: 1 });
+        canvas.dispatch('pointerup',   { clientX: 200, clientY: 190, pointerId: 1 });
+        const valuePxAfter = c.yScale.map(50);
+
+        assert.ok(Math.abs(valuePxAfter - valuePxBefore) < 1e-9,
+            'a vertical drag must not translate the value scale; moved by ' + (valuePxAfter - valuePxBefore));
+        c.destroy();
+    });
+
+    // -- A2: horizontal zoom keeps the value under the cursor fixed ---------
+    it('A2: wheel zoom holds the data value under the cursor stable', () => {
+        const c = mkH({ zoom: true });
+        const canvas = createInteractiveMockCanvas(400, 300);
+        c.mount(canvas);
+        const pb = c._internal.plotBoundsBox;
+        const cursorPx = pb.x + 0.25 * pb.w;
+
+        const valueUnderCursorBefore = c.yScale.invert(cursorPx);
+        const spanBefore = Math.abs(c.yScale.invert(pb.x + pb.w) - c.yScale.invert(pb.x));
+
+        // Zoom in (deltaY < 0) anchored at the cursor.
+        canvas.dispatch('wheel', { clientX: cursorPx, clientY: pb.y + 0.5 * pb.h, deltaY: -100, preventDefault: () => {} });
+
+        const valueUnderCursorAfter = c.yScale.invert(cursorPx);
+        const spanAfter = Math.abs(c.yScale.invert(pb.x + pb.w) - c.yScale.invert(pb.x));
+
+        assert.ok(spanAfter < spanBefore, 'zoom-in must shrink the value span (guards against a vetoed no-op); ' + spanAfter + ' vs ' + spanBefore);
+        assert.ok(Math.abs(valueUnderCursorAfter - valueUnderCursorBefore) < 1e-9,
+            'value under the cursor must stay fixed across zoom; moved by ' + (valueUnderCursorAfter - valueUnderCursorBefore));
+        c.destroy();
+    });
+
+    // -- A3: value grid renders perpendicular to the value axis (vertical) --
+    it('A3: horizontal value grid emits vertical, full-height gridlines', () => {
+        // Count full-span moveTo->lineTo segments (a lite-scene line node emits
+        // exactly one moveTo + one lineTo) with and without the grid, and check
+        // what the grid ADDS -- robust to the fixed axis baselines.
+        const scan = (chart) => {
+            const canvas = createMockCanvas(400, 300);
+            chart.mount(canvas);
+            const ctx = canvas.getContext('2d');
+            const pb = chart._internal.plotBoundsBox;
+            ctx.calls.length = 0;
+            chart.redraw();
+            let vFull = 0, hFull = 0;
+            const calls = ctx.calls;
+            for (let i = 0; i < calls.length - 1; i++) {
+                if (calls[i][0] !== 'moveTo' || calls[i + 1][0] !== 'lineTo') continue;
+                const [x1, y1] = calls[i][1];
+                const [x2, y2] = calls[i + 1][1];
+                if (Math.abs(x1 - x2) < 0.5 && Math.abs(y1 - y2) >= 0.6 * pb.h) vFull++;
+                if (Math.abs(y1 - y2) < 0.5 && Math.abs(x1 - x2) >= 0.6 * pb.w) hFull++;
+            }
+            chart.destroy();
+            return { vFull, hFull };
+        };
+
+        const off = scan(mkH({ grid: false }));
+        const on = scan(mkH({ grid: true }));
+
+        assert.ok(on.vFull > off.vFull,
+            'the value grid must ADD vertical full-height lines; ' + on.vFull + ' vs ' + off.vFull);
+        assert.equal(on.hFull - off.hFull, 0,
+            'the value grid must add NO horizontal full-width lines (they belong on the value axis, which is vertical here)');
+    });
+
+    // -- A4: unsupported combos still fail closed with a named message ------
+    it('A4: log-value and brush still throw at construction, before alloc', () => {
+        const base = { data: [{ x: 'A', y: 1 }], orientation: 'horizontal', schedule: (fn) => fn() };
+        assert.throws(
+            () => createBarChart(Object.assign({}, base, { yScale: { type: 'log' } })),
+            /log yScale is not supported/,
+            'horizontal + log value axis must throw a named error',
+        );
+        assert.throws(
+            () => createBarChart(Object.assign({}, base, { brush: true })),
+            /horizontal orientation with brush/,
+            'horizontal + brush must throw a named error',
+        );
+        // Note: A5 (zero-alloc gesture path, 0 B/frame draw) is covered by the
+        // torture gate, test/torture/t6-alloc.mjs section 8 (A14).
+    });
+
+    // -- A6: mount -> pan -> destroy leaves no node residue -----------------
+    it('A6: 30 mount+pan+destroy cycles leak zero nodes; destroy idempotent', () => {
+        const before = stats().activeNodes;
+        for (let i = 0; i < 30; i++) {
+            const c = mkH({ pan: true, zoom: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            canvas.dispatch('pointerdown', { clientX: 200, clientY: 150, button: 0, pointerId: 1 });
+            canvas.dispatch('pointermove', { clientX: 240, clientY: 150, pointerId: 1 });
+            canvas.dispatch('pointerup',   { clientX: 240, clientY: 150, pointerId: 1 });
+            canvas.dispatch('wheel', { clientX: 100, clientY: 150, deltaY: -100, preventDefault: () => {} });
+            c.destroy();
+        }
+        const delta = stats().activeNodes - before;
+        assert.equal(delta, 0, 'horizontal interaction cycles should leave no node residue; delta=' + delta);
+
+        const c = mkH({ pan: true });
+        c.mount(createInteractiveMockCanvas(400, 300));
+        c.destroy();
+        assert.doesNotThrow(() => c.destroy(), 'second destroy must be a no-op');
     });
 });

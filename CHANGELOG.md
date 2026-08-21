@@ -5,6 +5,51 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] -- 2026-08
+
+Horizontal-bar interactions -- `pan`, `zoom`, and a value `grid` on
+`createBarChart({ orientation: 'horizontal' })`. Additive; no public API change
+beyond enabling existing flags on a new orientation. The per-frame draw path and
+the vertical path stay byte-unchanged.
+
+### Added -- interactions on horizontal bars
+
+- **`pan` / `zoom` on `orientation: 'horizontal'`.** Under the axis-role swap
+  the value axis is on screen-X, so a horizontal drag pans the value domain and
+  the wheel zooms it around the cursor value; the band (category) axis stays
+  pinned. `view.yMin` / `view.yMax` address the value axis (the `x` fields hold
+  the band domain and pan/zoom as an identity).
+- **Value `grid` on `orientation: 'horizontal'`.** Value gridlines render
+  vertically (perpendicular to the value axis). Previously threw at construction.
+
+### Design
+
+- **Map at the gesture boundary.** The linear `_applyPan` / `_applyZoom` /
+  `_clampToBounds` kernels are byte-identical to the vertical path. Horizontal
+  support is a `swapAxes ? <remapped> : <current>` selection at each gesture call
+  site: `onPanMove` passes `_applyPan(view, 0, -dx, w, w)` (band pinned via
+  `dxPx = 0`); `onWheel` passes `_applyZoom(..., pb.w - (p.x - pb.x), ..., 1,
+  zoomFactor)` (`ty = 1 - tx`, band pinned via `zoomX = 1`) and forces
+  `proposedXRatio = 1` so the band veto can't block a value-axis zoom.
+  `swapAxes` is true only for the bar renderer, so every other chart family is
+  untouched.
+- **One shared-core edit.** `buildGrid` gained a `swapAxes` option (default
+  `false`, resolved once at setup, one call site) that flips value gridlines to
+  vertical. All other families pass `false` and are byte-identical.
+- **Fail-closed.** Horizontal + `brush` (a value-range + band-ids payload is a
+  separate future cut) and horizontal + a `log` value axis still throw at
+  construction, naming the combination, before any signal is allocated.
+
+### Coverage
+
+- 6 new tests (400 -> 406): value-axis pan (a horizontal drag translates the
+  value scale by exactly `dx` px), a vertical-drag control (no value move),
+  cursor-anchored zoom (value under the cursor stable to 1e-9), a vertical value
+  grid, the fail-closed throws, and mount/pan/destroy retention. Each behavioral
+  test proven load-bearing by measured reversion of the corresponding change.
+- A new horizontal-interaction 0-B/frame case in the torture gate. Torture
+  green, ASCII clean, per-frame draw path byte-unchanged.
+
 ## [1.7.0] -- 2026-08
 
 Annotation layer -- data-pinned overlays on any axis-kernel chart. Additive; no

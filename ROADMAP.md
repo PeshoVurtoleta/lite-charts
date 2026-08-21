@@ -5,7 +5,40 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.7.0 (current)
+## v1.8.0 (current)
+
+Horizontal-bar interactions -- `pan`, `zoom`, and a value `grid` on
+`createBarChart({ orientation: 'horizontal' })`. Additive; no public API change
+beyond enabling existing flags on a new orientation.
+
+- **Value-axis pan / zoom.** Under the axis-role swap the value axis is on
+  screen-X, so a horizontal drag pans the value domain and the wheel zooms it
+  around the cursor value; the band (category) axis stays pinned. `view.yMin` /
+  `view.yMax` address the value axis (the `x` fields hold the band domain and
+  pan/zoom as an identity).
+- **Value grid.** Value gridlines now render (vertically, perpendicular to the
+  value axis); previously threw.
+- **Map at the gesture boundary.** The linear `_applyPan` / `_applyZoom` /
+  `_clampToBounds` kernels stay byte-identical; horizontal support is a
+  `swapAxes ? <remapped> : <current>` selection at each gesture call site
+  (`swapAxes` true only for the bar renderer), and `buildGrid` gained one
+  default-`false` `swapAxes` option (single shared call site). Per-frame draw
+  stays 0 B; the vertical path is unchanged.
+- **Fail-closed.** Horizontal + `brush` (a value-range + band-ids payload is a
+  separate future cut) and horizontal + a `log` value axis still throw at
+  construction, before any signal alloc.
+- 6 new tests (400 -> 406): value-axis pan (a horizontal drag translates the
+  value scale by exactly `dx` px), a vertical-drag control, cursor-anchored zoom
+  (value under cursor stable to 1e-9), a vertical value grid, the fail-closed
+  throws, and mount/pan/destroy retention. Each proven load-bearing by measured
+  reversion. Plus a horizontal-interaction 0-B/frame torture case. Torture green,
+  ASCII clean.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.7.0
 
 Annotation layer -- data-pinned overlays on any axis-kernel chart. Additive,
 opt-in, no public API break beyond the new `annotations` config.
@@ -366,16 +399,23 @@ The v1.4 interaction-primitives arc is complete and released:
   `lite-camera-max`'s camera signal for the lite-gl track below.
 - **Brushing** -- shipped v1.4.0-alpha.2. Shift-drag emits a
   `BrushSelection` for cross-chart filtering; coexists with pan/zoom.
+- **Annotation layer** -- shipped v1.7.0. Data-pinned `line` / `range` /
+  `point` / `text` marks on any axis-kernel chart.
+- **Horizontal-bar interactions** -- shipped **v1.8.0** (see the top of this
+  file). `pan` / `zoom` and a value grid on horizontal bars; the value axis
+  pans/zooms under `swapAxes`, the band axis stays pinned. `brush` on a
+  horizontal bar remains fail-closed (a value-range + band-ids payload is a
+  separate future cut, in "Next" below).
 
 ### Next -- polish + reach
 
 Each item below has a grounded working brief in `briefs/` (local scratch,
 not shipped in `files[]`). They are independent; pick by appetite.
 
-- **Horizontal-bar interactions** (`briefs/horizontal-bar-interactions.md`).
-  `pan` / `zoom` / `brush` and a value grid on horizontal bars, which
-  currently fail closed at construction. The value axis is continuous
-  under `swapAxes`; the band axis stays categorical.
+- **Horizontal-bar `brush`** (`briefs/horizontal-bar-interactions.md`,
+  deferred slice). A value-range selection plus band-axis category `ids`, and
+  band-axis multi-select -- a different payload shape than the vertical rect
+  brush, so it was split out of the v1.8.0 cut.
 - **Time-series specialized variants** (`briefs/time-series-variants.md`) --
   `createTimeLineChart` etc. with built-in date tick generation,
   weekday/weekend shading, market-hours awareness for finance dashboards.
@@ -431,9 +471,10 @@ proves it.
 The "v1.6.0 -- Scale + polish" grab-bag from earlier drafts has been
 unbundled into independent minors, each with its own brief, released as
 whichever minor they land in rather than one combined cut: **x-log** shipped
-as v1.6.0, the **annotation layer** as v1.7.0; the remaining items
-(horizontal-bar interactions, time-series variants, legend virtualization)
-stay independent entries in the "Next -- polish + reach" list above.
+as v1.6.0, the **annotation layer** as v1.7.0, **horizontal-bar interactions**
+as v1.8.0; the remaining items (horizontal-bar `brush`, time-series variants,
+legend virtualization) stay independent entries in the "Next -- polish + reach"
+list above.
 
 ### v2.0.0 -- (possible)
 

@@ -17,15 +17,26 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.7.0 -- annotation layer (minor). Data-pinned `line`, `range`,
-`point`, and `text` marks on any axis-kernel chart via `annotations: [...]`
-(a static array or a signal / accessor). They project through the live scales
--- so they track pan / zoom and log axes for free -- render above the series
-and below the crosshair, and appear in `exportSVG`. Reactive and theme-aware
-(CSS-var colors re-resolve on `refreshTheme`), fail-closed (a non-finite value,
-or a non-positive value on a log axis, simply does not draw), and zero
-allocation on the per-frame path. **400/400 tests pass** plus a torture/stress
-gate (`npm run torture`).
+**Status:** v1.8.0 -- horizontal-bar interactions (minor). `createBarChart({
+orientation: 'horizontal' })` now accepts `pan`, `zoom`, and a value `grid` --
+the value axis (on screen-X under the swap) pans and zooms, the band axis stays
+pinned. Built by remapping the existing linear pan/zoom kernels at each gesture
+boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical
+and the vertical path is unchanged. `brush` and a `log` value axis on a
+horizontal bar still fail closed at construction. **406/406 tests pass** plus a
+torture/stress gate (`npm run torture`).
+
+**New in v1.8.0:**
+- **Horizontal bars pan, zoom, and grid.** `createBarChart({ orientation:
+  'horizontal', pan: true, zoom: true, grid: true })`. Under the axis-role swap
+  the value axis is on screen-X, so a horizontal drag pans the value domain and
+  the wheel zooms it around the cursor value; the band (category) axis stays
+  pinned. `view.yMin` / `view.yMax` address the value axis. Zero per-frame draw
+  allocation is preserved (a new gesture-time `swapAxes ? ...` selection at each
+  call site; the linear kernels are untouched). Still fail-closed: horizontal +
+  `brush` (a value-range + band-ids payload is a separate future cut) and
+  horizontal + a `log` value axis both throw at construction. See "Horizontal
+  bar interactions" below.
 
 **New in v1.7.0:**
 - **`annotations` on axis-kernel charts.** An array -- or `() => Annotation[]`
@@ -1053,6 +1064,38 @@ extent in the relevant axis.
   Different interaction models -- pie has no x/y space; heatmap uses
   band scales on both axes.
 
+## Horizontal bar interactions (v1.8.0)
+
+`createBarChart({ orientation: 'horizontal' })` swaps the axis roles: the value
+axis moves to screen-X (bound via `yScale`) and the category band to screen-Y.
+As of v1.8.0 that orientation accepts the interaction set:
+
+```js
+const chart = createBarChart({
+  data: [{ x: 'Mon', y: 40 }, { x: 'Tue', y: 72 }, { x: 'Wed', y: 55 }],
+  orientation: 'horizontal',
+  pan: true,        // horizontal drag pans the VALUE axis; categories stay put
+  zoom: true,       // wheel zooms the value axis around the cursor value
+  grid: true,       // value gridlines, drawn vertically (perpendicular to value)
+});
+chart.mount(document.querySelector('#bars'));
+```
+
+- **The value axis is `view.yMin` / `view.yMax`.** Under the swap the value
+  domain lives in the `y` fields of the view record even though it paints along
+  X. `chart.setView({ yMin, yMax })` and `chart.view()` address the value axis;
+  the `x` fields hold the band domain and pan/zoom as an identity.
+- **The band axis stays pinned.** A horizontal drag translates the value scale
+  by exactly the drag distance in pixels; a purely vertical drag does nothing.
+  Wheel zoom keeps the data value under the cursor fixed. Categories never move.
+- **Zero-alloc preserved.** The linear `_applyPan` / `_applyZoom` /
+  `_clampToBounds` kernels are byte-identical to the vertical path; horizontal
+  support is a `swapAxes ? <remapped> : <current>` selection made once per
+  gesture, and the per-frame draw stays 0 B.
+- **Still fail-closed.** Horizontal + `brush` throws at construction (a
+  value-range + band-ids selection is a separate future cut), as does horizontal
+  + a `log` value axis. Both fire before any signal is allocated.
+
 ## Log scale (y: v1.4.0-alpha.0; x: v1.6.0)
 
 Opt in with `yScale: { type: 'log' }` on any axis-kernel chart
@@ -1305,8 +1348,9 @@ forward plan and the development history that led here. Headlines:
 | **companion** | `@zakkster/lite-charts-gl` v0.1.0+ -- separate WebGL2 package built on `@zakkster/lite-gl`. Scatter / bubble / density charts targeting the 100k-1M point range. lite-charts core stays canvas-only and node-testable. |
 | **v1.6.0** | X-axis log scale. `xScale: { type: 'log' }` now works on the continuous axis-kernel charts (line / area / scatter / bubble): base-10 log projection, decade ticks via `logTicks`, and log-space pan/zoom -- symmetric with the y-axis, built on the v1.5.1 projection fix. Fail-closed: a non-positive x-domain throws at mount naming the domain; x-log on a categorical (bar / band) or time x-axis throws at construction. Common linear-x path byte-unchanged. 383 tests + the T6.A13 torture gate extended to the x-log projection body. |
 | **v1.6.1** | Correctness patch. A mixed-sign log domain (`min <= 0, max > 0`) floored to positive for drawing but kept the raw non-positive min in the pan/zoom bounds snapshot (`_dataDomain`), so the first gesture took `log()` of a value `<= 0` and NaN'd the view. `_dataDomain`'s min is now floored to the same positive part the render path uses, on both x and y. The no-positive-extent case still throws at mount (the floor cannot mask it); the linear/time path and the per-frame draw are byte-unchanged. 390 tests (7 new: y-pan, x/y positive-domain regression, x/y fail-closed throw, x/y zoom-path) + the T6.A13 torture gate. |
-| **v1.7.0** (this) | Annotation layer. `annotations: [...]` (static or `() => Annotation[]`) puts data-pinned `line` / `range` / `point` / `text` marks on any axis-kernel chart. They re-project through the live scales -- tracking pan / zoom and log axes (a value `<= 0` on a log axis does not draw, fail-closed like the series) -- render above the series and below the crosshair, and appear in `exportSVG`. `color` / `fill` accept `--css-var` tokens, re-resolved on `refreshTheme`. Zero per-frame allocation (the project step writes pooled-node fields directly; color resolution is confined to a cold resolve step); the whole layer is absent when unset. 400 tests (10 new: projection, pan-clip, reactive range, exportSVG parity, theme re-resolve, log + linear fail-closed, runtime isolation, horizontal-bar swap, pool retention) + a 0-B/frame annotation torture case. |
-| v1.7.x / v1.8.0 (candidates) | horizontal bars with `pan` / `zoom` / `brush` / value grid; configurable brush modifier; brush IDs across all visible series; time-series variants (ride the annotation `range` primitive for weekend / market-hours shading); legend virtualization via `lite-virtual`. |
+| **v1.7.0** | Annotation layer. `annotations: [...]` (static or `() => Annotation[]`) puts data-pinned `line` / `range` / `point` / `text` marks on any axis-kernel chart. They re-project through the live scales -- tracking pan / zoom and log axes (a value `<= 0` on a log axis does not draw, fail-closed like the series) -- render above the series and below the crosshair, and appear in `exportSVG`. `color` / `fill` accept `--css-var` tokens, re-resolved on `refreshTheme`. Zero per-frame allocation (the project step writes pooled-node fields directly; color resolution is confined to a cold resolve step); the whole layer is absent when unset. 400 tests (10 new: projection, pan-clip, reactive range, exportSVG parity, theme re-resolve, log + linear fail-closed, runtime isolation, horizontal-bar swap, pool retention) + a 0-B/frame annotation torture case. |
+| **v1.8.0** (this) | Horizontal-bar interactions. `createBarChart({ orientation: 'horizontal' })` now accepts `pan` / `zoom` / value `grid`: the value axis (on screen-X under the swap) pans and zooms while the band axis stays pinned, `view.yMin` / `view.yMax` addressing the value axis. Built by remapping the linear pan/zoom kernels at each gesture boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical and the vertical path is unchanged; the per-frame draw is still 0 B. Horizontal + `brush` and horizontal + a `log` value axis still fail closed at construction. 406 tests (6 new: value-axis pan, band-pin control, cursor-anchored zoom, vertical value grid, fail-closed throws, mount/pan/destroy retention -- each proven load-bearing by measured reversion) + a horizontal-interaction 0-B torture case. |
+| v1.8.x / v1.9.0 (candidates) | horizontal-bar `brush` (a value-range + band-ids payload) and band-axis multi-select; configurable brush modifier; brush IDs across all visible series; time-series variants (ride the annotation `range` primitive for weekend / market-hours shading); legend virtualization via `lite-virtual`. |
 
 ## Ecosystem
 

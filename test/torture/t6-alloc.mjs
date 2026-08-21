@@ -321,4 +321,40 @@ export function run() {
             () => `A9: pan-drag with 8 annotations allocated ${bytesPerOp.toFixed(3)} B/op > 16`);
         chart.destroy();
     }
+
+    // --- 8. horizontal-bar pan + zoom storm (A14, v1.5.0) ---------------------
+    // Horizontal pan/zoom remaps the linear kernels at the gesture boundary: the
+    // pointermove/wheel handlers select swapAxes ? <remapped _applyPan/_applyZoom>
+    // : <current>. The remap must NOT add a second per-event allocation beyond the
+    // one `newView` literal the vertical path already spends (the axisSpan closure
+    // in onWheel is the existing precedent). This gate drives an interleaved
+    // pan-drag + wheel-zoom storm on a mounted horizontal bar with pan+zoom and
+    // grid all enabled -- the exact hot path the swap branches sit on -- and pins
+    // maxMajor:0 / maxArrayBuffersGrowth:0. The <=16 B/op ceiling matches the
+    // vertical pointer-storm budget (section 3), so a per-event swap-branch
+    // regression shows up the same as a per-hit pool allocation would.
+    {
+        const c = createBarChart({
+            series: [
+                { name: 'a', data: Array.from({ length: 100 }, (_, i) => ({ x: 'c' + i, y: (i % 13) - 6 })) },
+                { name: 'b', data: Array.from({ length: 100 }, (_, i) => ({ x: 'c' + i, y: (i % 5) + 1 })) },
+            ],
+            width: 600, height: 400, orientation: 'horizontal',
+            pan: true, zoom: true, grid: true, schedule: (fn) => fn(),
+        });
+        const cv = createEventCanvas(600, 400);
+        c.mount(cv);
+        quietCanvas(cv);
+        fireShared(cv, 'pointerdown', 300, 200);
+        const hot = (i) => {
+            fireShared(cv, 'pointermove', 300 - (i % 120), 200 + (i % 60));
+            if ((i & 7) === 0) fireShared(cv, 'wheel', 300, 200, { deltaY: (i & 8) ? 120 : -120 });
+        };
+        const { report, summary, bytesPerOp } = runOpsGate(hot, { ops: 16000, warmup: 1000 });
+        fireShared(cv, 'pointerup', 280, 220);
+        if (!report.ok) die(allocFailMsg('A14.hbar-panzoom', report, summary));
+        check(bytesPerOp <= 16.0,
+            () => `A14: horizontal pan+zoom storm allocated ${bytesPerOp.toFixed(3)} B/op > 16`);
+        c.destroy();
+    }
 }

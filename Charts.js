@@ -1813,8 +1813,14 @@ const buildAxis = (parent, opts) => {
 const buildGrid = (parent, opts) => {
     // opts: {
     //   xScale, yScale, plotBoundsBox, plotBoundsSignal, scaleVersion,
-    //   color (accessor), xFormat ('time'|'number'), enableX (bool), enableY (bool)
+    //   color (accessor), xFormat ('time'|'number'), enableX (bool), enableY (bool),
+    //   swapAxes (bool, default false)
     // }
+    // v1.5.0: under swap the yScale holds the VALUE domain but ranges over x
+    // pixels, so value gridlines run VERTICALLY. Read once here (setup closure)
+    // -- never per rebuild-line, never per frame. Default false leaves every
+    // existing caller's grid output byte-identical.
+    const swap = opts.swapAxes === true;
     const xTickBuf = new Float64Array(TICK_BUF_SIZE);
     const yTickBuf = new Float64Array(TICK_BUF_SIZE);
     const xPixelBuf = new Float64Array(TICK_BUF_SIZE);
@@ -1857,7 +1863,7 @@ const buildGrid = (parent, opts) => {
 
         let yCount = 0;
         if (opts.enableY) {
-            const yTarget = Math.max(2, Math.min(12, (pb.h / 40) | 0));
+            const yTarget = Math.max(2, Math.min(12, ((swap ? pb.w : pb.h) / 40) | 0));
             if (yS.type === 'log') {
                 yCount = logTicks(yS.dMin, yS.dMax, yTarget, yTickBuf, false);
             } else {
@@ -1883,8 +1889,16 @@ const buildGrid = (parent, opts) => {
             });
         }
         // Y gridlines: horizontal lines spanning plot width at each y tick.
+        // Under swap the value axis is horizontal, so these become VERTICAL
+        // lines at each value pixel (yPixelBuf holds x pixels) spanning height.
         for (let i = 0; i < yCount; i++) {
-            linePool[xCount + i].set({
+            linePool[xCount + i].set(swap ? {
+                visible: true,
+                x: yPixelBuf[i],
+                y: pb.y,
+                dx: 0,
+                dy: pb.h,
+            } : {
                 visible: true,
                 x: pb.x,
                 y: yPixelBuf[i],
@@ -4479,26 +4493,23 @@ const createBaseAxisChart = (config, renderer) => {
     // for area / bar / future renderers.
     const chartOpts = renderer.initOpts ? renderer.initOpts(config) : null;
 
-    // v1.5.0: horizontal bar charts are supported only in the orthogonal,
-    // interaction-free subset. Any combination whose kernel math still assumes
-    // the standard orientation (log domain flooring, pan/zoom/brush pixel
-    // mapping, grid rule derivation from yScale) fails CLOSED at construction,
-    // naming the combination. Deferred to 1.5.x. These read `config` directly
-    // because the derived pan/zoom/grid flags are resolved further down.
+    // v1.8.0: horizontal bar charts support pan, zoom, and grid via the
+    // axis-role swap (the linear kernels are remapped at each gesture boundary,
+    // buildGrid emits vertical value rules). Two combinations still fail CLOSED
+    // at construction, naming the combination: a log yScale (domain-flooring
+    // kernel still assumes standard orientation) and brush (a value-range + band
+    // ids payload not yet designed). These read `config` directly and
+    // fire BEFORE any signal alloc -- before swapAxes resolution below, before
+    // viewSig/brushSig, before _dataDomain -- because the derived pan/zoom/grid
+    // flags are resolved further down.
     if (chartOpts && chartOpts.horizontal) {
         if (yScaleType === 'log') {
             throw new Error('lite-charts: horizontal orientation with a log yScale ' +
-                'is not supported (planned for v1.5.x)');
+                'is not supported (planned)');
         }
-        if (config.pan || config.zoom || config.brush) {
-            throw new Error('lite-charts: horizontal orientation with pan/zoom/brush ' +
-                'is not supported (planned for v1.5.x)');
-        }
-        const gridYOn = config.grid === true
-            || (config.grid && typeof config.grid === 'object' && config.grid.y !== false);
-        if (gridYOn) {
-            throw new Error('lite-charts: horizontal orientation with a grid ' +
-                'is not supported (planned for v1.5.x)');
+        if (config.brush) {
+            throw new Error('lite-charts: horizontal orientation with brush ' +
+                'is not supported (planned)');
         }
     }
 
@@ -5017,6 +5028,13 @@ const createBaseAxisChart = (config, renderer) => {
             // bounds math. The view-override layer below reads viewSig()
             // (tracked); we want to write _dataDomain in untrack so this
             // ref-write doesn't add a spurious dependency.
+            // v1.8.0: under swap (horizontal bar) the x fields hold the BAND
+            // domain and the value bounds live in yMin/yMax. Pan/zoom pins the
+            // band axis (dxPx=0 / zoomX=1), so _clampToBounds snaps x to itself
+            // -- an intentional identity, no swap-specific code here. The log
+            // flooring branches below stay unreachable on horizontal: a log
+            // yScale throws at construction (guard above) and log-x + swapped is
+            // rejected at the render seam (see resolvedXType note below).
             if (_dataDomain) {
                 _dataDomain.xMin = dxMin;
                 _dataDomain.xMax = dxMax;
@@ -5163,6 +5181,8 @@ const createBaseAxisChart = (config, renderer) => {
                 // suppress them via renderer.enableXGrid = false.
                 enableX: renderer.enableXGrid ? gridEnableX : false,
                 enableY: gridEnableY,
+                // v1.8.0: horizontal bar flips value gridlines to vertical.
+                swapAxes,
             });
             disposers.push(grid.dispose);
         }
@@ -5419,7 +5439,13 @@ const createBaseAxisChart = (config, renderer) => {
                 const yLog = yScale.type === 'log';
                 const newView = (xLog || yLog)
                     ? _applyPanLog(dragStartView, dx, dy, w, h, xLog, yLog)
-                    : _applyPan(dragStartView, dx, dy, w, h);
+                    // v1.8.0: horizontal bar swaps axis roles. A rightward drag of
+                    // `dx`px over plot width `w` shifts the value domain (now on y)
+                    // left by dx*span/w: pass dxPx=0 (band axis pinned), dyPx=-dx,
+                    // plotH=w. The band axis (x) stays untouched.
+                    : (swapAxes
+                        ? _applyPan(dragStartView, 0, -dx, w, w)
+                        : _applyPan(dragStartView, dx, dy, w, h));
                 if (panBoundsMode === 'data' && _dataDomain) {
                     if (xLog || yLog) _clampToBoundsLog(newView, _dataDomain, xLog, yLog);
                     else _clampToBounds(newView, _dataDomain);
@@ -5461,7 +5487,10 @@ const createBaseAxisChart = (config, renderer) => {
                 const dataYSpan = axisSpan(_dataDomain.yMin, _dataDomain.yMax, yLog);
                 const proposedXSpan = axisSpan(start.xMin, start.xMax, xLog) * zoomFactor;
                 const proposedYSpan = axisSpan(start.yMin, start.yMax, yLog) * zoomFactor;
-                const proposedXRatio = dataXSpan > 0 ? proposedXSpan / dataXSpan : 1;
+                // v1.8.0: under swap the band axis (x) is pinned (zoomX=1), so its
+                // ratio is always 1 -- force it here so the x-ratio veto below can
+                // never wrongly block a legit value-axis (y) zoom.
+                const proposedXRatio = swapAxes ? 1 : (dataXSpan > 0 ? proposedXSpan / dataXSpan : 1);
                 const proposedYRatio = dataYSpan > 0 ? proposedYSpan / dataYSpan : 1;
                 // Block the zoom if either axis would exceed bounds. We
                 // could split the factor per axis but symmetric zoom is
@@ -5475,12 +5504,22 @@ const createBaseAxisChart = (config, renderer) => {
                         plotBoundsBox.x, plotBoundsBox.y, plotBoundsBox.w, plotBoundsBox.h,
                         zoomFactor, zoomFactor, xLog, yLog,
                     )
-                    : _applyZoom(
-                        start,
-                        p.x, p.y,
-                        plotBoundsBox.x, plotBoundsBox.y, plotBoundsBox.w, plotBoundsBox.h,
-                        zoomFactor, zoomFactor,
-                    );
+                    // v1.8.0: horizontal bar swaps axis roles. Keep the value under
+                    // the cursor fixed by mapping anchorPy = pb.w-(p.x-pb.x) (ty=1-tx)
+                    // and pinning the band axis with zoomX=1.
+                    : (swapAxes
+                        ? _applyZoom(
+                            start,
+                            p.x, plotBoundsBox.w - (p.x - plotBoundsBox.x),
+                            plotBoundsBox.x, 0, plotBoundsBox.w, plotBoundsBox.w,
+                            1, zoomFactor,
+                        )
+                        : _applyZoom(
+                            start,
+                            p.x, p.y,
+                            plotBoundsBox.x, plotBoundsBox.y, plotBoundsBox.w, plotBoundsBox.h,
+                            zoomFactor, zoomFactor,
+                        ));
                 if (panBoundsMode === 'data' && _dataDomain) {
                     if (xLog || yLog) _clampToBoundsLog(newView, _dataDomain, xLog, yLog);
                     else _clampToBounds(newView, _dataDomain);
