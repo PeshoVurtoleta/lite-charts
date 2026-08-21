@@ -7341,3 +7341,272 @@ describe('brush integration -- shift-drag (v1.4.0-alpha.3)', () => {
         c.destroy();
     });
 });
+
+// ---------------------------------------------------------------------------
+// v1.7.0 -- annotation layer
+// ---------------------------------------------------------------------------
+//
+// Data-pinned lines / ranges / points / text on the axis kernel. White-box
+// assertions read the pooled-node projection through
+// chart._internal.annotations (handle: { linePool, textPool, count, coordBuf,
+// annGroup, dispose }). Pooled lineNode fields: _x/_y/_dx/_dy/_stroke/
+// _strokeWidth/_visible; textNode fields: _text/_fill/_align/_x/_y/_visible.
+// A9 (0 B/frame) is a torture gate in test/torture/t6-alloc.mjs section 7.
+
+describe('v1.7.0 -- annotation layer', () => {
+    const DATA = [
+        { x: 0, y: 0 }, { x: 10, y: 50 }, { x: 20, y: 100 }, { x: 30, y: 150 },
+    ];
+
+    it('A1: line axis:y projects to a horizontal rule at yScale.map(value)', () => {
+        const canvas = createMockCanvas(800, 400);
+        const chart = createLineChart({
+            data: DATA,
+            schedule: (fn) => fn(),
+            annotations: [{ type: 'line', axis: 'y', value: 100 }],
+        });
+        chart.mount(canvas);
+        const node = chart._internal.annotations.linePool[0];
+        const pb = chart._internal.plotBoundsBox;
+        assert.ok(Math.abs(node._y - chart.yScale.map(100)) <= 0.5,
+            `_y=${node._y} vs map(100)=${chart.yScale.map(100)}`);
+        assert.equal(node._dx, pb.w);
+        assert.equal(node._dy, 0);
+        assert.equal(node._visible, true);
+        chart.unmount();
+    });
+
+    it('A2: a y-line clips (hides) when panned out of the y-domain, restores on reset', () => {
+        const canvas = createMockCanvas(800, 400);
+        const chart = createLineChart({
+            data: DATA,
+            schedule: (fn) => fn(),
+            pan: true,
+            annotations: [{ type: 'line', axis: 'y', value: 100 }],
+        });
+        chart.mount(canvas);
+        const node = chart._internal.annotations.linePool[0];
+        assert.equal(node._visible, true);
+        // Pan so the y-domain becomes [0,50]; value 100 is now above the plot.
+        chart.setView({ xMin: null, xMax: null, yMin: 0, yMax: 50 });
+        assert.equal(node._visible, false);
+        chart.resetView();
+        assert.equal(node._visible, true);
+        assert.ok(Math.abs(node._y - chart.yScale.map(100)) <= 0.5);
+        chart.unmount();
+    });
+
+    it('A3: a range band tracks a signal-valued `from` (reactive, no re-mount)', () => {
+        const canvas = createMockCanvas(800, 400);
+        const fromSig = signal(2);
+        const chart = createLineChart({
+            data: DATA,
+            schedule: (fn) => fn(),
+            annotations: () => [{ type: 'range', axis: 'x', from: fromSig(), to: 25, fill: '#123456' }],
+        });
+        chart.mount(canvas);
+        const poolLenBefore = chart._internal.annotations.linePool.length;
+        const rectX = (svg) => {
+            const el = (svg.match(/<rect\b[^>]*>/g) || []).find((r) => r.includes('fill="#123456"'));
+            assert.ok(el, 'range fill rect present');
+            const xm = el.match(/\bx="([-\d.]+)"/);
+            assert.ok(xm, 'rect has x attr');
+            return +xm[1];
+        };
+        assert.ok(Math.abs(rectX(chart.exportSVG()) - chart.xScale.map(2)) <= 0.5);
+        fromSig.set(3);
+        assert.ok(Math.abs(rectX(chart.exportSVG()) - chart.xScale.map(3)) <= 0.5);
+        assert.equal(chart._internal.annotations.linePool.length, poolLenBefore,
+            'signal update must not re-mount / regrow the pool');
+        chart.unmount();
+    });
+
+    it('A4: all four annotation types appear in exportSVG; no clip-rect leak', () => {
+        const canvas = createMockCanvas(800, 400);
+        const chart = createLineChart({
+            data: DATA,
+            schedule: (fn) => fn(),
+            annotations: [
+                { type: 'range', axis: 'x', from: 5, to: 25, fill: '#abcdef' },
+                { type: 'line', axis: 'y', value: 75, dash: [4, 4], color: '#ff0000' },
+                { type: 'point', x: 15, y: 75, radius: 5, color: '#00ff00' },
+                { type: 'text', x: 15, y: 100, text: 'PEAK', color: '#0000ff' },
+            ],
+        });
+        chart.mount(canvas);
+        const svg = chart.exportSVG();
+        assert.ok(/<rect\b[^>]*fill="#abcdef"/.test(svg), 'range fill rect present');
+        assert.ok(/stroke-dasharray/.test(svg) && svg.includes('#ff0000'), 'dashed rule present');
+        assert.ok(svg.includes('#00ff00'), 'point marker present');
+        assert.ok(/>PEAK</.test(svg) && svg.includes('#0000ff'), 'text label present');
+        // Negative clause: no rect spanning the FULL plot rect (the D1
+        // missing-beginPath clip-rect-fill regression would emit exactly that).
+        const pb = chart._internal.plotBoundsBox;
+        for (const r of (svg.match(/<rect\b[^>]*>/g) || [])) {
+            const wm = r.match(/width="([-\d.]+)"/);
+            const hm = r.match(/height="([-\d.]+)"/);
+            if (!wm || !hm) continue;
+            const full = Math.abs(+wm[1] - pb.w) <= 1 && Math.abs(+hm[1] - pb.h) <= 1;
+            assert.ok(!full, `clip-rect leak: rect spans full plot (${wm[1]}x${hm[1]})`);
+        }
+        chart.unmount();
+    });
+
+    it('A5: refreshTheme re-resolves annotation CSS-var colors; redraw does not', () => {
+        const origGCS = globalThis.getComputedStyle;
+        let themeColor = '#ff0000';
+        let gcsCalls = 0;
+        globalThis.getComputedStyle = () => {
+            gcsCalls++;
+            return { getPropertyValue: (k) => (k === '--ann' ? themeColor : '') };
+        };
+        try {
+            const canvas = createMockCanvas(800, 400);
+            const chart = createLineChart({
+                data: DATA,
+                schedule: (fn) => fn(),
+                annotations: [{ type: 'line', axis: 'y', value: 75, color: '--ann' }],
+            });
+            chart.mount(canvas);
+            assert.equal(chart._internal.annotations.linePool[0]._stroke, '#ff0000');
+            const callsAfterMount = gcsCalls;
+            chart.redraw();
+            chart.redraw();
+            assert.equal(gcsCalls, callsAfterMount,
+                'resolveColor/getComputedStyle must stay off the redraw path (D2)');
+            themeColor = '#00ff00';
+            chart.refreshTheme();
+            assert.equal(chart._internal.annotations.linePool[0]._stroke, '#00ff00',
+                'refreshTheme must re-resolve the annotation color');
+            chart.unmount();
+        } finally {
+            globalThis.getComputedStyle = origGCS;
+        }
+    });
+
+    it('A6: log axis fails closed on non-positive / null annotation values', () => {
+        const canvas = createMockCanvas(800, 400);
+        const chart = createLineChart({
+            data: [{ x: 0, y: 1 }, { x: 10, y: 10 }, { x: 20, y: 100 }],
+            schedule: (fn) => fn(),
+            yScale: { type: 'log' },
+            annotations: [
+                { type: 'line', axis: 'y', value: -5 },
+                { type: 'line', axis: 'y', value: 0 },
+                { type: 'line', axis: 'y', value: 10 },
+                { type: 'line', axis: 'y', value: null },
+            ],
+        });
+        chart.mount(canvas);
+        const p = chart._internal.annotations.linePool;
+        assert.equal(p[0]._visible, false, 'value:-5 must not render on a log axis');
+        assert.equal(p[1]._visible, false, 'value:0 must not render (map(0)=NaN)');
+        assert.equal(p[2]._visible, true, 'value:10 renders');
+        assert.ok(Math.abs(p[2]._y - chart.yScale.map(10)) <= 0.5);
+        assert.equal(p[3]._visible, false, 'value:null must not render (fail-closed)');
+        chart.unmount();
+    });
+
+    it('A6b: a LINEAR axis fails closed on null/NaN values (Number(null)===0 must NOT draw at data-zero)', () => {
+        // On a log axis map(0)/map(null) are already non-finite, so the project
+        // step masks a missing resolve-time guard. The fail-open only bites on a
+        // LINEAR axis, where map(null) coerces to the intercept -- a finite
+        // pixel that would draw a phantom rule at data-zero. This case pins the
+        // resolveInto Number.isFinite guard directly.
+        const canvas = createMockCanvas(800, 400);
+        const chart = createLineChart({
+            data: DATA, // linear y-domain spanning 0
+            schedule: (fn) => fn(),
+            annotations: [
+                { type: 'line', axis: 'y', value: null },
+                { type: 'line', axis: 'y', value: NaN },
+                { type: 'line', axis: 'y', value: undefined },
+                { type: 'point', x: null, y: 50 },
+                { type: 'range', axis: 'x', from: null, to: 10 },
+                { type: 'line', axis: 'y', value: 50 }, // control: valid, renders
+            ],
+        });
+        chart.mount(canvas);
+        const p = chart._internal.annotations.linePool;
+        assert.equal(p[0]._visible, false, 'value:null must not draw at data-zero (linear)');
+        assert.equal(p[1]._visible, false, 'value:NaN must not render');
+        assert.equal(p[2]._visible, false, 'value:undefined must not render');
+        assert.equal(p[3]._visible, false, 'point x:null must not render');
+        assert.equal(p[4]._visible, false, 'range from:null must not render');
+        assert.equal(p[5]._visible, true, 'control: value:50 renders');
+        assert.ok(Math.abs(p[5]._y - chart.yScale.map(50)) <= 0.5);
+        chart.unmount();
+    });
+
+    it('A7: a chart with no annotations has a null handle; buildAnnotations is guarded', () => {
+        const chart = createLineChart({ data: DATA, schedule: (fn) => fn() });
+        chart.mount(createMockCanvas(800, 400));
+        assert.equal(chart._internal.annotations, null, 'no annotations -> null handle');
+        chart.unmount();
+
+        const c2 = createLineChart({
+            data: DATA, schedule: (fn) => fn(),
+            annotations: [{ type: 'line', axis: 'y', value: 50 }],
+        });
+        c2.mount(createMockCanvas(800, 400));
+        assert.ok(c2._internal.annotations && Array.isArray(c2._internal.annotations.linePool),
+            'annotations config -> live handle with a pool');
+        c2.unmount();
+
+        // Source-region confinement proxy: buildAnnotations() is gated behind
+        // `if (annotationsAcc)`, so a no-annotation chart never enters it.
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        assert.match(src, /if \(annotationsAcc\) \{[\s\S]{0,200}buildAnnotations\(/,
+            'buildAnnotations() must be guarded by if (annotationsAcc)');
+    });
+
+    it('A8: on a horizontal bar, axis:y draws a vertical screen line via yScale (swap-aware)', () => {
+        const canvas = createMockCanvas(400, 300);
+        const chart = createBarChart({
+            orientation: 'horizontal',
+            data: [{ x: 'A', y: 30 }, { x: 'B', y: 50 }, { x: 'C', y: 20 }],
+            schedule: (fn) => fn(),
+            annotations: [{ type: 'line', axis: 'y', value: 25 }],
+        });
+        chart.mount(canvas);
+        const node = chart._internal.annotations.linePool[0];
+        const pb = chart._internal.plotBoundsBox;
+        assert.ok(Math.abs(node._x - chart.yScale.map(25)) <= 0.5,
+            `_x=${node._x} vs yScale.map(25)=${chart.yScale.map(25)}`);
+        assert.equal(node._y, pb.y);
+        assert.equal(node._dx, 0, 'a swapped y-line is vertical: _dx === 0');
+        assert.equal(node._dy, pb.h);
+        assert.equal(node._visible, true);
+        chart.unmount();
+    });
+
+    it('A10: pool high-water holds on shrink; dispose is clean and idempotent', () => {
+        const canvas = createMockCanvas(800, 400);
+        const nSig = signal(40);
+        const chart = createLineChart({
+            data: DATA,
+            schedule: (fn) => fn(),
+            annotations: () => {
+                const arr = [];
+                for (let i = 0; i < nSig(); i++) arr.push({ type: 'line', axis: 'y', value: i + 1 });
+                return arr;
+            },
+        });
+        chart.mount(canvas);
+        const ann = chart._internal.annotations;
+        assert.ok(ann.linePool.length >= 40, 'grew to at least 40');
+        const highWater = ann.linePool.length;
+        for (let iter = 0; iter < 200; iter++) {
+            nSig.set(2);
+            assert.equal(ann.count, 2);
+            assert.equal(ann.linePool.length, highWater, 'pool never grows past the high-water mark');
+            for (let i = 2; i < highWater; i++) {
+                assert.equal(ann.linePool[i]._visible, false, `surplus node ${i} must be hidden`);
+            }
+            nSig.set(40);
+        }
+        chart.unmount();
+        chart.destroy();
+        assert.doesNotThrow(() => chart.destroy(), 'destroy is idempotent');
+    });
+});

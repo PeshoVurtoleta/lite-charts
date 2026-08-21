@@ -5,6 +5,59 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] -- 2026-08
+
+Annotation layer -- data-pinned overlays on any axis-kernel chart. Additive; no
+public API change beyond the new `annotations` config. The per-frame draw path
+stays 0 B/frame.
+
+### Added -- `annotations` on axis-kernel charts
+
+- **`annotations: Annotation[] | (() => Annotation[])`** on line / area / bar /
+  bubble / scatter. Four shapes, each pinned to DATA coordinates:
+  - `{ type: 'line', axis: 'x'|'y', value, color?, dash?, width?, label? }` -- a
+    full-width / full-height rule at a data value (thresholds, targets).
+  - `{ type: 'range', axis: 'x'|'y', from, to, fill?, label? }` -- a shaded band
+    between two values on one axis (windows, SLA bands, confidence regions).
+  - `{ type: 'point', x, y, color?, radius?, label? }` -- a marker at a point.
+  - `{ type: 'text', x, y, text, color?, anchor?: 'start'|'middle'|'end' }` -- a
+    pinned label.
+- **Live projection.** Marks re-map through the live `xScale` / `yScale` on every
+  scale change, so they track `pan` / `zoom` and render correctly on `type:
+  'log'` axes. A mark that maps off-scale (a `log` value `<= 0`, or one panned
+  out of view) is clipped to the plot rect -- never painted over the axes.
+- **Reactive + theme-aware.** A signal-valued `annotations` accessor re-runs on
+  signal change; `color` / `fill` accept `--css-var` tokens, resolved at mount
+  and re-resolved on `refreshTheme()`.
+- **Z-order + export.** Rendered above the series and below the crosshair / brush
+  overlay; emitted by `chart.exportSVG()`.
+- **Swap-aware.** `axis` names the *data* axis; on an `orientation: 'horizontal'`
+  bar an `axis: 'y'` rule draws as a vertical screen line.
+
+### Design -- zero-allocation, fail-closed
+
+- **Two-step reactivity.** A cold resolve step (tracks a theme signal + the
+  annotations accessor) sizes pooled scene nodes and resolves colors via
+  `getComputedStyle`; a hot project step (tracks `scaleVersion` +
+  `plotBoundsSignal`, re-runs every pan frame) writes pooled-node fields
+  directly -- no `node.set`, no literals, no `resolveColor` -- keeping the
+  per-frame path at 0 B. Color resolution never touches the hot path.
+- **Fail-closed.** A non-finite `value` / `from` / `to` / `x` / `y`
+  (`null` / `undefined` / `NaN`) draws nothing (`Number.isFinite`, never
+  coerced to `0`); an unknown `type` is ignored.
+- **Runtime-isolated.** With no `annotations`, no nodes are created and the
+  handle is `null`; `buildAnnotations` is gated behind `if (annotationsAcc)`.
+
+### Coverage
+
+- 10 new tests (390 -> 400): projection, pan-clip, reactive range,
+  `exportSVG` parity, theme re-resolve (plus `resolveColor` proven off the redraw
+  path), log **and** linear fail-closed (the linear case is load-bearing -- a log
+  axis masks `Number(null) === 0` because `map(0)` is already non-finite),
+  runtime isolation, horizontal-bar swap, pool retention / high-water. Each
+  proven load-bearing by measured reversion. Plus a 0-B/frame annotation torture
+  case. `npm run torture` -> `ok`.
+
 ## [1.6.1] -- 2026-08
 
 A correctness patch closing the mixed-sign log-domain gap that 1.6.0 shipped as

@@ -274,4 +274,51 @@ export function run() {
         check(Math.abs(gXLog.bytesPerOp - gXLin.bytesPerOp) <= 2.0,
             () => `A13: x-log ${gXLog.bytesPerOp.toFixed(3)} B/op vs linear-x ${gXLin.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
     }
+
+    // --- 7. annotation project-step budget (A9, v1.7.0) -----------------------
+    // The annotation project step subscribes to scaleVersion, which the domain
+    // effect bumps EVERY pan/zoom frame (Risk 1). It must add ZERO per-frame
+    // allocation: it writes pooled node underscore fields DIRECTLY (n._x = px),
+    // never node.set({...}) (an object literal per call). This gate drives a
+    // real pointermove pan-drag on a mounted 8-annotation line chart -- the
+    // exact hot path Risk 1 warns about.
+    //
+    // Two DETERMINISTIC proofs: (1) report.ok -- maxMajor:0 / maxArrayBuffers
+    // Growth:0 across the window; (2) a pin on the annotation Float64Array
+    // buffer.byteLength (64 slots = 512 B) -- nothing may grow on the hot path.
+    //
+    // The absolute bytesPerOp ceiling is LOOSE (<=16, same as A7/A12/A13) rather
+    // than ===0. It cannot be ===0: the shared pan pipeline (Effect 2's
+    // niceYDomain [lo,hi] array, unchanged by this feature) already floats to
+    // ~1-6 B/op of heapUsed-sampling noise REGARDLESS of annotations, so an
+    // absolute floor would gate the pan baseline, not this feature. A real
+    // per-frame annotation regression -- reinstating node.set({...}) -- is 8
+    // object literals PER FRAME, tens-to-hundreds of B/op, far above the noise
+    // floor and caught by both the ceiling and report.ok.
+    {
+        const data = new Array(2000);
+        for (let i = 0; i < 2000; i++) {
+            data[i] = { x: i, y: Math.sin(i / 20) * 50 + Math.cos(i / 7) * 10 };
+        }
+        const anns = new Array(8);
+        for (let k = 0; k < 8; k++) anns[k] = { type: 'line', axis: 'y', value: -40 + k * 12, color: '#f00' };
+        const chart = createLineChart({ data, x: 'x', y: 'y', schedule: (fn) => fn(), pan: true, annotations: anns });
+        const canvas = createEventCanvas(800, 400);
+        chart.mount(canvas);
+        quietCanvas(canvas);
+        const bufBefore = chart._internal.annotations.coordBuf.buffer.byteLength;
+        check(bufBefore === 512,
+            () => `A9: annotation coord buffer is ${bufBefore} B, expected 512 (64 slots)`);
+        fireShared(canvas, 'pointerdown', 400, 200);
+        const hot = (i) => { fireShared(canvas, 'pointermove', 400 - (i % 120), 200 + (i % 60)); };
+        const { report, summary, bytesPerOp } = runOpsGate(hot, { ops: 20000, warmup: 1000 });
+        fireShared(canvas, 'pointerup', 300, 220);
+        const bufAfter = chart._internal.annotations.coordBuf.buffer.byteLength;
+        check(bufAfter === 512,
+            () => `A9: annotation coord buffer grew ${bufBefore} -> ${bufAfter} during a pan-drag`);
+        if (!report.ok) die(allocFailMsg('A9.annotation-pan', report, summary));
+        check(bytesPerOp <= 16.0,
+            () => `A9: pan-drag with 8 annotations allocated ${bytesPerOp.toFixed(3)} B/op > 16`);
+        chart.destroy();
+    }
 }

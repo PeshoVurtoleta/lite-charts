@@ -220,6 +220,24 @@ export type InterpolationMode =
 
 export type MarkerShape = 'circle' | 'square' | 'triangle' | 'diamond';
 
+/**
+ * Annotation pinned to DATA coordinates on an axis-kernel chart
+ * (line / area / bar / bubble / scatter). `color` / `fill` accept a literal
+ * (hex, rgb(), oklch(), named) or a `--css-var` token resolved against the
+ * container. `axis` names the DATA axis; the screen orientation follows the
+ * chart (a horizontal bar flips it). Any entry with a non-finite coordinate
+ * renders nothing and throws nothing (fail-closed).
+ */
+export type Annotation =
+    /** Rule across the plot at `value` on the named data axis. */
+    | { type: 'line'; axis: 'x' | 'y'; value: number; color?: string; dash?: number[]; width?: number; label?: string }
+    /** Filled band between `from` and `to` on the named data axis. */
+    | { type: 'range'; axis: 'x' | 'y'; from: number; to: number; fill?: string; label?: string }
+    /** Marker dot at data point (`x`, `y`). */
+    | { type: 'point'; x: number; y: number; color?: string; radius?: number; label?: string }
+    /** Text label anchored at data point (`x`, `y`). */
+    | { type: 'text'; x: number; y: number; text: string; color?: string; anchor?: 'start' | 'middle' | 'end' };
+
 export interface MarkerConfig {
     shape?: MarkerShape;
     /** Marker size in CSS pixels (diameter for circle, side length otherwise). Default 5. */
@@ -322,6 +340,13 @@ export interface LineChartConfig extends PanZoomConfig, BrushConfig {
     markers?: boolean | MarkerConfig;
     /** Gridlines through the plot rect at each tick. Default false. `true` enables both axes. */
     grid?: boolean | GridConfig;
+
+    /**
+     * Annotations pinned to data coordinates: lines, ranges, points, text.
+     * A static array or a `() => Annotation[]` thunk (re-runs reactively when
+     * the signals it reads change). Omit for none.
+     */
+    annotations?: Annotation[] | (() => Annotation[]);
 
     dpr?: number;
 
@@ -623,6 +648,9 @@ export interface BubbleChartConfig extends PanZoomConfig, BrushConfig {
     yScale?: { type?: 'linear' | 'log'; domain?: [number, number]; nice?: boolean; zero?: boolean };
 
     grid?: boolean | { x?: boolean; y?: boolean; color?: string };
+
+    /** Annotations pinned to data coordinates. See {@link Annotation}. */
+    annotations?: Annotation[] | (() => Annotation[]);
 
     crosshair?: false | { color?: string; dash?: [number, number] };
     tooltip?: false | {
@@ -981,6 +1009,8 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
     yScale?: { type?: 'linear' | 'log'; domain?: [number, number]; nice?: boolean; zero?: boolean };
 
     grid?: boolean | { x?: boolean; y?: boolean; color?: string };
+    /** Annotations pinned to data coordinates. See {@link Annotation}. */
+    annotations?: Annotation[] | (() => Annotation[]);
     crosshair?: false | { color?: string; dash?: [number, number] };
     tooltip?: BubbleChartConfig['tooltip'];
     legend?: BubbleChartConfig['legend'];

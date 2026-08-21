@@ -17,16 +17,27 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.6.1 -- mixed-sign log-domain floor (patch). A `type: 'log'`
-domain whose data spans zero (`min <= 0, max > 0`) rendered correctly but
-NaN'd the view on the first pan or zoom: the pan-bounds envelope kept the raw
-non-positive min while the axis floored it for drawing, so the gesture math
-took `log()` of a value `<= 0`. The envelope is now floored to the same
-positive part on both axes, so a mixed-sign log chart pans and zooms cleanly
-instead of freezing. Fail-closed still holds: a log domain with *no* positive
-extent throws at mount as before (the floor never masks it). No public API
-change; the per-frame draw path is byte-unchanged. **390/390 tests pass** plus
-a torture/stress gate (`npm run torture`).
+**Status:** v1.7.0 -- annotation layer (minor). Data-pinned `line`, `range`,
+`point`, and `text` marks on any axis-kernel chart via `annotations: [...]`
+(a static array or a signal / accessor). They project through the live scales
+-- so they track pan / zoom and log axes for free -- render above the series
+and below the crosshair, and appear in `exportSVG`. Reactive and theme-aware
+(CSS-var colors re-resolve on `refreshTheme`), fail-closed (a non-finite value,
+or a non-positive value on a log axis, simply does not draw), and zero
+allocation on the per-frame path. **400/400 tests pass** plus a torture/stress
+gate (`npm run torture`).
+
+**New in v1.7.0:**
+- **`annotations` on axis-kernel charts.** An array -- or `() => Annotation[]`
+  -- of `line` (a rule at a data value on the x or y axis), `range` (a shaded
+  band between two values on one axis), `point`, and `text` marks, each pinned
+  to DATA coordinates. They re-project on every scale change, so they track
+  pan / zoom and work on log axes (a value `<= 0` on a log axis simply does not
+  draw -- fail-closed, exactly like the series). `color` / `fill` accept
+  `--css-var` tokens and re-resolve on `refreshTheme`. Rendered above the series
+  and below the crosshair; present in `exportSVG`. Zero per-frame allocation,
+  and the whole layer is absent when `annotations` is unset. See "Annotations"
+  below.
 
 **New in v1.6.1:**
 - **Mixed-sign log domains pan and zoom cleanly.** When `min <= 0, max > 0`
@@ -1085,6 +1096,64 @@ of the data has positive y values.
   (bar / band) or time x-axis throws at construction -- a scale is one
   type. Log + bar stays a y-axis-only notion since bar x is categorical.
 
+## Annotations (v1.7.0)
+
+Data-pinned overlays on any axis-kernel chart (line / area / bar / bubble /
+scatter). Pass `annotations` -- a static array, or a `() => Annotation[]`
+accessor / signal for reactive marks:
+
+```js
+import { signal } from '@zakkster/lite-signal';
+import { createLineChart } from '@zakkster/lite-charts';
+
+const target = signal(120);
+
+createLineChart({
+  data,
+  annotations: () => [
+    // a horizontal threshold rule at y = target()
+    { type: 'line',  axis: 'y', value: target(), color: '--accent', dash: [4, 4], label: 'SLA' },
+    // a shaded band between two x values (e.g. a deploy window)
+    { type: 'range', axis: 'x', from: 40, to: 55, fill: 'rgba(255,0,0,0.08)' },
+    // a pinned callout
+    { type: 'point', x: 72, y: 96, radius: 5, color: '--accent', label: 'peak' },
+    { type: 'text',  x: 72, y: 96, text: '96 req/s', anchor: 'middle' },
+  ],
+}).mount(el);
+```
+
+The four shapes:
+
+| `type` | Fields | Draws |
+| --- | --- | --- |
+| `line` | `axis: 'x'\|'y'`, `value`, `color?`, `dash?`, `width?`, `label?` | a full-width / full-height rule at a data value (thresholds, targets) |
+| `range` | `axis: 'x'\|'y'`, `from`, `to`, `fill?`, `label?` | a shaded band between two values on one axis (windows, SLA bands) |
+| `point` | `x`, `y`, `color?`, `radius?`, `label?` | a marker at a data point |
+| `text` | `x`, `y`, `text`, `color?`, `anchor?` | a pinned label (`anchor` = `'start'\|'middle'\|'end'`) |
+
+Behavior:
+
+- **Live projection.** Marks re-map through `chart.xScale` / `chart.yScale` on
+  every scale change, so they track `pan` / `zoom` and render correctly on
+  `type: 'log'` axes. A value that maps off-scale (a `log` value `<= 0`, or a
+  value panned out of view) simply is not drawn -- clipped to the plot rect,
+  never painted over the axes.
+- **Fail-closed.** A `null`, `undefined`, `NaN`, or otherwise non-finite
+  coordinate draws nothing (never coerced to `0`); an unknown `type` is
+  ignored.
+- **Reactive + theme-aware.** A signal-valued `annotations` accessor re-runs
+  when its signals change. `color` / `fill` accept `--css-var` tokens, resolved
+  at mount and re-resolved on `refreshTheme()` -- off the per-frame path.
+- **Z-order + export.** Annotations render above the series and below the
+  crosshair / brush overlay, and are emitted by `chart.exportSVG()`.
+- **Zero-cost when unused.** With no `annotations`, no nodes are created and
+  the layer adds nothing to the draw path. When present, the per-frame draw is
+  still 0 B/frame (projection writes pre-sized pooled nodes; color resolution
+  is confined to a cold resolve step).
+- **Horizontal bars.** `axis` names the *data* axis; on an
+  `orientation: 'horizontal'` bar the value axis is on screen-X, so an
+  `axis: 'y'` rule draws as a vertical screen line (swap-aware).
+
 ## SVG export (v1.3.0)
 
 Every chart exposes `chart.exportSVG(opts?)` which returns a complete
@@ -1235,8 +1304,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.5.1** | Correctness patch. `scaleSeriesToPixels` -- the hot per-extract projection loop for every `projectToPixels` renderer (line / area / scatter / bubble) -- inlined linear `v * slope + intercept` for both axes, so a `yScale: { type: 'log' }` chart drew its axis and ticks correctly but placed every point at the wrong pixel (present since y-log shipped in 1.4.1). The loop is now log-aware on both axes via four cold-selected flat bodies; the all-linear path is byte-identical (proven by a 12k-point `Object.is` parity gate). Bars unaffected (`projectToPixels: false`); `xScale: { type: 'log' }` still threw. 368 tests + a pure-kernel torture gate (T6.A13). |
 | **companion** | `@zakkster/lite-charts-gl` v0.1.0+ -- separate WebGL2 package built on `@zakkster/lite-gl`. Scatter / bubble / density charts targeting the 100k-1M point range. lite-charts core stays canvas-only and node-testable. |
 | **v1.6.0** | X-axis log scale. `xScale: { type: 'log' }` now works on the continuous axis-kernel charts (line / area / scatter / bubble): base-10 log projection, decade ticks via `logTicks`, and log-space pan/zoom -- symmetric with the y-axis, built on the v1.5.1 projection fix. Fail-closed: a non-positive x-domain throws at mount naming the domain; x-log on a categorical (bar / band) or time x-axis throws at construction. Common linear-x path byte-unchanged. 383 tests + the T6.A13 torture gate extended to the x-log projection body. |
-| **v1.6.1** (this) | Correctness patch. A mixed-sign log domain (`min <= 0, max > 0`) floored to positive for drawing but kept the raw non-positive min in the pan/zoom bounds snapshot (`_dataDomain`), so the first gesture took `log()` of a value `<= 0` and NaN'd the view. `_dataDomain`'s min is now floored to the same positive part the render path uses, on both x and y. The no-positive-extent case still throws at mount (the floor cannot mask it); the linear/time path and the per-frame draw are byte-unchanged. 390 tests (7 new: y-pan, x/y positive-domain regression, x/y fail-closed throw, x/y zoom-path) + the T6.A13 torture gate. |
-| v1.6.x / v1.7.0 (candidates) | horizontal bars with `pan` / `zoom` / `brush` / value grid; configurable brush modifier; brush IDs across all visible series; time-series variants; annotation layer; legend virtualization via `lite-virtual`. |
+| **v1.6.1** | Correctness patch. A mixed-sign log domain (`min <= 0, max > 0`) floored to positive for drawing but kept the raw non-positive min in the pan/zoom bounds snapshot (`_dataDomain`), so the first gesture took `log()` of a value `<= 0` and NaN'd the view. `_dataDomain`'s min is now floored to the same positive part the render path uses, on both x and y. The no-positive-extent case still throws at mount (the floor cannot mask it); the linear/time path and the per-frame draw are byte-unchanged. 390 tests (7 new: y-pan, x/y positive-domain regression, x/y fail-closed throw, x/y zoom-path) + the T6.A13 torture gate. |
+| **v1.7.0** (this) | Annotation layer. `annotations: [...]` (static or `() => Annotation[]`) puts data-pinned `line` / `range` / `point` / `text` marks on any axis-kernel chart. They re-project through the live scales -- tracking pan / zoom and log axes (a value `<= 0` on a log axis does not draw, fail-closed like the series) -- render above the series and below the crosshair, and appear in `exportSVG`. `color` / `fill` accept `--css-var` tokens, re-resolved on `refreshTheme`. Zero per-frame allocation (the project step writes pooled-node fields directly; color resolution is confined to a cold resolve step); the whole layer is absent when unset. 400 tests (10 new: projection, pan-clip, reactive range, exportSVG parity, theme re-resolve, log + linear fail-closed, runtime isolation, horizontal-bar swap, pool retention) + a 0-B/frame annotation torture case. |
+| v1.7.x / v1.8.0 (candidates) | horizontal bars with `pan` / `zoom` / `brush` / value grid; configurable brush modifier; brush IDs across all visible series; time-series variants (ride the annotation `range` primitive for weekend / market-hours shading); legend virtualization via `lite-virtual`. |
 
 ## Ecosystem
 

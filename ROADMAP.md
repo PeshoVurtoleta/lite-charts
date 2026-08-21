@@ -5,7 +5,39 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.6.1 (current)
+## v1.7.0 (current)
+
+Annotation layer -- data-pinned overlays on any axis-kernel chart. Additive,
+opt-in, no public API break beyond the new `annotations` config.
+
+- **`annotations: Annotation[] | (() => Annotation[])`** on line / area / bar /
+  bubble / scatter. Four shapes pinned to DATA coordinates: `line` (a rule at a
+  value on x or y), `range` (a shaded band between two values), `point`, and
+  `text`. The `range` primitive is the one time-series weekend / market-hours
+  shading will ride on.
+- **Live projection.** Marks re-map through the live `xScale` / `yScale` every
+  scale change, so they track `pan` / `zoom` and log axes; a mark that maps
+  off-scale (a `log` value `<= 0`, or one panned out) is clipped to the plot
+  rect. Rendered above the series and below the crosshair; emitted by
+  `exportSVG`. Reactive (signal-valued accessor) and theme-aware (`--css-var`
+  colors re-resolve on `refreshTheme`).
+- **Zero-alloc + fail-closed.** A two-step design keeps `getComputedStyle` on a
+  cold resolve step and the per-frame project step at 0 B (direct pooled-node
+  writes). A non-finite coordinate draws nothing (`Number.isFinite`, never
+  `Number(null) === 0`); an unknown `type` is ignored; no `annotations` => null
+  handle, no scene child.
+- 10 new tests (390 -> 400): projection, pan-clip, reactive range, `exportSVG`
+  parity, theme re-resolve, log **and** linear fail-closed (the linear case is
+  load-bearing -- a log axis masks `Number(null) === 0`), runtime isolation,
+  horizontal-bar swap, pool retention. Each proven load-bearing by measured
+  reversion. Plus a 0-B/frame annotation torture case. Torture green, ASCII
+  clean.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.6.1
 
 A correctness patch closing the one gap v1.6.0 shipped as known/deferred.
 No public API change; the per-frame draw path is byte-unchanged.
@@ -347,12 +379,11 @@ not shipped in `files[]`). They are independent; pick by appetite.
 - **Time-series specialized variants** (`briefs/time-series-variants.md`) --
   `createTimeLineChart` etc. with built-in date tick generation,
   weekday/weekend shading, market-hours awareness for finance dashboards.
+  The shading now rides the shipped v1.7.0 annotation `range` primitive
+  instead of duplicating it.
 - **Legend virtualization** (`briefs/legend-virtualization.md`) -- via
   `@zakkster/lite-virtual` for charts with 100+ series (real-time
   monitoring dashboards). Renders only visible legend rows.
-- **Annotation layer** (`briefs/annotation-layer.md`) -- arbitrary lines,
-  ranges, and text labels pinned to data coordinates. Reactive,
-  theme-aware.
 
 ### Companion track -- `@zakkster/lite-charts-gl` (separate package)
 
@@ -398,11 +429,11 @@ proves it.
 ### Version-numbering note
 
 The "v1.6.0 -- Scale + polish" grab-bag from earlier drafts has been
-unbundled: **x-log** shipped as v1.6.0 on its own; the remaining items
-(horizontal-bar interactions, time-series variants, legend virtualization,
-annotations) are now independent entries in the "Next -- polish + reach"
-list above, each with its own brief, to be released as whichever minor
-they land in rather than one combined cut.
+unbundled into independent minors, each with its own brief, released as
+whichever minor they land in rather than one combined cut: **x-log** shipped
+as v1.6.0, the **annotation layer** as v1.7.0; the remaining items
+(horizontal-bar interactions, time-series variants, legend virtualization)
+stay independent entries in the "Next -- polish + reach" list above.
 
 ### v2.0.0 -- (possible)
 

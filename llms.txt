@@ -10,7 +10,38 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.6.1 (current): mixed-sign log-domain floor -- a correctness patch, no
+> v1.7.0 (current): annotation layer -- additive, no public API change beyond
+> the new config. annotations: Annotation[] | (() => Annotation[]) on any
+> axis-kernel chart (line/area/bar/bubble/scatter). Four shapes: line
+> {axis:'x'|'y', value, color?, dash?, width?, label?} (a rule at a data value);
+> range {axis:'x'|'y', from, to, fill?, label?} (a shaded band); point {x, y,
+> color?, radius?, label?}; text {x, y, text, color?, anchor?:'start'|'middle'|
+> 'end'}. Marks pin to DATA coords and re-project through the live xScale/yScale
+> every scale change, so they track pan/zoom and log axes; a value that maps
+> off-scale (log value<=0, or panned out) is clipped to the plot rect (not
+> painted over axes). Rendered ABOVE the series and BELOW the crosshair/brush
+> (annGroup added to scene.root between the series loop and the crosshair node);
+> emitted by exportSVG (native lineNode/textNode + a pathNode for fills/markers).
+> ZERO per-frame alloc: a two-step design -- a COLD resolve step (tracks a theme
+> signal + the annotations accessor) sizes pooled nodes and resolves --css-var
+> colors via getComputedStyle; a HOT project step (tracks scaleVersion +
+> plotBoundsSignal, runs every pan frame) writes pooled-node underscore fields
+> DIRECTLY (no node.set, no literals, no resolveColor) and markDirty once.
+> FAILS CLOSED: a non-finite value/from/to/x/y (null/undefined/NaN) draws
+> nothing (Number.isFinite, never Number(null)===0 at data-zero); unknown type
+> ignored. Theme-aware: --css-var color/fill re-resolve on refreshTheme (bumps
+> the cold theme signal). Runtime-isolated: no annotations config => null handle,
+> no scene child, buildAnnotations gated behind if(annotationsAcc) (statically
+> reachable like buildGrid, so no bundler drop -- gated at runtime, not tree-
+> shaken). Swap-aware: axis names the DATA axis; on orientation:'horizontal' the
+> value axis is on screen-X so an axis:'y' rule draws as a vertical screen line.
+> 10 new tests (390->400): projection, pan-clip, reactive range via signal,
+> exportSVG parity, theme re-resolve (+ resolveColor off the redraw path), log
+> AND linear fail-closed (linear is the load-bearing one -- log masks
+> Number(null)===0 since map(0) is non-finite), runtime isolation, horizontal-bar
+> swap, pool retention/high-water. torture ok (new 0-B/frame annotation case),
+> ASCII clean.
+> v1.6.1: mixed-sign log-domain floor -- a correctness patch, no
 > public API change. A type:'log' domain spanning zero (min<=0, max>0) drew
 > correctly but NaN'd the view on the FIRST pan/zoom: the reactive scale effect
 > floored the domain to its positive part for RENDER (local xlo/xhi, lo/hi) but

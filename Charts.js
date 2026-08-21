@@ -1903,6 +1903,351 @@ const buildGrid = (parent, opts) => {
 };
 
 // ---------------------------------------------------------------------------
+// Annotation layer (v1.7.0)
+// ---------------------------------------------------------------------------
+//
+// Arbitrary lines / ranges / points / text labels pinned to DATA coordinates
+// on the axis kernel (line / area / bar / bubble / scatter). Two-effect split:
+//
+//   resolve  -- tracks themeVersion + the annotations accessor. Validates each
+//               entry (fail-closed: Number.isFinite, never truthiness), sizes
+//               the pools, and resolves CSS-var colors ONCE into a stable string
+//               array. getComputedStyle lives here only, never per frame.
+//   project  -- tracks scaleVersion + plotBoundsSignal (bumped EVERY pan/zoom
+//               frame). Maps data -> pixels and writes pooled node underscore
+//               fields DIRECTLY (no `.set({...})` object literals). Zero alloc.
+//
+// Solid rules use a pooled `lineNode`; ranges, point markers, and DASHED rules
+// draw through a single `annFillPath` (SVG-exportable). Labels drive a pooled
+// `textNode`. `dispose` detaches annGroup so scene.dispose() releases the tree.
+
+const ANN_BUF_SIZE = 64;
+const ANN_DEAD = 0;
+const ANN_LINE = 1;
+const ANN_RANGE = 2;
+const ANN_POINT = 3;
+const ANN_TEXT = 4;
+const DEFAULT_ANN_COLOR = '#888888';
+const DEFAULT_ANN_FILL = 'rgba(136,136,136,0.15)';
+const DEFAULT_ANN_LABEL_COLOR = '#444444';
+
+const buildAnnotations = (parent, opts) => {
+    // opts: {
+    //   xScale, yScale, plotBoundsBox, plotBoundsSignal, scaleVersion,
+    //   annotationsAcc, themeVersion, swapAxes, container, font, markDirty
+    // }
+    let cap = ANN_BUF_SIZE;
+    let kindBuf = new Int32Array(cap);   // ANN_* code (0 = dead)
+    let axisBuf = new Int32Array(cap);   // 0 = x-axis, 1 = y-axis
+    let dashBuf = new Int32Array(cap);   // 1 = dashed rule
+    let visBuf = new Int32Array(cap);    // 1 = visible (project writes)
+    let d0Buf = new Float64Array(cap);   // value / from / x
+    let d1Buf = new Float64Array(cap);   // to / y
+    let wBuf = new Float64Array(cap);    // stroke width / marker radius
+    let sxBuf = new Float64Array(cap);   // screen primary x
+    let syBuf = new Float64Array(cap);   // screen primary y
+    let sx1Buf = new Float64Array(cap);  // screen secondary x
+    let sy1Buf = new Float64Array(cap);  // screen secondary y
+    // Stable resolved strings/dashes, rebuilt in the (cold) resolve step.
+    const colorArr = [];
+    const labelArr = [];
+    const dashArr = [];
+    const alignArr = [];
+    let annCount = 0;
+
+    const annGroup = parent.add(group({}));
+
+    const linePool = [];
+    const textPool = [];
+
+    const ensurePools = (n) => {
+        while (linePool.length < n) {
+            linePool.push(annGroup.add(lineNode({
+                stroke: DEFAULT_ANN_COLOR,
+                strokeWidth: 1,
+            })));
+        }
+        while (textPool.length < n) {
+            textPool.push(annGroup.add(textNode({
+                font: opts.font(),
+                fill: DEFAULT_ANN_LABEL_COLOR,
+                align: 'left',
+                baseline: 'alphabetic',
+            })));
+        }
+    };
+
+    // D1: the SVG clip idiom leaves the clip rect in the path chunk buffer, so
+    // beginPath() MUST be called AGAIN before the first fill/arc or the clip
+    // rect fills as a giant colored block in the export. Runs on every paint;
+    // reads pre-computed buffers only -- no allocation.
+    const annDraw = (ctx) => {
+        const pb = opts.plotBoundsBox;
+        const plotL = pb.x;
+        const plotT = pb.y;
+        const plotR = pb.x + pb.w;
+        const plotB = pb.y + pb.h;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(plotL, plotT, plotR - plotL, plotB - plotT);
+        ctx.clip();
+        ctx.beginPath(); // D1 caveat: clear the clip rect from the chunk buffer.
+
+        // Range fills (behind rules).
+        for (let i = 0; i < annCount; i++) {
+            if (visBuf[i] !== 1 || kindBuf[i] !== ANN_RANGE) continue;
+            const horizontal = axisBuf[i] === 1 ? !opts.swapAxes : opts.swapAxes;
+            ctx.fillStyle = colorArr[i];
+            if (horizontal) {
+                const y0 = syBuf[i] < sy1Buf[i] ? syBuf[i] : sy1Buf[i];
+                ctx.fillRect(plotL, y0, plotR - plotL, Math.abs(sy1Buf[i] - syBuf[i]));
+            } else {
+                const x0 = sxBuf[i] < sx1Buf[i] ? sxBuf[i] : sx1Buf[i];
+                ctx.fillRect(x0, plotT, Math.abs(sx1Buf[i] - sxBuf[i]), plotB - plotT);
+            }
+        }
+        // Dashed rules.
+        for (let i = 0; i < annCount; i++) {
+            if (visBuf[i] !== 1 || kindBuf[i] !== ANN_LINE || dashBuf[i] !== 1) continue;
+            ctx.strokeStyle = colorArr[i];
+            ctx.lineWidth = wBuf[i];
+            ctx.setLineDash(dashArr[i]);
+            ctx.beginPath();
+            ctx.moveTo(sxBuf[i], syBuf[i]);
+            ctx.lineTo(sx1Buf[i], sy1Buf[i]);
+            ctx.stroke();
+            ctx.setLineDash(_EMPTY_DASH);
+        }
+        // Point markers (one beginPath/fill each -- colors differ).
+        for (let i = 0; i < annCount; i++) {
+            if (visBuf[i] !== 1 || kindBuf[i] !== ANN_POINT) continue;
+            ctx.beginPath();
+            ctx.fillStyle = colorArr[i];
+            ctx.arc(sxBuf[i], syBuf[i], wBuf[i], 0, _TWO_PI);
+            ctx.fill();
+        }
+        ctx.restore();
+    };
+
+    // Fill / marker / dashed-rule node, added FIRST (child 0 of annGroup) so it
+    // renders BEHIND the solid-rule lineNodes and label textNodes. Created after
+    // annDraw is defined -- a sync scheduler paints on add(), invoking the draw.
+    const annFillPath = annGroup.add(pathNode({ draw: (ctx) => annDraw(ctx) }));
+    void annFillPath;
+
+    // Data -> pixels. Reads NO signals (the projectEffect wrapper tracks them),
+    // so resolve() can call it synchronously without leaking scale-version deps
+    // into the resolve effect (keeping resolveColor off the per-frame path).
+    const project = () => {
+        const pb = opts.plotBoundsBox;
+        const plotL = pb.x;
+        const plotT = pb.y;
+        const plotR = pb.x + pb.w;
+        const plotB = pb.y + pb.h;
+        const xS = opts.xScale;
+        const yS = opts.yScale;
+        const swap = opts.swapAxes;
+
+        for (let i = 0; i < annCount; i++) {
+            const k = kindBuf[i];
+            const ln = linePool[i];
+            const tn = textPool[i];
+            if (k === ANN_LINE) {
+                const axisY = axisBuf[i] === 1;
+                const p = (axisY ? yS : xS).map(d0Buf[i]);
+                const vertical = axisY ? swap : !swap;
+                let vis;
+                if (!Number.isFinite(p)) {
+                    vis = 0;
+                } else if (vertical) {
+                    vis = (p >= plotL && p <= plotR) ? 1 : 0;
+                    sxBuf[i] = p; syBuf[i] = plotT;
+                    sx1Buf[i] = p; sy1Buf[i] = plotB;
+                } else {
+                    vis = (p >= plotT && p <= plotB) ? 1 : 0;
+                    sxBuf[i] = plotL; syBuf[i] = p;
+                    sx1Buf[i] = plotR; sy1Buf[i] = p;
+                }
+                visBuf[i] = vis;
+                if (vis === 1 && dashBuf[i] === 0) {
+                    ln._visible = true;
+                    ln._stroke = colorArr[i];
+                    ln._strokeWidth = wBuf[i];
+                    if (vertical) {
+                        ln._x = p; ln._y = plotT; ln._dx = 0; ln._dy = plotB - plotT;
+                    } else {
+                        ln._x = plotL; ln._y = p; ln._dx = plotR - plotL; ln._dy = 0;
+                    }
+                } else {
+                    ln._visible = false;
+                }
+            } else if (k === ANN_RANGE) {
+                const axisY = axisBuf[i] === 1;
+                const s = axisY ? yS : xS;
+                const p0 = s.map(d0Buf[i]);
+                const p1 = s.map(d1Buf[i]);
+                visBuf[i] = (Number.isFinite(p0) && Number.isFinite(p1)) ? 1 : 0;
+                const horizontal = axisY ? !swap : swap;
+                if (horizontal) {
+                    syBuf[i] = p0; sy1Buf[i] = p1;
+                } else {
+                    sxBuf[i] = p0; sx1Buf[i] = p1;
+                }
+                ln._visible = false;
+            } else if (k === ANN_POINT || k === ANN_TEXT) {
+                const px = swap ? yS.map(d1Buf[i]) : xS.map(d0Buf[i]);
+                const py = swap ? xS.map(d0Buf[i]) : yS.map(d1Buf[i]);
+                let vis = Number.isFinite(px) && Number.isFinite(py);
+                if (vis && k === ANN_POINT) {
+                    vis = px >= plotL && px <= plotR && py >= plotT && py <= plotB;
+                }
+                visBuf[i] = vis ? 1 : 0;
+                sxBuf[i] = px; syBuf[i] = py;
+                ln._visible = false;
+            } else {
+                visBuf[i] = 0;
+                ln._visible = false;
+            }
+
+            // Labels / text-type annotations.
+            if (visBuf[i] === 1 && labelArr[i].length > 0) {
+                tn._visible = true;
+                tn._text = labelArr[i];
+                tn._fill = colorArr[i];
+                tn._align = alignArr[i];
+                if (k === ANN_RANGE) {
+                    tn._x = plotL + 4; tn._y = plotT + 12;
+                } else if (k === ANN_LINE) {
+                    tn._x = sxBuf[i] + 4; tn._y = syBuf[i] + 12;
+                } else {
+                    tn._x = sxBuf[i]; tn._y = syBuf[i];
+                }
+            } else {
+                tn._visible = false;
+            }
+        }
+        // Hide surplus pool entries beyond the live count.
+        for (let i = annCount; i < linePool.length; i++) linePool[i]._visible = false;
+        for (let i = annCount; i < textPool.length; i++) textPool[i]._visible = false;
+        opts.markDirty();
+    };
+
+    const resolveInto = (raw, n) => {
+        if (n > cap) {
+            let nc = cap;
+            while (nc < n) nc <<= 1;
+            kindBuf = new Int32Array(nc);
+            axisBuf = new Int32Array(nc);
+            dashBuf = new Int32Array(nc);
+            visBuf = new Int32Array(nc);
+            d0Buf = new Float64Array(nc);
+            d1Buf = new Float64Array(nc);
+            wBuf = new Float64Array(nc);
+            sxBuf = new Float64Array(nc);
+            syBuf = new Float64Array(nc);
+            sx1Buf = new Float64Array(nc);
+            sy1Buf = new Float64Array(nc);
+            cap = nc;
+        }
+        for (let i = 0; i < n; i++) {
+            const a = raw[i];
+            kindBuf[i] = ANN_DEAD;
+            axisBuf[i] = 0;
+            dashBuf[i] = 0;
+            wBuf[i] = 1;
+            colorArr[i] = DEFAULT_ANN_COLOR;
+            labelArr[i] = '';
+            dashArr[i] = _EMPTY_DASH;
+            alignArr[i] = 'left';
+            if (!a || typeof a !== 'object') continue;
+            const t = a.type;
+            if (t === 'line') {
+                if (a.axis !== 'x' && a.axis !== 'y') continue;
+                if (!Number.isFinite(a.value)) continue;
+                kindBuf[i] = ANN_LINE;
+                axisBuf[i] = a.axis === 'y' ? 1 : 0;
+                d0Buf[i] = a.value;
+                wBuf[i] = Number.isFinite(a.width) ? a.width : 1;
+                colorArr[i] = resolveColor(a.color != null ? a.color : DEFAULT_ANN_COLOR, opts.container);
+                if (Array.isArray(a.dash) && a.dash.length > 0) {
+                    dashBuf[i] = 1;
+                    dashArr[i] = a.dash;
+                }
+                if (typeof a.label === 'string') labelArr[i] = a.label;
+            } else if (t === 'range') {
+                if (a.axis !== 'x' && a.axis !== 'y') continue;
+                if (!Number.isFinite(a.from) || !Number.isFinite(a.to)) continue;
+                kindBuf[i] = ANN_RANGE;
+                axisBuf[i] = a.axis === 'y' ? 1 : 0;
+                d0Buf[i] = a.from;
+                d1Buf[i] = a.to;
+                colorArr[i] = resolveColor(a.fill != null ? a.fill : DEFAULT_ANN_FILL, opts.container);
+                if (typeof a.label === 'string') labelArr[i] = a.label;
+            } else if (t === 'point') {
+                if (!Number.isFinite(a.x) || !Number.isFinite(a.y)) continue;
+                kindBuf[i] = ANN_POINT;
+                d0Buf[i] = a.x;
+                d1Buf[i] = a.y;
+                wBuf[i] = Number.isFinite(a.radius) ? a.radius : 3;
+                colorArr[i] = resolveColor(a.color != null ? a.color : DEFAULT_ANN_COLOR, opts.container);
+                if (typeof a.label === 'string') labelArr[i] = a.label;
+            } else if (t === 'text') {
+                if (!Number.isFinite(a.x) || !Number.isFinite(a.y)) continue;
+                if (typeof a.text !== 'string') continue;
+                kindBuf[i] = ANN_TEXT;
+                d0Buf[i] = a.x;
+                d1Buf[i] = a.y;
+                labelArr[i] = a.text;
+                colorArr[i] = resolveColor(a.color != null ? a.color : DEFAULT_ANN_LABEL_COLOR, opts.container);
+                if (a.anchor === 'middle') alignArr[i] = 'center';
+                else if (a.anchor === 'end') alignArr[i] = 'right';
+                else alignArr[i] = 'left';
+            }
+            // Unknown type: slot stays ANN_DEAD (fail-closed).
+        }
+        annCount = n;
+        colorArr.length = n;
+        labelArr.length = n;
+        dashArr.length = n;
+        alignArr.length = n;
+        ensurePools(n);
+    };
+
+    // Resolve step (cold): structure + color. Tracks themeVersion + the
+    // annotations accessor only. project() reads no signals, so calling it here
+    // does not leak scaleVersion into this effect.
+    const disposeResolve = effect(() => {
+        opts.themeVersion();
+        const list = opts.annotationsAcc();
+        const raw = Array.isArray(list) ? list : null;
+        resolveInto(raw, raw ? raw.length : 0);
+        project();
+    });
+
+    // Project step (hot): re-maps to pixels every pan/zoom frame. Zero alloc.
+    const disposeProject = effect(() => {
+        opts.scaleVersion();
+        opts.plotBoundsSignal();
+        project();
+    });
+
+    const dispose = () => {
+        disposeResolve();
+        disposeProject();
+        annGroup.remove(); // Risk 4: detach so scene.dispose() frees the subtree.
+    };
+
+    return {
+        annGroup,
+        dispose,
+        linePool,
+        textPool,
+        get coordBuf() { return d0Buf; },
+        get count() { return annCount; },
+    };
+};
+
+// ---------------------------------------------------------------------------
 // Default margins / config
 // ---------------------------------------------------------------------------
 
@@ -4193,6 +4538,19 @@ const createBaseAxisChart = (config, renderer) => {
     const plotBoundsBox = { x: 0, y: 0, w: 0, h: 0 };
     const plotBoundsSignal = _own(signal(0));
 
+    // -- Annotation layer (v1.7.0) --
+    // `annotations` accessor (static array or a () => Annotation[] signal thunk);
+    // null leaves every downstream branch dead. annThemeVersion re-fires the
+    // annotation resolve/color step on refreshTheme() (bumped at 5600).
+    // annotationsAcc is declared here (before annThemeVersion, which reads it)
+    // rather than beside the crosshair/tooltip config -- the theme signal needs
+    // it in scope.
+    const annotationsAcc = config.annotations != null ? asAccessor(config.annotations) : null;
+    const annThemeVersion = annotationsAcc ? _own(signal(0)) : null;
+    // Assigned in mount() when the layer is built; exposed on _internal so
+    // white-box tests read pool lengths / visibility. null when disabled.
+    let annHandle = null;
+
     // -- Refs that the draw closures read (mutated by an effect) --
     // visibleRef mirrors a public-facing `seriesVisibility[i]` signal so the
     // draw fns (which run outside a reactive context) can read synchronously
@@ -4857,6 +5215,28 @@ const createBaseAxisChart = (config, renderer) => {
                 draw: (ctx) => drawFn(ctx),
             }));
             seriesNodes.push(node);
+        }
+
+        // -- Annotation layer (v1.7.0) --
+        // Added above the series nodes' peers but below the crosshair overlay so
+        // rules/ranges sit over the data yet under the interactive crosshair.
+        // Runtime-isolated: skipped entirely when no `annotations` config exists.
+        if (annotationsAcc) {
+            const ann = buildAnnotations(scene.root, {
+                xScale,
+                yScale,
+                plotBoundsBox,
+                plotBoundsSignal,
+                scaleVersion,
+                annotationsAcc,
+                themeVersion: annThemeVersion,
+                swapAxes,
+                container,
+                font: () => axisStyleRefs.font.value,
+                markDirty: () => { if (scene) scene.markDirty(); },
+            });
+            annHandle = ann;
+            disposers.push(ann.dispose);
         }
 
         // Effect 3: scale/plot changes -> markDirty (path node has no reactive
@@ -5597,6 +5977,9 @@ const createBaseAxisChart = (config, renderer) => {
         crosshairColorRef.value = resolveColor(crosshairColorSpec, container);
         tooltipBgRef.value = resolveColor(tooltipBgSpec, container);
         tooltipBorderRef.value = resolveColor(tooltipBorderSpec, container);
+        // Re-fire the annotation resolve/color step so CSS-var-driven rule /
+        // fill / label colors track the theme. The markDirty below repaints.
+        if (annThemeVersion) annThemeVersion.update((v) => (v + 1) | 0);
         // Update legend swatches too -- they were styled from colorRef at build time.
         if (legendEl) {
             const swatches = legendEl.querySelectorAll('span:first-child');
@@ -5655,6 +6038,10 @@ const createBaseAxisChart = (config, renderer) => {
             scaleVersion,
             plotBoundsBox,
             categoriesRef,
+            // v1.7.0: the annotation layer handle (pools/buffers/dispose), or
+            // null when no `annotations` config. A getter because annHandle is
+            // assigned in mount(), after this object is built.
+            get annotations() { return annHandle; },
         },
     };
 
