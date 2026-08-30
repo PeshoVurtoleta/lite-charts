@@ -5,6 +5,57 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] -- 2026-08
+
+Horizontal-bar `brush` -- shift-drag selection on
+`createBarChart({ orientation: 'horizontal', brush: true })`. Completes the
+horizontal interaction set; the deferred slice from v1.8.0. Additive; the
+vertical / line / scatter brush path stays byte-unchanged.
+
+### Added -- brush on horizontal bars
+
+- **`brush` on `orientation: 'horizontal'`.** A shift-drag selects a value
+  range (screen-X, the value axis under the swap) crossed with a band set
+  (screen-Y). It emits through `chart.brush` a distinct payload
+  `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` -- `bands` is the
+  selected category keys, `bandMin` / `bandMax` the inclusive band-index span,
+  `ids` the matching primary-series row indices. The vertical brush keeps its
+  `{ xMin, xMax, yMin, yMax, ids }` shape. Previously threw at construction.
+
+### Design
+
+- **Map at the gesture boundary.** Every change is a `swapAxes ? <remapped> :
+  <current>` selection at a call site (`_commitBrush`, `drawBrushOverlay`,
+  `brushFacade.set`). The pure helpers `_normalizeBrushRect` / `_brushPxToData` /
+  `_computeBrushIds` / `makeBandScale` stay byte-identical -- `_computeBrushIds`
+  applies unchanged because a bar stores its band index in `state.xs` and its
+  value in `state.ys`. Value bounds come from `yScale.invert`; the band set from
+  `xScale.invert` (a pixel floored to a band index). The overlay rect spans
+  `xScale.leftEdge(bandMin)` .. `leftEdge(bandMax) + bandWidth` (band edges, not
+  the center). Per-frame draw stays 0 B; the commit allocates only at gesture
+  rate (sub-Hz), matching the existing brush precedent.
+- **Fail-closed.** An empty-category chart (`xScale.invert` -> -1) commits
+  `null`, never a `bands: [undefined]` payload. Horizontal + a `log` value axis
+  still throws at construction (checked before `brush`).
+
+### Fixed
+
+- **`setBrush` no longer treats a `null` bound as zero.** The horizontal facade
+  validated with `Number.isFinite(+v.valueMin)`, but `+null === 0` is finite, so
+  a `null` value bound silently became value 0. Bounds are now forced to `NaN`
+  before the finite check (`v.field == null ? NaN : +v.field`), so a `null`
+  bound fails closed with a thrown error. Numeric coercion of real values is
+  unchanged.
+
+### Coverage
+
+- 7 new tests (406 -> 413): value-range + band-set mapping from a shift-drag,
+  full-plot select, sub-threshold click-to-clear, fail-closed facade validation,
+  a vertical-brush regression guard, band-edge overlay alignment, brush/clear
+  retention, and the empty-category fail-closed path. HB1 / HB3 / HB5 / HB7 each
+  proven load-bearing by measured reversion. Plus a 0-B/frame horizontal-brush
+  overlay torture case (A15). Torture green, ASCII clean.
+
 ## [1.8.0] -- 2026-08
 
 Horizontal-bar interactions -- `pan`, `zoom`, and a value `grid` on

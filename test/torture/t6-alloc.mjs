@@ -357,4 +357,48 @@ export function run() {
             () => `A14: horizontal pan+zoom storm allocated ${bytesPerOp.toFixed(3)} B/op > 16`);
         c.destroy();
     }
+
+    // --- 9. horizontal-bar brush overlay redraw budget (A15, v1.9.0) ----------
+    // The horizontal brush commits a value-range x band-set payload (sub-Hz,
+    // allocates its bands/ids arrays by the _computeBrushIds precedent), but the
+    // OVERLAY DRAW that re-runs every frame must stay 0 B: it re-derives pixels
+    // via yScale.map(valueMin/valueMax) + xScale.leftEdge(bandMin/bandMax) with no
+    // per-frame allocation. This gate mounts a horizontal bar with an ACTIVE
+    // brush, then drives a redraw storm through drawBrushOverlay -- the same shape
+    // as the A12 redraw gate -- pinning maxMajor:0 / maxArrayBuffersGrowth:0. The
+    // <=16 B/op ceiling matches A7/A12/A14; the swap-branch-specific claim is the
+    // <=2 B/op differential against a VERTICAL-brush control on the same dataset,
+    // so a per-frame overlay regression on the horizontal branch shows up the same
+    // as a pooled-buffer leak would.
+    {
+        const mk = (horizontal) => {
+            const c = createBarChart({
+                series: [
+                    { name: 'a', data: Array.from({ length: 100 }, (_, i) => ({ x: 'c' + i, y: (i % 13) - 6 })) },
+                    { name: 'b', data: Array.from({ length: 100 }, (_, i) => ({ x: 'c' + i, y: (i % 5) + 1 })) },
+                ],
+                width: 600, height: 400, orientation: horizontal ? 'horizontal' : 'vertical',
+                brush: true, schedule: (fn) => fn(),
+            });
+            const cv = createEventCanvas(600, 400);
+            c.mount(cv);
+            if (horizontal) {
+                c.setBrush({ valueMin: -3, valueMax: 4, bandMin: 10, bandMax: 60 });
+            } else {
+                c.setBrush({ xMin: 10, xMax: 60, yMin: -3, yMax: 4 });
+            }
+            quietCanvas(cv);
+            return c;
+        };
+        const hz = mk(true), vt = mk(false);
+        const gH = runOpsGate(() => { hz.redraw(); }, { ops: 50000, warmup: 500 });
+        const gV = runOpsGate(() => { vt.redraw(); }, { ops: 50000, warmup: 500 });
+        if (!gH.report.ok) die(allocFailMsg('A15.hbrush-redraw', gH.report, gH.summary));
+        check(gH.bytesPerOp <= 16.0,
+            () => `A15: horizontal brush redraw allocated ${gH.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gH.bytesPerOp - gV.bytesPerOp) <= 2.0,
+            () => `A15: horizontal ${gH.bytesPerOp.toFixed(3)} B/op vs vertical ${gV.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
+        hz.destroy();
+        vt.destroy();
+    }
 }

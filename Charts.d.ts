@@ -183,6 +183,24 @@ export interface BrushSelection {
 }
 
 /**
+ * Horizontal-bar brush selection (v1.9.0). On a `createBarChart({ orientation:
+ * 'horizontal' })` the value axis is on screen-X and the category band on
+ * screen-Y, so a shift-drag selects a value RANGE crossed with a BAND SET. This
+ * shape -- not `BrushSelection` -- is what `chart.brush()` returns for a
+ * horizontal bar. `bands` is the selected category keys; `bandMin` / `bandMax`
+ * the inclusive band-index span; `ids` the primary-series row indices inside the
+ * selection (`null` when set programmatically via `setBrush`).
+ */
+export interface HorizontalBarBrushSelection {
+    valueMin: number;
+    valueMax: number;
+    bandMin: number;
+    bandMax: number;
+    bands: Array<string | number>;
+    ids: number[] | null;
+}
+
+/**
  * Brush visual style. Defaults: translucent accent fill with a dashed
  * accent outline. Set `lineDash: []` for a solid outline.
  */
@@ -470,14 +488,17 @@ export interface Chart {
      * Programmatic `setBrush()` does NOT recompute ids -- pass `ids`
      * yourself if you want them; gesture-driven brushes always
      * populate ids from the primary series.
+     *
+     * A horizontal bar chart (`orientation: 'horizontal'`) uses the
+     * `HorizontalBarBrushSelection` shape instead of `BrushSelection` (v1.9.0).
      */
-    readonly brush: (() => BrushSelection | null) & {
-        peek(): BrushSelection | null;
-        set(v: BrushSelection | null): void;
+    readonly brush: (() => BrushSelection | HorizontalBarBrushSelection | null) & {
+        peek(): BrushSelection | HorizontalBarBrushSelection | null;
+        set(v: BrushSelection | HorizontalBarBrushSelection | null): void;
         clear(): void;
     };
     /** Alias for `chart.brush.set(v)`. Throws if `brush: true` not in config. */
-    readonly setBrush: (v: BrushSelection | null) => void;
+    readonly setBrush: (v: BrushSelection | HorizontalBarBrushSelection | null) => void;
     /** Alias for `chart.brush.clear()`. Throws if `brush: true` not in config. */
     readonly clearBrush: () => void;
     /** One signal per series. Read in a reactive context to bind external UI; write to toggle. */

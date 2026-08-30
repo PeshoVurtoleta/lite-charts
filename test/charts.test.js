@@ -4080,13 +4080,12 @@ describe('createBarChart -- horizontal orientation (v1.5.0)', () => {
     it('A11: unsupported horizontal combinations throw at construction', () => {
         const base = { data: [{ x: 'A', y: 1 }], schedule: (fn) => fn() };
         // v1.5.0: horizontal pan/zoom/grid are now supported via the axis-role
-        // swap. Only brush (pixel-band mapping not yet remapped) and a log yScale
-        // (domain-flooring kernel still assumes standard orientation) fail closed,
-        // alongside a bad orientation string.
+        // swap; v1.9.0 adds horizontal brush. Only a log yScale (domain-flooring
+        // kernel still assumes standard orientation) fails closed, alongside a
+        // bad orientation string.
         const cases = [
             ['diagonal orientation', { orientation: 'diagonal' }],
             ['horizontal + log', { orientation: 'horizontal', yScale: { type: 'log' } }],
-            ['horizontal + brush', { orientation: 'horizontal', brush: true }],
         ];
         for (const [label, extra] of cases) {
             assert.throws(
@@ -4096,7 +4095,7 @@ describe('createBarChart -- horizontal orientation (v1.5.0)', () => {
             );
         }
         // Sanity: the now-supported horizontal interactions do NOT throw and mount.
-        for (const extra of [{}, { pan: true }, { zoom: true }, { grid: true }, { pan: true, zoom: true, grid: true }]) {
+        for (const extra of [{}, { pan: true }, { zoom: true }, { grid: true }, { brush: true }, { pan: true, zoom: true, grid: true }]) {
             assert.doesNotThrow(() => {
                 const c = createBarChart(Object.assign({}, base, { orientation: 'horizontal' }, extra));
                 const cv = createMockCanvas(400, 300);
@@ -7770,20 +7769,17 @@ describe('v1.8.0 -- horizontal-bar interactions', () => {
     });
 
     // -- A4: unsupported combos still fail closed with a named message ------
-    it('A4: log-value and brush still throw at construction, before alloc', () => {
+    it('A4: log-value still throws at construction, before alloc', () => {
         const base = { data: [{ x: 'A', y: 1 }], orientation: 'horizontal', schedule: (fn) => fn() };
         assert.throws(
             () => createBarChart(Object.assign({}, base, { yScale: { type: 'log' } })),
             /log yScale is not supported/,
             'horizontal + log value axis must throw a named error',
         );
-        assert.throws(
-            () => createBarChart(Object.assign({}, base, { brush: true })),
-            /horizontal orientation with brush/,
-            'horizontal + brush must throw a named error',
-        );
+        // v1.9.0: horizontal + brush is now supported (value-range x band-set
+        // payload); the behavioral suite for it lives with the qa layer.
         // Note: A5 (zero-alloc gesture path, 0 B/frame draw) is covered by the
-        // torture gate, test/torture/t6-alloc.mjs section 8 (A14).
+        // torture gate, test/torture/t6-alloc.mjs section 8 (A14) + 9 (A15).
     });
 
     // -- A6: mount -> pan -> destroy leaves no node residue -----------------
@@ -7806,5 +7802,231 @@ describe('v1.8.0 -- horizontal-bar interactions', () => {
         c.mount(createInteractiveMockCanvas(400, 300));
         c.destroy();
         assert.doesNotThrow(() => c.destroy(), 'second destroy must be a no-op');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.9.0 -- horizontal-bar brush (value-range x band-set)
+// ---------------------------------------------------------------------------
+//
+// The cut deferred from v1.8.0. Under the horizontal axis-role swap the VALUE
+// axis is on screen-X (yScale) and the BAND axis on screen-Y (xScale is the
+// band scale). A shift+drag therefore selects a value RANGE (X extent) x a
+// BAND SET (Y extent), emitted as a distinct payload
+// { valueMin, valueMax, bandMin, bandMax, bands, ids } -- NOT the vertical
+// { xMin, xMax, yMin, yMax, ids }. Every branch is a `swapAxes ?` selection at
+// the call site; the pure helpers (_normalizeBrushRect / _brushPxToData /
+// _computeBrushIds / makeBandScale) stay byte-identical, so the vertical /
+// line / scatter brush path is provably untouched (HB3 regression guard).
+describe('v1.9.0 -- horizontal-bar brush', () => {
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+
+    // Category order 'A','B' => band index 0,1. Value domain spans [0,100]
+    // (zero baseline + max 100). margin 0 so plot fills the 400x300 canvas.
+    const CATS = ['A', 'B'];
+    const mkH = (extra) => createBarChart(Object.assign({
+        data: [{ x: 'A', y: 100 }, { x: 'B', y: 50 }],
+        orientation: 'horizontal',
+        width: 400, height: 300,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        schedule: (fn) => fn(),
+    }, extra));
+
+    const shiftDrag = (canvas, x0, y0, x1, y1) => {
+        canvas.dispatch('pointerdown', { clientX: x0, clientY: y0, button: 0, pointerId: 1, shiftKey: true, preventDefault: () => {} });
+        canvas.dispatch('pointermove', { clientX: x1, clientY: y1, pointerId: 1, shiftKey: true });
+        canvas.dispatch('pointerup',   { clientX: x1, clientY: y1, pointerId: 1, shiftKey: true });
+    };
+
+    // -- HB1: a shift-drag maps X->value range and Y->band set --------------
+    it('HB1: shift-drag emits value bounds from yScale.invert and the spanned band set', () => {
+        const c = mkH({ brush: true });
+        const canvas = createInteractiveMockCanvas(400, 300);
+        c.mount(canvas);
+
+        // Expected bounds derived from the SAME live scales (brush does not pan,
+        // so the scales are identical before/after the gesture).
+        const exVMin = Math.min(c.yScale.invert(120), c.yScale.invert(360));
+        const exVMax = Math.max(c.yScale.invert(120), c.yScale.invert(360));
+        const eb0 = c.xScale.invert(40), eb1 = c.xScale.invert(260);
+        const exBMin = Math.min(eb0, eb1), exBMax = Math.max(eb0, eb1);
+        const exBands = [];
+        for (let b = exBMin; b <= exBMax; b++) exBands.push(CATS[b]);
+
+        shiftDrag(canvas, 120, 40, 360, 260);
+        const b = c.brush();
+
+        assert.ok(b != null, 'shift-drag must commit a brush');
+        // Payload is the horizontal shape, not the vertical one.
+        assert.ok('valueMin' in b && 'bandMin' in b && 'bands' in b, 'horizontal payload shape');
+        assert.ok(!('xMin' in b), 'must NOT carry the vertical xMin/yMin shape');
+        assert.ok(Math.abs(b.valueMin - exVMin) < 1e-6, 'valueMin from yScale.invert; got ' + b.valueMin + ' want ' + exVMin);
+        assert.ok(Math.abs(b.valueMax - exVMax) < 1e-6, 'valueMax from yScale.invert; got ' + b.valueMax + ' want ' + exVMax);
+        assert.equal(b.bandMin, exBMin, 'bandMin = floored band index at the Y extent');
+        assert.equal(b.bandMax, exBMax, 'bandMax = floored band index at the Y extent');
+        assert.deepEqual(b.bands, exBands, 'bands = category keys across [bandMin,bandMax]');
+        assert.ok(Array.isArray(b.ids), 'ids is an array (primary-series row indices)');
+        c.destroy();
+    });
+
+    // -- HB2: full-plot drag selects all bands + full value span; click clears
+    it('HB2: full-plot drag selects every band; sub-threshold shift-click clears', () => {
+        const c = mkH({ brush: true });
+        const canvas = createInteractiveMockCanvas(400, 300);
+        c.mount(canvas);
+
+        shiftDrag(canvas, 0, 0, 400, 300);
+        const b = c.brush();
+        assert.ok(b != null);
+        assert.equal(b.bandMin, 0, 'covers the first band');
+        assert.equal(b.bandMax, CATS.length - 1, 'covers the last band');
+        assert.equal(b.bands.length, CATS.length, 'all categories selected');
+        assert.ok(Math.abs(b.valueMin - c.yScale.invert(0)) < 1e-6, 'value span reaches the left plot edge');
+        assert.ok(Math.abs(b.valueMax - c.yScale.invert(400)) < 1e-6, 'value span reaches the right plot edge');
+
+        // A shift-click (< 3px movement) clears the active brush.
+        shiftDrag(canvas, 250, 150, 251, 150);
+        assert.strictEqual(c.brush(), null, 'sub-threshold shift-click clears the brush');
+        c.destroy();
+    });
+
+    // -- HB3: facade validation fails closed; vertical path is byte-untouched
+    it('HB3: horizontal setBrush validates fail-closed; the vertical brush shape is unchanged', () => {
+        const c = mkH({ brush: true });
+        c.mount(createInteractiveMockCanvas(400, 300));
+        // A non-finite value bound must throw, never coerce null->0.
+        assert.throws(
+            () => c.setBrush({ valueMin: null, valueMax: 80, bandMin: 0, bandMax: 1 }),
+            /horizontal brush must be null/,
+            'null value bound must fail closed at the facade',
+        );
+        // A valid horizontal payload round-trips.
+        c.setBrush({ valueMin: 20, valueMax: 80, bandMin: 0, bandMax: 0, bands: ['A'], ids: null });
+        const hb = c.brush();
+        assert.equal(hb.valueMin, 20);
+        assert.equal(hb.valueMax, 80);
+        assert.equal(hb.bandMin, 0);
+        assert.deepEqual(hb.bands, ['A']);
+        c.destroy();
+
+        // Regression: the VERTICAL brush path must be untouched by the swap
+        // branch -- setBrush still yields exactly the four {x,y} bounds.
+        const v = createBarChart({
+            data: [{ x: 'A', y: 100 }, { x: 'B', y: 50 }],
+            orientation: 'vertical', brush: true,
+            width: 400, height: 300, schedule: (fn) => fn(),
+        });
+        v.mount(createInteractiveMockCanvas(400, 300));
+        v.setBrush({ xMin: 2, xMax: 5, yMin: 10, yMax: 60 });
+        const vb = v.brush();
+        assert.equal(vb.xMin, 2); assert.equal(vb.xMax, 5);
+        assert.equal(vb.yMin, 10); assert.equal(vb.yMax, 60);
+        assert.ok(!('valueMin' in vb), 'vertical payload must not gain horizontal fields');
+        v.destroy();
+    });
+
+    // -- HB4: construction -- brush now allowed; log-value still fails closed
+    it('HB4: horizontal + brush constructs; horizontal + brush + log-value still throws', () => {
+        assert.doesNotThrow(
+            () => mkH({ brush: true }).destroy(),
+            'horizontal + brush must no longer throw at construction',
+        );
+        assert.throws(
+            () => createBarChart({
+                data: [{ x: 'A', y: 1 }], orientation: 'horizontal',
+                brush: true, yScale: { type: 'log' }, schedule: (fn) => fn(),
+            }),
+            /log yScale is not supported/,
+            'log value axis is checked first and still fails closed',
+        );
+    });
+
+    // -- HB5: overlay rect aligns to band EDGES, not band centers -----------
+    it('HB5: brush overlay spans band leftEdge..leftEdge+bandWidth (not the center)', () => {
+        const c = mkH({ brush: true });
+        const canvas = createMockCanvas(400, 300);
+        c.mount(canvas);
+        const ctx = canvas.getContext('2d');
+
+        c.setBrush({ valueMin: 20, valueMax: 80, bandMin: 0, bandMax: 0, bands: ['A'], ids: null });
+        ctx.calls.length = 0;
+        c.redraw();
+
+        const fill = ctx.calls.filter((k) => k[0] === 'fillRect').pop();
+        assert.ok(fill, 'overlay must emit a fillRect for the active brush');
+        const [rx, ry, rw, rh] = fill[1];
+
+        // X extent tracks the value axis (yScale under swap).
+        const exX0 = Math.min(c.yScale.map(20), c.yScale.map(80));
+        const exX1 = Math.max(c.yScale.map(20), c.yScale.map(80));
+        assert.ok(Math.abs(rx - exX0) < 1e-6, 'rect left = yScale.map(valueMin)');
+        assert.ok(Math.abs((rx + rw) - exX1) < 1e-6, 'rect right = yScale.map(valueMax)');
+
+        // Y extent MUST use band edges. Center-based math (xScale.map) would put
+        // ry at ~76.8 (the band center) instead of leftEdge(0)~14.6 -- a
+        // half-band misalignment. This is the load-bearing check for T3.
+        const edge0 = c.xScale.leftEdge(0);
+        assert.ok(Math.abs(ry - edge0) < 1e-6, 'rect top = band leftEdge, not center; got ' + ry + ' want ' + edge0);
+        assert.ok(Math.abs((ry + rh) - (edge0 + c.xScale.bandWidth)) < 1e-6, 'rect bottom = leftEdge + bandWidth');
+        assert.ok(Math.abs(ry - c.xScale.map(0)) > 1, 'rect top must NOT sit at the band center (half-band guard)');
+        c.destroy();
+    });
+
+    // -- HB6: mount -> brush/clear -> destroy leaks no nodes -----------------
+    it('HB6: 50 brush/clear cycles leave zero node residue; destroy idempotent', () => {
+        const before = stats().activeNodes;
+        for (let i = 0; i < 50; i++) {
+            const c = mkH({ brush: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            shiftDrag(canvas, 120, 40, 360, 260);   // commit
+            c.clearBrush();                           // clear
+            c.destroy();
+        }
+        assert.equal(stats().activeNodes - before, 0, 'brush cycles must leave no retained nodes');
+
+        const c = mkH({ brush: true });
+        c.mount(createInteractiveMockCanvas(400, 300));
+        c.destroy();
+        assert.doesNotThrow(() => c.destroy(), 'second destroy is a no-op');
+    });
+
+    // -- HB7: empty-category chart fails closed (no undefined band) ----------
+    it('HB7: a shift-drag on an empty-category chart emits null, never an undefined band', () => {
+        const c = createBarChart({
+            data: [], orientation: 'horizontal', brush: true,
+            width: 400, height: 300, margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(400, 300);
+        c.mount(canvas);
+        // xScale.invert returns -1 with zero categories; the commit must fail
+        // closed to null rather than emit bands: [undefined] / bandMin: -1.
+        shiftDrag(canvas, 120, 40, 360, 260);
+        assert.strictEqual(c.brush(), null, 'empty-category brush must be null (fail closed)');
+        c.destroy();
     });
 });

@@ -17,14 +17,27 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.8.0 -- horizontal-bar interactions (minor). `createBarChart({
-orientation: 'horizontal' })` now accepts `pan`, `zoom`, and a value `grid` --
-the value axis (on screen-X under the swap) pans and zooms, the band axis stays
-pinned. Built by remapping the existing linear pan/zoom kernels at each gesture
-boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical
-and the vertical path is unchanged. `brush` and a `log` value axis on a
-horizontal bar still fail closed at construction. **406/406 tests pass** plus a
-torture/stress gate (`npm run torture`).
+**Status:** v1.9.0 -- horizontal-bar `brush` (minor). `createBarChart({
+orientation: 'horizontal', brush: true })` now selects a value range crossed
+with a band set on shift-drag, emitting a `{ valueMin, valueMax, bandMin,
+bandMax, bands, ids }` payload through `chart.brush`. Completes the horizontal
+interaction set (pan / zoom / grid landed in v1.8.0). Built as a `swapAxes ?
+...` selection at each brush call site, so the vertical / line / scatter brush
+path is byte-unchanged. A `log` value axis on a horizontal bar still fails
+closed at construction. **413/413 tests pass** plus a torture/stress gate
+(`npm run torture`).
+
+**New in v1.9.0:**
+- **Horizontal bars brush.** `createBarChart({ orientation: 'horizontal',
+  brush: true })`. A shift-drag selects a value range (screen-X, the value axis
+  under the swap) crossed with a band set (screen-Y); `chart.brush()` returns
+  `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` -- `bands` the selected
+  category keys, `ids` the matching primary-series rows. The vertical brush keeps
+  its `{ xMin, xMax, yMin, yMax, ids }` shape. Zero per-frame draw allocation is
+  preserved (a `swapAxes ? ...` selection at each brush call site; the pure brush
+  helpers are byte-identical). Fail-closed: an empty-category chart commits
+  `null` (never an undefined band), and a `log` value axis still throws at
+  construction. See "Horizontal bar brush" below.
 
 **New in v1.8.0:**
 - **Horizontal bars pan, zoom, and grid.** `createBarChart({ orientation:
@@ -1092,9 +1105,49 @@ chart.mount(document.querySelector('#bars'));
   `_clampToBounds` kernels are byte-identical to the vertical path; horizontal
   support is a `swapAxes ? <remapped> : <current>` selection made once per
   gesture, and the per-frame draw stays 0 B.
-- **Still fail-closed.** Horizontal + `brush` throws at construction (a
-  value-range + band-ids selection is a separate future cut), as does horizontal
-  + a `log` value axis. Both fire before any signal is allocated.
+- **Still fail-closed here.** Horizontal + a `log` value axis throws at
+  construction, before any signal is allocated. (Horizontal + `brush` is
+  supported as of v1.9.0 -- see the next section.)
+
+## Horizontal bar brush (v1.9.0)
+
+The one interaction deferred from v1.8.0. On a horizontal bar the value axis is
+on screen-X and the category band on screen-Y, so a shift-drag selects a **value
+range** crossed with a **band set** -- a different shape than the vertical rect
+brush, and it emits a different payload:
+
+```js
+const chart = createBarChart({
+  data: [{ x: 'Mon', y: 40 }, { x: 'Tue', y: 72 }, { x: 'Wed', y: 55 }],
+  orientation: 'horizontal',
+  brush: true,        // shift-drag selects value-range x band-set
+});
+chart.mount(document.querySelector('#bars'));
+
+// after a shift-drag, read the selection (chart.brush() is a tracked accessor):
+// chart.brush() -> {
+//   valueMin, valueMax,      // value bounds (from yScale.invert of the X extent)
+//   bandMin, bandMax,        // inclusive band-index span (from the Y extent)
+//   bands,                   // the selected category keys, e.g. ['Mon','Tue']
+//   ids,                     // primary-series row indices inside the selection
+// }
+```
+
+- **A distinct payload.** The vertical / line / scatter brush keeps its
+  `{ xMin, xMax, yMin, yMax, ids }` shape; the horizontal bar emits
+  `{ valueMin, valueMax, bandMin, bandMax, bands, ids }`. `chart.brush()` returns
+  whichever matches the chart, and `setBrush` validates the matching shape.
+- **The overlay tracks band edges.** The selection rect spans the value pixels
+  and the full band rows it covers (`leftEdge(bandMin)` to `leftEdge(bandMax) +
+  bandWidth`), so it aligns with the drawn bars rather than their centers.
+- **Fail-closed.** A `null` value bound passed to `setBrush` throws (it is not
+  coerced to 0); a shift-drag on an empty-category chart commits `null` rather
+  than a `bands: [undefined]` payload; a `log` value axis still throws at
+  construction (checked before `brush`).
+- **Zero per-frame cost.** Every horizontal branch is a `swapAxes ? ...`
+  selection at a brush call site; the pure brush helpers are byte-identical to
+  the vertical path, and the per-frame overlay draw stays 0 B. The commit
+  allocates only at gesture rate.
 
 ## Log scale (y: v1.4.0-alpha.0; x: v1.6.0)
 
@@ -1349,8 +1402,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.6.0** | X-axis log scale. `xScale: { type: 'log' }` now works on the continuous axis-kernel charts (line / area / scatter / bubble): base-10 log projection, decade ticks via `logTicks`, and log-space pan/zoom -- symmetric with the y-axis, built on the v1.5.1 projection fix. Fail-closed: a non-positive x-domain throws at mount naming the domain; x-log on a categorical (bar / band) or time x-axis throws at construction. Common linear-x path byte-unchanged. 383 tests + the T6.A13 torture gate extended to the x-log projection body. |
 | **v1.6.1** | Correctness patch. A mixed-sign log domain (`min <= 0, max > 0`) floored to positive for drawing but kept the raw non-positive min in the pan/zoom bounds snapshot (`_dataDomain`), so the first gesture took `log()` of a value `<= 0` and NaN'd the view. `_dataDomain`'s min is now floored to the same positive part the render path uses, on both x and y. The no-positive-extent case still throws at mount (the floor cannot mask it); the linear/time path and the per-frame draw are byte-unchanged. 390 tests (7 new: y-pan, x/y positive-domain regression, x/y fail-closed throw, x/y zoom-path) + the T6.A13 torture gate. |
 | **v1.7.0** | Annotation layer. `annotations: [...]` (static or `() => Annotation[]`) puts data-pinned `line` / `range` / `point` / `text` marks on any axis-kernel chart. They re-project through the live scales -- tracking pan / zoom and log axes (a value `<= 0` on a log axis does not draw, fail-closed like the series) -- render above the series and below the crosshair, and appear in `exportSVG`. `color` / `fill` accept `--css-var` tokens, re-resolved on `refreshTheme`. Zero per-frame allocation (the project step writes pooled-node fields directly; color resolution is confined to a cold resolve step); the whole layer is absent when unset. 400 tests (10 new: projection, pan-clip, reactive range, exportSVG parity, theme re-resolve, log + linear fail-closed, runtime isolation, horizontal-bar swap, pool retention) + a 0-B/frame annotation torture case. |
-| **v1.8.0** (this) | Horizontal-bar interactions. `createBarChart({ orientation: 'horizontal' })` now accepts `pan` / `zoom` / value `grid`: the value axis (on screen-X under the swap) pans and zooms while the band axis stays pinned, `view.yMin` / `view.yMax` addressing the value axis. Built by remapping the linear pan/zoom kernels at each gesture boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical and the vertical path is unchanged; the per-frame draw is still 0 B. Horizontal + `brush` and horizontal + a `log` value axis still fail closed at construction. 406 tests (6 new: value-axis pan, band-pin control, cursor-anchored zoom, vertical value grid, fail-closed throws, mount/pan/destroy retention -- each proven load-bearing by measured reversion) + a horizontal-interaction 0-B torture case. |
-| v1.8.x / v1.9.0 (candidates) | horizontal-bar `brush` (a value-range + band-ids payload) and band-axis multi-select; configurable brush modifier; brush IDs across all visible series; time-series variants (ride the annotation `range` primitive for weekend / market-hours shading); legend virtualization via `lite-virtual`. |
+| **v1.8.0** | Horizontal-bar interactions. `createBarChart({ orientation: 'horizontal' })` now accepts `pan` / `zoom` / value `grid`: the value axis (on screen-X under the swap) pans and zooms while the band axis stays pinned, `view.yMin` / `view.yMax` addressing the value axis. Built by remapping the linear pan/zoom kernels at each gesture boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical and the vertical path is unchanged; the per-frame draw is still 0 B. Horizontal + `brush` and horizontal + a `log` value axis still fail closed at construction. 406 tests (6 new: value-axis pan, band-pin control, cursor-anchored zoom, vertical value grid, fail-closed throws, mount/pan/destroy retention -- each proven load-bearing by measured reversion) + a horizontal-interaction 0-B torture case. |
+| **v1.9.0** (this) | Horizontal-bar `brush`. A shift-drag on `createBarChart({ orientation: 'horizontal', brush: true })` selects a value range (screen-X) crossed with a band set (screen-Y), emitting a distinct `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` payload; the vertical brush keeps `{ xMin, xMax, yMin, yMax, ids }`. Every branch is a `swapAxes ? ...` selection at a brush call site, so `_normalizeBrushRect` / `_brushPxToData` / `_computeBrushIds` / `makeBandScale` stay byte-identical and the vertical path is unchanged; the overlay draw stays 0 B. Fail-closed: an empty-category chart commits `null` (no undefined band), `setBrush` rejects a `null` bound instead of coercing it to 0, and a `log` value axis still throws. 413 tests (7 new: value-range + band-set mapping, full-plot select, click-to-clear, facade validation, a vertical-brush regression guard, band-edge overlay alignment, empty-category fail-close -- HB1/HB3/HB5/HB7 proven load-bearing by reversion) + a 0-B horizontal-brush torture case. |
+| v1.9.x / v1.10.0 (candidates) | band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series; time-series variants (ride the annotation `range` primitive for weekend / market-hours shading); legend virtualization via `lite-virtual`. |
 
 ## Ecosystem
 

@@ -10,7 +10,29 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.8.0 (current): horizontal-bar interactions -- additive, no public API
+> v1.9.0 (current): horizontal-bar brush -- additive; completes the horizontal
+> interaction set (the slice deferred from v1.8.0). createBarChart({
+> orientation:'horizontal', brush:true}) selects on shift-drag a value range
+> (screen-X, the value axis under the swap, via yScale.invert) crossed with a
+> band set (screen-Y, via xScale.invert -> band index). It emits a DISTINCT
+> payload {valueMin, valueMax, bandMin, bandMax, bands, ids} (bands = category
+> keys; ids = primary-series rows) -- the vertical/line/scatter brush keeps
+> {xMin, xMax, yMin, yMax, ids}. Built as a swapAxes ? <remapped> : <current>
+> selection at each brush call site (_commitBrush, drawBrushOverlay,
+> brushFacade.set); the pure helpers _normalizeBrushRect / _brushPxToData /
+> _computeBrushIds / makeBandScale stay BYTE-IDENTICAL -- _computeBrushIds
+> applies unchanged because a bar stores its band index in state.xs and value in
+> state.ys. The overlay rect spans xScale.leftEdge(bandMin)..leftEdge(bandMax)+
+> bandWidth (band edges, not centers); per-frame draw 0 B, commit allocates at
+> gesture rate only. FAILS CLOSED: an empty-category chart (xScale.invert -> -1)
+> commits null (never bands:[undefined]); setBrush forces a null bound to NaN
+> before Number.isFinite (a null value bound is NOT coerced to 0); horizontal +
+> a log value axis still throws at construction, checked before brush. 7 new
+> tests (406->413): value-range+band-set mapping, full-plot select, click-clear,
+> facade validation, vertical-brush regression guard, band-edge overlay
+> alignment, empty-category fail-close -- HB1/HB3/HB5/HB7 proven load-bearing by
+> measured reversion. torture ok (0-B overlay storm, A15), ASCII clean.
+> v1.8.0: horizontal-bar interactions -- additive, no public API
 > change beyond enabling existing flags on a new orientation.
 > createBarChart({orientation:'horizontal'}) now accepts pan, zoom, and a value
 > grid. Under the axis-role swap the VALUE axis is on screen-X (bound via
@@ -1336,13 +1358,13 @@ charts dynamically.
   established (mock-WebGL2-context unit tests + real-GPU
   Playwright). Bench target: 1M scatter points at 60fps with
   signal-driven pan/zoom.
-- v1.8.x / v1.9.0 (candidates): horizontal-bar brush (a value-range +
-  band-axis category ids payload, and band multi-select -- a different
-  shape than the vertical rect brush, so it was split out of the v1.8.0
-  cut); time-series specialized variants (auto-formatted time axes,
-  hour/day/week binning helpers, weekend/market-hours shading riding the
-  v1.7.0 annotation range primitive); legend virtualization via
-  `@zakkster/lite-virtual` (for charts with hundreds of series).
+- v1.9.x / v1.10.0 (candidates): horizontal-bar brush band-axis
+  multi-select refinements + a configurable brush modifier; brush ids
+  across all visible series (currently primary-series only); time-series
+  specialized variants (auto-formatted time axes, hour/day/week binning
+  helpers, weekend/market-hours shading riding the v1.7.0 annotation range
+  primitive); legend virtualization via `@zakkster/lite-virtual` (for
+  charts with hundreds of series).
 - v2.0.0 (possible): renderer-agnostic kernel refactor (if
   lite-charts-gl proves out, fold the renderer choice into core);
   deeper SSR support.

@@ -4495,20 +4495,16 @@ const createBaseAxisChart = (config, renderer) => {
 
     // v1.8.0: horizontal bar charts support pan, zoom, and grid via the
     // axis-role swap (the linear kernels are remapped at each gesture boundary,
-    // buildGrid emits vertical value rules). Two combinations still fail CLOSED
-    // at construction, naming the combination: a log yScale (domain-flooring
-    // kernel still assumes standard orientation) and brush (a value-range + band
-    // ids payload not yet designed). These read `config` directly and
-    // fire BEFORE any signal alloc -- before swapAxes resolution below, before
-    // viewSig/brushSig, before _dataDomain -- because the derived pan/zoom/grid
-    // flags are resolved further down.
+    // buildGrid emits vertical value rules). v1.9.0 adds horizontal brush (a
+    // value-range x band-set payload committed at the gesture boundary). One
+    // combination still fails CLOSED at construction, naming the combination: a
+    // log yScale (domain-flooring kernel still assumes standard orientation).
+    // This reads `config` directly and fires BEFORE any signal alloc -- before
+    // swapAxes resolution below, before viewSig/brushSig, before _dataDomain --
+    // because the derived pan/zoom/grid flags are resolved further down.
     if (chartOpts && chartOpts.horizontal) {
         if (yScaleType === 'log') {
             throw new Error('lite-charts: horizontal orientation with a log yScale ' +
-                'is not supported (planned)');
-        }
-        if (config.brush) {
-            throw new Error('lite-charts: horizontal orientation with brush ' +
                 'is not supported (planned)');
         }
     }
@@ -4804,6 +4800,43 @@ const createBaseAxisChart = (config, renderer) => {
         }
         if (typeof v !== 'object') {
             throw new Error('lite-charts: brush must be null or an object {xMin, xMax, yMin, yMax, ids?}');
+        }
+        if (swapAxes) {
+            // Horizontal brush: a value-range x band-set payload. Validate the
+            // four numeric bounds fail-closed (Number.isFinite, never
+            // Number(null)===0) and re-derive `bands` (category keys) from the
+            // band index span so the emitted shape matches the commit path.
+            // null/undefined coerce to 0/NaN under unary + -- force them to NaN
+            // FIRST so a null bound fails closed (null is not zero) instead of
+            // slipping through Number.isFinite as a silent 0.
+            const valueMin = v.valueMin == null ? NaN : +v.valueMin;
+            const valueMax = v.valueMax == null ? NaN : +v.valueMax;
+            const bandMin = v.bandMin == null ? NaN : +v.bandMin;
+            const bandMax = v.bandMax == null ? NaN : +v.bandMax;
+            if (!Number.isFinite(valueMin) || !Number.isFinite(valueMax)
+                || !Number.isFinite(bandMin) || !Number.isFinite(bandMax)) {
+                throw new Error('lite-charts: horizontal brush must be null or an object ' +
+                    '{valueMin, valueMax, bandMin, bandMax, bands?, ids?}');
+            }
+            let bands;
+            if (Array.isArray(v.bands)) {
+                bands = v.bands;
+            } else {
+                const cats = categoriesRef.value;
+                const lo = Math.max(0, Math.min(cats.length, Math.floor(bandMin)));
+                const hi = Math.min(cats.length - 1, Math.floor(bandMax));
+                bands = [];
+                for (let b = lo; b <= hi; b++) bands.push(cats[b]);
+            }
+            brushSig.set({
+                valueMin,
+                valueMax,
+                bandMin,
+                bandMax,
+                bands,
+                ids: Array.isArray(v.ids) ? v.ids : null,
+            });
+            return;
         }
         brushSig.set({
             xMin: +v.xMin,
@@ -5321,10 +5354,22 @@ const createBaseAxisChart = (config, renderer) => {
                 // Convert data-space bounds back to pixels via the live
                 // scales. y is flipped: data yMax sits at the SMALLER
                 // pixel (top of plot).
-                const px1 = xScale.map(b.xMin);
-                const px2 = xScale.map(b.xMax);
-                const py1 = yScale.map(b.yMax);
-                const py2 = yScale.map(b.yMin);
+                let px1, px2, py1, py2;
+                if (swapAxes) {
+                    // Horizontal: value axis on screen-X (yScale, no flip);
+                    // band extent on screen-Y from the BAND geometry. xScale.map
+                    // returns a band CENTER, so span the rect with leftEdge to
+                    // keep it half-a-band aligned with the drawn bars.
+                    px1 = yScale.map(b.valueMin);
+                    px2 = yScale.map(b.valueMax);
+                    py1 = xScale.leftEdge(b.bandMin);
+                    py2 = xScale.leftEdge(b.bandMax) + xScale.bandWidth;
+                } else {
+                    px1 = xScale.map(b.xMin);
+                    px2 = xScale.map(b.xMax);
+                    py1 = yScale.map(b.yMax);
+                    py2 = yScale.map(b.yMin);
+                }
                 if (!isFinite(px1) || !isFinite(px2) || !isFinite(py1) || !isFinite(py2)) return;
                 const rx = Math.min(px1, px2);
                 const ry = Math.min(py1, py2);
@@ -5580,6 +5625,45 @@ const createBaseAxisChart = (config, renderer) => {
                     // the caller's responsibility (the brush bounds are
                     // the universal hook for that).
                     const rect = _normalizeBrushRect(brushStartX, brushStartY, brushCurrentX, brushCurrentY);
+                    if (swapAxes) {
+                        // Horizontal bars: value axis on screen-X (yScale, no
+                        // y-flip); band axis on screen-Y (xScale is the band
+                        // scale under swap). xScale.invert floors a pixel to a
+                        // band INDEX clamped to [0, n-1]. state.xs holds the band
+                        // index and state.ys the value, so _computeBrushIds runs
+                        // byte-identical with swapped args.
+                        const v0 = yScale.invert(rect.pxMin);
+                        const v1 = yScale.invert(rect.pxMax);
+                        const valueMin = Math.min(v0, v1);
+                        const valueMax = Math.max(v0, v1);
+                        if (!Number.isFinite(valueMin) || !Number.isFinite(valueMax)) {
+                            brushSig.set(null);
+                            return;
+                        }
+                        const b0 = xScale.invert(rect.pyMin);
+                        const b1 = xScale.invert(rect.pyMax);
+                        const bandMin = Math.min(b0, b1);
+                        const bandMax = Math.max(b0, b1);
+                        if (bandMin < 0) {          // no categories -- fail closed
+                            brushSig.set(null);
+                            return;
+                        }
+                        const cats = categoriesRef.value;
+                        const bands = [];
+                        for (let b = bandMin; b <= bandMax; b++) bands.push(cats[b]);
+                        let ids = null;
+                        if (seriesStates.length > 0 && seriesStates[0].n > 0) {
+                            ids = _computeBrushIds(
+                                seriesStates[0].xs,
+                                seriesStates[0].ys,
+                                seriesStates[0].n,
+                                bandMin, bandMax,
+                                valueMin, valueMax,
+                            );
+                        }
+                        brushSig.set({ valueMin, valueMax, bandMin, bandMax, bands, ids });
+                        return;
+                    }
                     const dataBounds = _brushPxToData(rect, xScale, yScale);
                     let ids = null;
                     if (seriesStates.length > 0 && seriesStates[0].n > 0) {

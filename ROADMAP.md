@@ -5,7 +5,43 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.8.0 (current)
+## v1.9.0 (current)
+
+Horizontal-bar `brush` -- shift-drag selection on
+`createBarChart({ orientation: 'horizontal', brush: true })`. Completes the
+horizontal interaction set; the slice deferred from v1.8.0. Additive; the
+vertical / line / scatter brush path is byte-unchanged.
+
+- **Value-range x band-set selection.** On a horizontal bar the value axis is on
+  screen-X and the band on screen-Y, so a shift-drag selects a value range
+  (`yScale.invert` of the X extent) crossed with a band set (`xScale.invert` of
+  the Y extent -> band index). It emits a distinct payload
+  `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` through `chart.brush`;
+  the vertical brush keeps `{ xMin, xMax, yMin, yMax, ids }`.
+- **Map at the gesture boundary.** Every change is a `swapAxes ? <remapped> :
+  <current>` selection at a brush call site (`_commitBrush`, `drawBrushOverlay`,
+  `brushFacade.set`). The pure helpers `_normalizeBrushRect` / `_brushPxToData` /
+  `_computeBrushIds` / `makeBandScale` stay byte-identical -- `_computeBrushIds`
+  applies unchanged because a bar stores its band index in `state.xs`. The
+  overlay rect spans band edges (`leftEdge(bandMin)` .. `leftEdge(bandMax) +
+  bandWidth`), not centers. Per-frame draw stays 0 B.
+- **Fail-closed.** An empty-category chart commits `null` (never a
+  `bands: [undefined]` payload); `setBrush` forces a `null` bound to `NaN`
+  before the finite check, so a `null` value bound throws instead of coercing to
+  0; horizontal + a `log` value axis still throws at construction, before `brush`
+  is considered.
+- 7 new tests (406 -> 413): value-range + band-set mapping, full-plot select,
+  click-to-clear, facade validation, a vertical-brush regression guard,
+  band-edge overlay alignment, and the empty-category fail-closed path.
+  HB1 / HB3 / HB5 / HB7 proven load-bearing by measured reversion. Plus a
+  0-B/frame horizontal-brush overlay torture case (A15). Torture green, ASCII
+  clean.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.8.0
 
 Horizontal-bar interactions -- `pan`, `zoom`, and a value `grid` on
 `createBarChart({ orientation: 'horizontal' })`. Additive; no public API change
@@ -401,21 +437,19 @@ The v1.4 interaction-primitives arc is complete and released:
   `BrushSelection` for cross-chart filtering; coexists with pan/zoom.
 - **Annotation layer** -- shipped v1.7.0. Data-pinned `line` / `range` /
   `point` / `text` marks on any axis-kernel chart.
-- **Horizontal-bar interactions** -- shipped **v1.8.0** (see the top of this
-  file). `pan` / `zoom` and a value grid on horizontal bars; the value axis
-  pans/zooms under `swapAxes`, the band axis stays pinned. `brush` on a
-  horizontal bar remains fail-closed (a value-range + band-ids payload is a
-  separate future cut, in "Next" below).
+- **Horizontal-bar interactions** -- shipped **v1.8.0**. `pan` / `zoom` and a
+  value grid on horizontal bars; the value axis pans/zooms under `swapAxes`, the
+  band axis stays pinned.
+- **Horizontal-bar `brush`** -- shipped **v1.9.0** (see the top of this file).
+  A shift-drag selects a value range crossed with a band set, emitting a
+  `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` payload; the vertical
+  brush shape is unchanged.
 
 ### Next -- polish + reach
 
 Each item below has a grounded working brief in `briefs/` (local scratch,
 not shipped in `files[]`). They are independent; pick by appetite.
 
-- **Horizontal-bar `brush`** (`briefs/horizontal-bar-interactions.md`,
-  deferred slice). A value-range selection plus band-axis category `ids`, and
-  band-axis multi-select -- a different payload shape than the vertical rect
-  brush, so it was split out of the v1.8.0 cut.
 - **Time-series specialized variants** (`briefs/time-series-variants.md`) --
   `createTimeLineChart` etc. with built-in date tick generation,
   weekday/weekend shading, market-hours awareness for finance dashboards.
@@ -472,9 +506,9 @@ The "v1.6.0 -- Scale + polish" grab-bag from earlier drafts has been
 unbundled into independent minors, each with its own brief, released as
 whichever minor they land in rather than one combined cut: **x-log** shipped
 as v1.6.0, the **annotation layer** as v1.7.0, **horizontal-bar interactions**
-as v1.8.0; the remaining items (horizontal-bar `brush`, time-series variants,
-legend virtualization) stay independent entries in the "Next -- polish + reach"
-list above.
+as v1.8.0, and the **horizontal-bar `brush`** as v1.9.0; the remaining items
+(time-series variants, legend virtualization) stay independent entries in the
+"Next -- polish + reach" list above.
 
 ### v2.0.0 -- (possible)
 
