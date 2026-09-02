@@ -8246,6 +8246,112 @@ const _DAY_MS = 86400000;   // 24h in ms -- a UTC day is exactly this (no DST)
 const _WEEK_MS = 604800000; // 7 * _DAY_MS
 const DEFAULT_WEEKEND_FILL = 'rgba(0,0,0,0.05)';
 
+// v1.11.0 -- market-hours session shading. COLD, construction-time validator,
+// called ONCE from createTimeLineChart (never inside the accessor). Returns null
+// unless `shading` is an object carrying `sessions` -- the v1.10.0 weekend forms
+// (true / 'weekends' / {fill?}) fall through to _weekendBands untouched. Otherwise
+// it validates the session calendar and returns a normalized, open-sorted spec.
+// Fail closed: EVERY junk config THROWS here (a config error, at build time, not
+// a silent draw-time zero). null is not zero -- an openMinutes of null must NOT
+// coerce to midnight, so the `== null` gate is BEFORE any unary +. `dayMask` is a
+// bitfield over UTC weekdays (bit d = weekday d); absent `days` -> 62 (Mon-Fri,
+// bits 1..5). Overnight sessions (close < open) are rejected here, not silently
+// mispainted -- the complement walker in _sessionBands assumes close <= 1440.
+const _normalizeSessionSpec = (shading) => {
+    if (!(typeof shading === 'object' && shading !== null && shading.sessions != null)) {
+        return null;
+    }
+    const raw = shading.sessions;
+    if (!Array.isArray(raw) || raw.length === 0) {
+        throw new Error('lite-charts: createTimeLineChart `shading.sessions` must be a non-empty array');
+    }
+    const sessions = [];
+    for (let i = 0; i < raw.length; i++) {
+        const s = raw[i];
+        if (typeof s !== 'object' || s === null || Array.isArray(s)) {
+            throw new Error('lite-charts: createTimeLineChart session must be a plain object { openMinutes, closeMinutes, days? }');
+        }
+        // null is not zero: gate BEFORE any unary + (+null === 0 would become midnight).
+        if (s.openMinutes == null || s.closeMinutes == null) {
+            throw new Error('lite-charts: createTimeLineChart session requires numeric openMinutes and closeMinutes');
+        }
+        const open = s.openMinutes;
+        const close = s.closeMinutes;
+        if (!Number.isInteger(open) || !Number.isInteger(close)) {
+            throw new Error('lite-charts: createTimeLineChart session openMinutes/closeMinutes must be integers');
+        }
+        if (open < 0 || open > 1439) {
+            throw new Error('lite-charts: createTimeLineChart session openMinutes must be in 0..1439');
+        }
+        if (close < 1 || close > 1440) {
+            throw new Error('lite-charts: createTimeLineChart session closeMinutes must be in 1..1440');
+        }
+        if (close < open) {
+            throw new Error('lite-charts: createTimeLineChart session closeMinutes must be > openMinutes -- overnight sessions (close < open) are not supported in v1.11.0');
+        }
+        if (close === open) {
+            throw new Error('lite-charts: createTimeLineChart session has zero width (closeMinutes === openMinutes)');
+        }
+        let dayMask = 62; // default Mon-Fri (bits 1..5): 2+4+8+16+32
+        if (s.days != null) {
+            if (!Array.isArray(s.days) || s.days.length === 0) {
+                throw new Error('lite-charts: createTimeLineChart session `days` must be a non-empty array of UTC weekday integers 0..6');
+            }
+            dayMask = 0;
+            for (let j = 0; j < s.days.length; j++) {
+                const d = s.days[j];
+                if (!Number.isInteger(d) || d < 0 || d > 6) {
+                    throw new Error('lite-charts: createTimeLineChart session `days` must be integers 0..6');
+                }
+                dayMask |= (1 << d);
+            }
+        }
+        sessions.push({ open, close, dayMask });
+    }
+    // Ascending by open: the single-cursor sweep in _sessionBands relies on this
+    // (with every close <= 1440) to emit the complement in one forward pass.
+    sessions.sort((a, b) => a.open - b.open);
+    return { fill: shading.sessionFill != null ? shading.sessionFill : null, sessions };
+};
+
+// v1.11.0 -- COLD session-band generator, sibling of _weekendBands. Runs ONLY
+// inside the annotation resolve effect (sub-Hz, data-tracked), so it MAY allocate.
+// It emits the COMPLEMENT of the open-interval union: for each UTC day in the data
+// extent it opens the day's active sessions ([dayStart+open, dayStart+close]) and
+// pushes one range band per GAP between them, clipped to [xMin, xMax]. Fail closed:
+// the prologue is byte-identical to _weekendBands (null gated BEFORE any unary +,
+// non-finite/inverted extent -> no bands).
+const _sessionBands = (xMinRaw, xMaxRaw, spec, fill) => {
+    const out = [];
+    if (xMinRaw == null || xMaxRaw == null) return out; // null is not zero
+    const xMin = +xMinRaw;
+    const xMax = +xMaxRaw;
+    if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !(xMax > xMin)) return out;
+    const f = spec.fill != null ? spec.fill : fill;
+    let cursor = xMin;
+    const d = new Date(xMin);
+    const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    // Seed one day early (harmless; closes <= 1440 can't reach past a day boundary,
+    // but the seed keeps the walk shape obviously safe).
+    const first = dayStart - _DAY_MS;
+    // No sort/merge pass here: sessions are open-sorted (T1) and every close <= 1440,
+    // so a single forward cursor yields the complement. Overnight support (close >
+    // 1440 / next-day) would require a real sort/merge at generation time.
+    for (let day = first; day < xMax; day += _DAY_MS) {
+        const dow = new Date(day).getUTCDay();
+        for (let j = 0; j < spec.sessions.length; j++) {
+            const s = spec.sessions[j];
+            if (!(s.dayMask & (1 << dow))) continue;
+            const o = day + s.open * 60000;
+            const c = day + s.close * 60000;
+            if (o > cursor && cursor < xMax) out.push({ type: 'range', axis: 'x', from: cursor, to: o < xMax ? o : xMax, fill: f });
+            if (c > cursor) cursor = c;
+        }
+    }
+    if (cursor < xMax) out.push({ type: 'range', axis: 'x', from: cursor, to: xMax, fill: f });
+    return out;
+};
+
 // COLD band generator. Runs ONLY inside the annotation resolve effect (sub-Hz,
 // data-tracked) -- never on the per-frame draw path -- so it MAY allocate. It
 // walks UTC weeks over the DATA x-extent (epoch ms) and emits one range
@@ -8287,7 +8393,7 @@ const _weekendBands = (xMinRaw, xMaxRaw, fill) => {
 // data changes -- never per pan/zoom frame. Reading a scale signal here would
 // transitively couple resolve to scaleVersion and re-allocate bands every frame,
 // the exact coupling the annotation layer was built to avoid.
-const _shadingAnnotationsAcc = (shading, annotations, dataAccs, xAccessor) => {
+const _shadingAnnotationsAcc = (shading, annotations, dataAccs, xAccessor, sessionSpec) => {
     if (shading == null) {
         return annotations != null ? asAccessor(annotations) : null;
     }
@@ -8332,7 +8438,7 @@ const _shadingAnnotationsAcc = (shading, annotations, dataAccs, xAccessor) => {
             // scan leaves xMin/xMax at +/-Infinity, which _weekendBands rejects
             // via !(xMax > xMin) (fail-closed: no bands, never wrong bands).
         }
-        const bands = _weekendBands(xMin, xMax, fill);
+        const bands = sessionSpec ? _sessionBands(xMin, xMax, sessionSpec, fill) : _weekendBands(xMin, xMax, fill);
         if (userAcc) {
             const user = userAcc();
             if (Array.isArray(user)) {
@@ -8397,6 +8503,9 @@ export const _testHelpers = {
     // v1.10.0: time-series preset internals (weekend shading)
     _weekendBands,
     _shadingAnnotationsAcc,
+    // v1.11.0: market-hours session shading internals
+    _sessionBands,
+    _normalizeSessionSpec,
 };
 
 export const createLineChart = (config) => createBaseAxisChart(config, LINE_RENDERER);
@@ -8425,7 +8534,14 @@ export const createTimeLineChart = (config) => {
     if (!config || typeof config !== 'object') {
         throw new Error('lite-charts: createTimeLineChart requires a config object');
     }
-    // (1) force a time x-scale, preserving any other xScale fields (domain, etc.)
+    // (1) force a time x-scale, preserving any other xScale fields (domain, etc.).
+    // Fail closed on a conflicting explicit request: `type` absent (undefined) or
+    // 'time' is fine, but an explicit other type (e.g. 'log') would be silently
+    // overridden -- throw instead. `{type:null}` is an explicit non-time -> throws.
+    if (config.xScale && config.xScale.type !== undefined && config.xScale.type !== 'time') {
+        throw new Error('lite-charts: createTimeLineChart forces a time x-scale; ' +
+            'xScale.type must be omitted or \'time\'');
+    }
     const xScale = config.xScale
         ? Object.assign({}, config.xScale, { type: 'time' })
         : { type: 'time' };
@@ -8449,7 +8565,11 @@ export const createTimeLineChart = (config) => {
         const dataAccs = Array.isArray(config.series)
             ? config.series.map((sr) => asAccessor(sr.data))
             : [asAccessor(config.data)];
-        annotations = _shadingAnnotationsAcc(sh, config.annotations, dataAccs, xAccessor);
+        // v1.11.0: normalize a market-hours session calendar ONCE at construction
+        // (never inside the accessor). When present the session walker subsumes the
+        // weekend walker (a day in no session is fully banded), so no double paint.
+        const sessionSpec = _normalizeSessionSpec(sh);
+        annotations = _shadingAnnotationsAcc(sh, config.annotations, dataAccs, xAccessor, sessionSpec);
     }
     const merged = Object.assign({}, config, { xScale, panBounds, annotations });
     return createBaseAxisChart(merged, LINE_RENDERER);

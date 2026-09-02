@@ -10,7 +10,47 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.10.0 (current): createTimeLineChart + weekend shading -- additive; a new
+> v1.11.0 (current): market-hours session shading -- additive; one new config
+> field + one new construction-time throw; every existing factory, the shared
+> kernel, and the v1.10.0 weekend path byte-unchanged. createTimeLineChart's
+> shading object gains sessions: [{openMinutes, closeMinutes, days?}] +
+> sessionFill? -- UTC minutes-from-midnight (open 0..1439, close 1..1440,
+> close > open), days = UTC weekday ints 0-6 defaulting Mon-Fri. Shades
+> NON-trading time as the COMPLEMENT OF THE OPEN-INTERVAL UNION over the data
+> extent: one range band per gap, Fri-close -> Mon-open is ONE contiguous band
+> (sessions present => the weekend walker is never invoked -- weekends
+> subsumed, nothing double-paints), multiple sessions/day (lunch-break
+> markets) produce midday gap bands naturally. Implementation: cold
+> `_normalizeSessionSpec` (construction-time validator -> {open, close,
+> dayMask} sorted by open; dayMask bitfield, default 62 = Mon-Fri) +
+> `_sessionBands` (single forward-only cursor sweep, NO sort at generation --
+> ordering is an invariant of the validator sort + close<=1440; a comment
+> marks that overnight support needs a real merge); `_shadingAnnotationsAcc`
+> changed by exactly ONE generator-selection ternary; `_weekendBands` and the
+> extent scan (raw accessor, per-row == null gate, SoA branch) byte-identical.
+> Same cold/hot split as v1.10.0: bands generated in the annotation resolve,
+> re-clipped per frame at 0 B. FAILS CLOSED at construction: null minute
+> bounds (null is not midnight -- == null gated before any arithmetic),
+> non-integers, out-of-range, zero-width, overnight close<open (throw names it
+> unsupported), empty sessions/days, day ints outside 0..6; sessions:null =
+> absent (weekend path). ALSO: explicit conflicting xScale.type now THROWS
+> (previously silently forced 'time'); omitted/undefined/'time' unchanged;
+> d.ts narrowed to Omit<XScaleConfig,'type'> & {type?:'time'}. Data-driven and
+> TZ-agnostic: no exchange/timezone/holiday table; pre-convert local session
+> times to UTC; overlay holidays via user annotations. Extent fully outside
+> every session -> one full-extent band (documented). 8 new tests (427->435):
+> exact 11-band canonical fixture (Mon-Fri 570/960 x 14 days), subsumption
+> 11-vs-2, 21-band lunch-break, day masks, validator throw matrix, xScale
+> throw, per-row null-x reuse, tree-shake confinement (1 immediate-paren
+> call-site each), retention, exact-bounds union invariants for contained/
+> overlapping/back-to-back sets -- TS18 + TS22 proven load-bearing by
+> reversion (TS22 strengthened from count-only to exact from/to lists after a
+> cursor-regression reversion stayed green). torture ok (A17: 1.065 B/op vs
+> 0.861 weekend control, delta 0.204, 44 bands). ASCII clean. Composition
+> recipe (README): a lite-time clock(60000) read inside the annotations
+> accessor gives a self-advancing now-line; bands + now-line re-derive per
+> beat on the cold path, draw stays 0 B.
+> v1.10.0: createTimeLineChart + weekend shading -- additive; a new
 > factory and a new config field, every existing factory + the shared kernel
 > byte-unchanged. createTimeLineChart(config) is createLineChart with three
 > time-first defaults: (1) xScale.type forced to 'time' regardless of the x key
@@ -1393,13 +1433,14 @@ charts dynamically.
   established (mock-WebGL2-context unit tests + real-GPU
   Playwright). Bench target: 1M scatter points at 60fps with
   signal-driven pan/zoom.
-- v1.9.x / v1.10.0 (candidates): horizontal-bar brush band-axis
-  multi-select refinements + a configurable brush modifier; brush ids
-  across all visible series (currently primary-series only); time-series
-  specialized variants (auto-formatted time axes, hour/day/week binning
-  helpers, weekend/market-hours shading riding the v1.7.0 annotation range
-  primitive); legend virtualization via `@zakkster/lite-virtual` (for
-  charts with hundreds of series).
+- v1.11.x / v1.12.0 (candidates): legend virtualization via
+  `@zakkster/lite-virtual` (grounded brief -- caller-injected `virtualize`
+  fn per the spatialIndex precedent, no import, vertical-first); overnight
+  session support (close < open via midnight-split open intervals -- throws
+  today); holiday-calendar convenience over the annotation range primitive;
+  horizontal-bar brush band-axis multi-select refinements + a configurable
+  brush modifier; brush ids across all visible series (currently
+  primary-series only).
 - v2.0.0 (possible): renderer-agnostic kernel refactor (if
   lite-charts-gl proves out, fold the renderer choice into core);
   deeper SSR support.

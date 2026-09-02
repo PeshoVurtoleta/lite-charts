@@ -17,14 +17,27 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.10.0 -- `createTimeLineChart` + weekend shading (minor). A
-time-series line preset that forces a `'time'` x-scale, defaults `panBounds` to
-`'data'`, and adds opt-in weekend background bands via `shading: true`. The
-bands ride the v1.7.0 annotation layer as `range` rows (zero per-frame draw
-cost) and are derived from the data extent, not the live scale. Additive: a new
-factory and a new config field; every existing factory and the shared kernel
-are byte-unchanged. **427/427 tests pass** plus a torture/stress gate
+**Status:** v1.11.0 -- market-hours session shading (minor). `createTimeLineChart`'s
+`shading` config gains a caller-supplied session calendar: `sessions:
+[{ openMinutes, closeMinutes, days? }]` shades all non-trading time as the
+complement of the open-interval union -- Fri close -> Mon open is one band,
+weekends are subsumed, lunch-break markets get their midday gaps. Data-driven:
+no exchange, timezone, or holiday table built in. Also: an explicit conflicting
+`xScale.type` now throws instead of being silently forced to `'time'`.
+Every existing factory, the shared kernel, and the v1.10.0 weekend path are
+byte-unchanged. **435/435 tests pass** plus a torture/stress gate
 (`npm run torture`).
+
+**New in v1.11.0:**
+- **Session-calendar shading.** `shading: { sessions: [{ openMinutes: 570,
+  closeMinutes: 960 }] }` (UTC minutes-from-midnight, days default Mon-Fri)
+  shades everything outside trading hours. Bands ride the annotation layer as
+  in v1.10.0 -- zero per-frame cost, exportSVG-visible, composing with user
+  `annotations`. Overnight sessions (`close < open`) throw as unsupported;
+  every malformed field throws at construction. See "Time-series line chart"
+  below.
+- **Fail-closed `xScale.type`.** `createTimeLineChart({ xScale: { type: 'log' } })`
+  now throws; previously the conflicting type was silently overridden.
 
 **New in v1.10.0:**
 - **`createTimeLineChart(config)`.** `createLineChart` with time-first defaults:
@@ -1203,7 +1216,61 @@ chart.mount(target);
   x values map through `getTime()`). `shading: false` opts out exactly like
   omitting it; other invalid `shading` values throw at construction. The chart
   stays timezone-agnostic -- it operates on epoch ms and leaves formatting to
-  the caller. Market-hours / session calendars are out of scope in v1.10.0.
+  the caller.
+
+### Market-hours sessions (v1.11.0)
+
+Supply a session calendar and the chart shades everything OUTSIDE trading
+hours instead of just weekends:
+
+```js
+const chart = createTimeLineChart({
+  data: ticks,
+  shading: {
+    sessions: [{ openMinutes: 570, closeMinutes: 960 }],  // 09:30-16:00 UTC, Mon-Fri
+    sessionFill: 'rgba(0,0,0,0.06)',                       // optional
+  },
+});
+```
+
+- **Complement of the open-interval union.** One band per gap between open
+  intervals over the data domain: each overnight close -> open, and ONE
+  contiguous Fri-close -> Mon-open band per weekend. When `sessions` is
+  present the weekend walker is not invoked -- weekends are subsumed, nothing
+  double-paints. Multiple sessions per day work naturally:
+  `sessions: [{ openMinutes: 570, closeMinutes: 690 }, { openMinutes: 750,
+  closeMinutes: 960 }]` shades the lunch gap too.
+- **Data-driven and UTC.** `openMinutes` / `closeMinutes` are UTC
+  minutes-from-midnight (`open` 0..1439, `close` 1..1440, `close > open`);
+  `days` is UTC weekday ints 0-6, default `[1,2,3,4,5]`. No exchange,
+  timezone, or holiday table is built in -- pre-convert local session times to
+  UTC, and overlay holidays with your own `annotations` ranges.
+- **Fail-closed validation.** Every malformed field throws at construction:
+  a `null` minute bound (null is not midnight), non-integers, out-of-range
+  minutes, zero-width sessions, empty `sessions`/`days`, day values outside
+  0-6 -- and overnight sessions (`close < open`) throw with a message naming
+  them unsupported (a follow-up, not a silent wrong answer).
+
+### Live "now" line with lite-time
+
+The `annotations` accessor is reactive, so `@zakkster/lite-time` composes with
+zero chart changes -- a self-advancing now-line over the shaded sessions:
+
+```js
+import { clock } from '@zakkster/lite-time';
+
+const minuteClock = clock(60000);   // beats once per minute
+const chart = createTimeLineChart({
+  data: ticks,
+  shading: { sessions: [{ openMinutes: 570, closeMinutes: 960 }] },
+  annotations: () => [{ type: 'line', axis: 'x', value: minuteClock(), label: 'now' }],
+});
+```
+
+Each beat re-runs the cold annotation resolve (bands + now-line re-derive;
+the per-frame draw path stays 0 B). Prefer `clock(60000)`-style resolution
+over the raw 1 s `now` -- a beat re-runs the whole shading accessor,
+including the data-extent scan.
 
 ## Log scale (y: v1.4.0-alpha.0; x: v1.6.0)
 
@@ -1460,8 +1527,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.7.0** | Annotation layer. `annotations: [...]` (static or `() => Annotation[]`) puts data-pinned `line` / `range` / `point` / `text` marks on any axis-kernel chart. They re-project through the live scales -- tracking pan / zoom and log axes (a value `<= 0` on a log axis does not draw, fail-closed like the series) -- render above the series and below the crosshair, and appear in `exportSVG`. `color` / `fill` accept `--css-var` tokens, re-resolved on `refreshTheme`. Zero per-frame allocation (the project step writes pooled-node fields directly; color resolution is confined to a cold resolve step); the whole layer is absent when unset. 400 tests (10 new: projection, pan-clip, reactive range, exportSVG parity, theme re-resolve, log + linear fail-closed, runtime isolation, horizontal-bar swap, pool retention) + a 0-B/frame annotation torture case. |
 | **v1.8.0** | Horizontal-bar interactions. `createBarChart({ orientation: 'horizontal' })` now accepts `pan` / `zoom` / value `grid`: the value axis (on screen-X under the swap) pans and zooms while the band axis stays pinned, `view.yMin` / `view.yMax` addressing the value axis. Built by remapping the linear pan/zoom kernels at each gesture boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical and the vertical path is unchanged; the per-frame draw is still 0 B. Horizontal + `brush` and horizontal + a `log` value axis still fail closed at construction. 406 tests (6 new: value-axis pan, band-pin control, cursor-anchored zoom, vertical value grid, fail-closed throws, mount/pan/destroy retention -- each proven load-bearing by measured reversion) + a horizontal-interaction 0-B torture case. |
 | **v1.9.0** | Horizontal-bar `brush`. A shift-drag on `createBarChart({ orientation: 'horizontal', brush: true })` selects a value range (screen-X) crossed with a band set (screen-Y), emitting a distinct `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` payload; the vertical brush keeps `{ xMin, xMax, yMin, yMax, ids }`. Every branch is a `swapAxes ? ...` selection at a brush call site, so `_normalizeBrushRect` / `_brushPxToData` / `_computeBrushIds` / `makeBandScale` stay byte-identical and the vertical path is unchanged; the overlay draw stays 0 B. Fail-closed: an empty-category chart commits `null` (no undefined band), `setBrush` rejects a `null` bound instead of coercing it to 0, and a `log` value axis still throws. 413 tests (7 new: value-range + band-set mapping, full-plot select, click-to-clear, facade validation, a vertical-brush regression guard, band-edge overlay alignment, empty-category fail-close -- HB1/HB3/HB5/HB7 proven load-bearing by reversion) + a 0-B horizontal-brush torture case. |
-| **v1.10.0** (this) | `createTimeLineChart` + weekend shading. A time-series line preset over `createLineChart`: forces `xScale.type: 'time'`, defaults `panBounds: 'data'`, and adds opt-in `shading: true | 'weekends' | { fill? }` -- one `{ type: 'range', axis: 'x' }` band per Sat -> Mon UTC span in the data domain. Bands ride the v1.7.0 annotation layer (0 B per frame; re-clipped by the existing project effect) and are derived from the series data extent, not `scaleVersion`, so they regenerate on a data change but not per pan/zoom frame; SoA `{ xs, ys }` data is shaded like AoS. New factory + new config field only; every existing factory and the shared kernel are byte-unchanged, and the shading helpers tree-shake out of a `createLineChart`-only bundle. Fail-closed: a `null`/non-finite extent bound emits no bands (never epoch 0), a per-row `x: null` is gated before coercion (one missing timestamp cannot collapse the extent to 1970), `shading: false` opts out like absent, an invalid `shading` throws. 427 tests (14 new: weekend-walk boundaries, null/non-finite fail-close, SoA regression, forced time scale, count integration, opt-in null handle, config validation, tree-shake confinement, retention, false opt-out, row-level null guard -- TS2/TS5/TS13/TS14 proven load-bearing by reversion) + a 0-B weekend-shading torture case (A16). |
-| v1.9.x / v1.10.0 (candidates) | band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series; time-series variants (ride the annotation `range` primitive for weekend / market-hours shading); legend virtualization via `lite-virtual`. |
+| **v1.10.0** | `createTimeLineChart` + weekend shading. A time-series line preset over `createLineChart`: forces `xScale.type: 'time'`, defaults `panBounds: 'data'`, and adds opt-in `shading: true | 'weekends' | { fill? }` -- one `{ type: 'range', axis: 'x' }` band per Sat -> Mon UTC span in the data domain. Bands ride the v1.7.0 annotation layer (0 B per frame; re-clipped by the existing project effect) and are derived from the series data extent, not `scaleVersion`, so they regenerate on a data change but not per pan/zoom frame; SoA `{ xs, ys }` data is shaded like AoS. New factory + new config field only; every existing factory and the shared kernel are byte-unchanged, and the shading helpers tree-shake out of a `createLineChart`-only bundle. Fail-closed: a `null`/non-finite extent bound emits no bands (never epoch 0), a per-row `x: null` is gated before coercion (one missing timestamp cannot collapse the extent to 1970), `shading: false` opts out like absent, an invalid `shading` throws. 427 tests (14 new: weekend-walk boundaries, null/non-finite fail-close, SoA regression, forced time scale, count integration, opt-in null handle, config validation, tree-shake confinement, retention, false opt-out, row-level null guard -- TS2/TS5/TS13/TS14 proven load-bearing by reversion) + a 0-B weekend-shading torture case (A16). |
+| **v1.11.0** (this) | Market-hours session shading. `shading: { sessions: [{ openMinutes, closeMinutes, days? }], sessionFill? }` shades non-trading time as the complement of the open-interval union over the data domain: one band per overnight gap, ONE merged Fri-close -> Mon-open band per weekend (weekends subsumed, no double paint), lunch-break midday gaps free. Single-cursor sweep, no sort at generation (ordering is a validator invariant: open-ascending sort + `close <= 1440`); `_weekendBands` and the extent scan byte-identical -- the accessor changed by one generator-selection line. Fail-closed: overnight (`close < open`), zero-width, `null`/non-integer/out-of-range minutes, bad `days` all throw at construction; explicit conflicting `xScale.type` now throws instead of silent override. 435 tests (8 new: exact 11-band fixture, subsumption 11-vs-2, 21-band lunch-break, validator matrix, per-row null reuse, tree-shake confinement, retention, exact-bounds union invariants -- TS18/TS22 proven load-bearing by reversion) + a 0-B session-shading torture case (A17). |
+| v1.11.x / v1.12.0 (candidates) | legend virtualization via `lite-virtual` (grounded brief: caller-injected `virtualize`, no import, vertical-first); overnight session support (midnight-split open intervals); holiday-calendar convenience; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
 
 ## Ecosystem
 

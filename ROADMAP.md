@@ -5,7 +5,42 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.10.0 (current)
+## v1.11.0 (current)
+
+Market-hours session shading on `createTimeLineChart`. Additive: one new
+config field and one new construction-time throw; every existing factory, the
+shared kernel, and the v1.10.0 weekend path are byte-unchanged.
+
+- **`shading.sessions`.** `{ sessions: [{ openMinutes, closeMinutes, days? }],
+  sessionFill? }` shades NON-trading time as the complement of the
+  open-interval union over the data extent: one band per overnight gap, ONE
+  merged Fri-close -> Mon-open band per weekend (sessions present => the
+  weekend walker is never invoked -- subsumed, no double paint), lunch-break
+  midday gaps free. UTC minutes-from-midnight, days default Mon-Fri;
+  data-driven -- no exchange/timezone/holiday table built in.
+- **Single-cursor sweep.** `_normalizeSessionSpec` (construction validator ->
+  dayMask bitfield, sessions sorted by open) + `_sessionBands` (forward-only
+  cursor, no sort at generation -- ordering is a validator invariant given
+  `close <= 1440`). `_weekendBands` and the extent scan byte-identical; the
+  accessor changed by exactly one generator-selection line. Same cold/hot
+  split: bands generated in the annotation resolve, re-clipped per frame at
+  0 B (torture A17: 1.065 B/op vs 0.861 weekend control).
+- **Fail-closed.** Overnight (`close < open`) throws naming it unsupported;
+  zero-width, `null`/non-integer/out-of-range minutes, bad `days` all throw at
+  construction. An explicit conflicting `xScale.type` on the time preset now
+  throws instead of being silently forced (d.ts narrowed to match).
+- 8 new tests (427 -> 435): exact 11-band canonical fixture, subsumption
+  11-vs-2, 21-band lunch-break, day masks, the validator throw matrix, the
+  xScale throw, per-row null-x reuse, tree-shake confinement, retention, and
+  exact-bounds union invariants (contained / overlapping / back-to-back).
+  TS18 + TS22 proven load-bearing by measured reversion. Torture green,
+  ASCII clean.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.10.0
 
 `createTimeLineChart` + weekend shading -- a time-series line preset over the
 axis kernel. Additive: a new factory and a new config field; every existing
@@ -495,14 +530,15 @@ The v1.4 interaction-primitives arc is complete and released:
 Each item below has a grounded working brief in `briefs/` (local scratch,
 not shipped in `files[]`). They are independent; pick by appetite.
 
-- **Time-series market-hours** (v1.10.x) -- the deferred slice of
-  `briefs/time-series-variants.md`. `createTimeLineChart` + weekend shading
-  shipped in v1.10.0; a data-driven session calendar (shade / skip non-trading
-  hours, opt-in, no hardcoded exchanges) rides the same annotation `range`
-  primitive as the weekend bands.
-- **Legend virtualization** (`briefs/legend-virtualization.md`) -- via
-  `@zakkster/lite-virtual` for charts with 100+ series (real-time
-  monitoring dashboards). Renders only visible legend rows.
+- **Legend virtualization** (`briefs/legend-virtualization.md`, target
+  v1.12.0) -- via `@zakkster/lite-virtual` for charts with 100+ series
+  (real-time monitoring dashboards). Renders only visible legend rows.
+  Grounded: caller-injected `virtualize` fn per the `spatialIndex` optional-
+  peer precedent (no import), vertical positions first.
+- **Overnight sessions** (v1.11.x candidate) -- `closeMinutes < openMinutes`
+  throws today; support needs midnight-split open intervals and a real merge
+  in `_sessionBands`. Holiday-calendar convenience is a sibling candidate;
+  both ride the shipped session machinery.
 
 ### Companion track -- `@zakkster/lite-charts-gl` (separate package)
 
@@ -552,9 +588,9 @@ unbundled into independent minors, each with its own brief, released as
 whichever minor they land in rather than one combined cut: **x-log** shipped
 as v1.6.0, the **annotation layer** as v1.7.0, **horizontal-bar interactions**
 as v1.8.0, the **horizontal-bar `brush`** as v1.9.0, and **`createTimeLineChart`
-+ weekend shading** as v1.10.0; the remaining items (time-series market-hours,
-legend virtualization) stay independent entries in the "Next -- polish + reach"
-list above.
++ weekend shading** as v1.10.0, and **market-hours session shading** as
+v1.11.0; the remaining items (legend virtualization, overnight sessions) stay
+independent entries in the "Next -- polish + reach" list above.
 
 ### v2.0.0 -- (possible)
 

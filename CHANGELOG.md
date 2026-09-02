@@ -5,6 +5,66 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] -- 2026-09
+
+Market-hours session shading on `createTimeLineChart`, plus a fail-closed
+tightening of the time preset's `xScale` handling. Additive: one new config
+field and one new construction-time throw; every existing factory, the shared
+kernel, and the v1.10.0 weekend path are byte-unchanged.
+
+### Added -- session calendar shading
+
+- **`shading.sessions`.** `shading: { sessions: [{ openMinutes, closeMinutes,
+  days? }], sessionFill? }` shades NON-trading time. Minutes are UTC
+  minutes-from-midnight (`open` 0..1439, `close` 1..1440, `close > open`);
+  `days` is UTC weekday ints 0-6, default Mon-Fri. Bands are the complement of
+  the union of open intervals over the data extent: Fri close -> Mon open is
+  one contiguous band (weekends are subsumed -- the weekend walker is not
+  invoked when `sessions` is present, so nothing double-paints), and multiple
+  sessions per day (lunch-break markets) produce the midday gap bands
+  naturally. Data-driven: no exchange, timezone, or holiday table is built in.
+
+### Changed
+
+- **Explicit conflicting `xScale.type` now throws.** `createTimeLineChart({
+  xScale: { type: 'log' } })` previously forced `'time'` silently; an explicit
+  non-`'time'` type (including `null`) now throws at construction, before any
+  signal allocation. `type` omitted, `undefined`, or `'time'` is unchanged.
+  `TimeLineChartConfig.xScale` narrowed to match.
+
+### Design
+
+- **Single-cursor sweep, no sort at generation.** The generator walks UTC days
+  once with a forward-only cursor; ordering is an invariant of the validator's
+  open-ascending sort plus `closeMinutes <= 1440` (a comment marks that
+  overnight support would require a real merge). Contained, overlapping, and
+  back-to-back sessions union correctly -- verified against exact band lists.
+- **Same cold/hot split as v1.10.0.** Bands are generated cold in the
+  annotation resolve effect and re-clipped per frame at 0 B by the existing
+  project effect; `_weekendBands` and the extent scan (raw accessor, per-row
+  null gate, SoA branch) are byte-identical -- the accessor changed by exactly
+  one generator-selection line.
+
+### Fixed
+
+- Overnight sessions (`closeMinutes < openMinutes`) throw with a message
+  naming them unsupported rather than producing silently wrong bands;
+  zero-width sessions throw; a `null` minute bound throws (`== null` gated
+  before any arithmetic -- null is not midnight).
+
+### Coverage
+
+- 8 new tests (427 -> 435): exact 11-band canonical fixture, subsumption
+  (11 vs 2 on the same data), 21-band lunch-break fixture, day-mask handling,
+  the full validator throw matrix, the `xScale.type` throw, per-row null-x
+  reuse under sessions, tree-shake source confinement, retention, and
+  exact-bounds union invariants for contained/overlapping/back-to-back
+  session sets. TS18 and TS22 proven load-bearing by measured reversion --
+  including a strengthened TS22 after the count-only version stayed green
+  under a cursor-regression reversion. One 0-B session-shading redraw torture
+  case (A17: 1.065 B/op vs 0.861 weekend control, delta 0.204, 44 bands).
+  torture ok, ASCII clean.
+
 ## [1.10.0] -- 2026-09
 
 `createTimeLineChart` -- a time-series line preset over the axis kernel, plus

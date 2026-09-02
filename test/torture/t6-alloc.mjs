@@ -443,4 +443,50 @@ export function run() {
         sh.destroy();
         plain.destroy();
     }
+
+    // --- 11. time-series market-hours session shading redraw budget (A17, v1.11.0) --
+    // v1.11.0 shades NON-trading time from a session calendar (shading.sessions):
+    // the complement-of-union walker (_sessionBands) generates one range band per
+    // gap (after-hours + weekends merged). Like weekend bands (A16) they are
+    // COLD-generated in the annotation resolve effect but ride the annotation layer
+    // as range rows, so the per-frame OVERLAY re-clip must stay 0 B. This gate
+    // mounts a time line with an active session calendar over a 60-day domain
+    // (>=40 session bands) and drives a redraw storm, pinning maxMajor:0 /
+    // maxArrayBuffersGrowth:0. The <=16 B/op ceiling matches A9/A15/A16; the
+    // session-specific claim is the <=2 B/op differential against the weekend-only
+    // control (A16's shading:true), so a per-frame regression in the many-more
+    // session bands' projection shows up the same as a pooled-buffer leak would.
+    {
+        const DAY = 86400000;
+        const BASE = Date.UTC(2021, 0, 4); // Monday
+        const mkT = (shading) => {
+            const data = Array.from({ length: 60 }, (_, i) => ({
+                x: BASE + i * DAY, y: Math.sin(i / 5) * 40 + 50,
+            }));
+            const cfg = { data, x: 'x', y: 'y', width: 800, height: 400, schedule: (fn) => fn() };
+            if (shading) cfg.shading = shading;
+            const c = createTimeLineChart(cfg);
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        // Session chart: Mon-Fri 09:30-16:00 (570/960). Control: weekend-only.
+        const sess = mkT({ sessions: [{ openMinutes: 570, closeMinutes: 960 }] });
+        const wknd = mkT(true);
+        // Sanity: the session calendar actually produced many bands (>=40 over 60
+        // days -- one per overnight/weekend gap); else the differential is vacuous.
+        const nBands = sess._internal.annotations ? sess._internal.annotations.count : 0;
+        check(nBands >= 40,
+            () => `A17: expected >=40 session bands over a 60-day domain, got ${nBands}`);
+        const gS = runOpsGate(() => { sess.redraw(); }, { ops: 50000, warmup: 500 });
+        const gW = runOpsGate(() => { wknd.redraw(); }, { ops: 50000, warmup: 500 });
+        if (!gS.report.ok) die(allocFailMsg('A17.session-redraw', gS.report, gS.summary));
+        check(gS.bytesPerOp <= 16.0,
+            () => `A17: session-shading redraw allocated ${gS.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gS.bytesPerOp - gW.bytesPerOp) <= 2.0,
+            () => `A17: session ${gS.bytesPerOp.toFixed(3)} B/op vs weekend ${gW.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
+        sess.destroy();
+        wknd.destroy();
+    }
 }

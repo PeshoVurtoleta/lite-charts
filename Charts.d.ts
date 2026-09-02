@@ -522,8 +522,30 @@ export function createLineChart(config: LineChartConfig): Chart;
 // layer unchanged (plain {type:'range',axis:'x'} rows), so there is zero
 // per-frame draw cost; the band set is derived from the DATA extent (epoch ms,
 // UTC), not the live scale, so it regenerates on data change but not per frame.
-// The chart stays timezone-agnostic. Market-hours / session calendars are out of
-// scope in v1.10.0.
+// The chart stays timezone-agnostic. v1.11.0 adds an optional market-hours
+// session calendar (shading.sessions): supply trading windows and the chart
+// shades the NON-trading time (the complement of the open-interval union), so
+// weekends and after-hours merge into one band per gap. See SessionSpec.
+
+/**
+ * One market-trading window, in UTC minutes-from-midnight. The chart shades the
+ * complement (non-trading time), so you describe when the market is OPEN.
+ */
+export interface SessionSpec {
+    /** Session open, UTC minutes from midnight. Integer 0..1439. */
+    openMinutes: number;
+    /**
+     * Session close, UTC minutes from midnight. Integer 1..1440, MUST be greater
+     * than openMinutes. Overnight sessions (close < open) are not supported in
+     * v1.11.0 and throw at construction.
+     */
+    closeMinutes: number;
+    /**
+     * UTC weekdays the session runs (0=Sun .. 6=Sat). Non-empty, integers 0..6.
+     * Default [1,2,3,4,5] (Mon-Fri).
+     */
+    days?: number[];
+}
 
 export interface TimeShadingConfig {
     /**
@@ -532,15 +554,34 @@ export interface TimeShadingConfig {
      * Default 'rgba(0,0,0,0.05)'.
      */
     fill?: string;
+    /**
+     * v1.11.0 -- market-hours session calendar. When present, the chart shades
+     * the NON-trading time (the complement of the union of these windows) instead
+     * of weekends: after-hours and weekends merge into one band per gap, and any
+     * day matched by no session is fully shaded. Sessions are validated at
+     * construction (integer minutes, close > open, days 0..6); junk throws.
+     */
+    sessions?: SessionSpec[];
+    /**
+     * v1.11.0 -- fill for the non-trading (session) bands. Defaults to `fill` (or
+     * the weekend default when neither is set). Any Canvas2D fillStyle string.
+     */
+    sessionFill?: string;
 }
 
 export interface TimeLineChartConfig extends LineChartConfig {
     /**
+     * createTimeLineChart forces a time x-scale. `type` must be omitted or
+     * 'time'; an explicit conflicting type throws at construction (v1.11.0).
+     */
+    xScale?: Omit<XScaleConfig, 'type'> & { type?: 'time' };
+    /**
      * Weekend background shading. Opt-in: omit (or pass `false`, which behaves
      * identically) for a plain time line at zero added cost. `true` or
      * 'weekends' shades every Sat 00:00 -> Mon 00:00 UTC span within the data
-     * domain with the default fill; an object overrides the fill. Bands compose
-     * with any `annotations` you supply (bands first).
+     * domain with the default fill; an object overrides the fill. Supply
+     * `sessions` (v1.11.0) for a market-hours calendar that shades non-trading
+     * time instead. Bands compose with any `annotations` you supply (bands first).
      */
     shading?: boolean | 'weekends' | TimeShadingConfig;
 }

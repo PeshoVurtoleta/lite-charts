@@ -8249,3 +8249,194 @@ describe('v1.10.0 -- time-series variants', () => {
         assert.equal(acc2().length, 2, 'Date x values map through getTime()');
     });
 });
+
+// ---------------------------------------------------------------------------
+// v1.11.0 -- market-hours session shading (createTimeLineChart)
+// ---------------------------------------------------------------------------
+//
+// `shading: { sessions: [{openMinutes, closeMinutes, days?}], sessionFill? }`
+// shades NON-trading time: a single-cursor complement-of-open-union sweep over
+// the data extent emits one range band per gap between open intervals. When
+// sessions are present the weekend walker is never invoked (subsumption -- a
+// day outside every session's `days` is fully inside a band, so Fri-close ->
+// Mon-open is ONE merged band and nothing double-paints). The validator
+// (_normalizeSessionSpec) throws at construction on junk; the generator does
+// no sort at generation time -- ordering is an invariant of the validator's
+// open-ascending sort plus closeMinutes <= 1440. T0: an explicit conflicting
+// xScale.type now throws. Canonical fixture: Mon-Fri 09:30-16:00 (570/960)
+// over Mon 00:00 -> Mon 00:00 x 2 weeks = EXACTLY 11 bands; the lunch-break
+// two-session variant = 21 (11 outer + 10 weekday midday gaps).
+describe('v1.11.0 -- market-hours session shading', () => {
+    const { _sessionBands, _normalizeSessionSpec, _shadingAnnotationsAcc } = _testHelpers;
+    const M = Date.UTC(2021, 0, 4);   // Monday
+    const D = 86400000;
+    const MIN = 60000;
+    const O = 570 * MIN;              // 09:30 UTC
+    const C = 960 * MIN;              // 16:00 UTC
+    const FILL = 'rgba(0,0,0,0.05)';
+    const SDATA = [{ x: M, y: 1 }, { x: M + 14 * D, y: 2 }];
+    const spec1 = () => _normalizeSessionSpec({ sessions: [{ openMinutes: 570, closeMinutes: 960 }] });
+
+    // -- TS15: canonical fixture, exact band list ----------------------------
+    it('TS15: Mon-Fri 570/960 over 14 days emits exactly the 11 complement bands', () => {
+        const bands = _sessionBands(M, M + 14 * D, spec1(), FILL);
+        const expected = [[M, M + O]];
+        for (let k = 0; k < 4; k++) expected.push([M + k * D + C, M + (k + 1) * D + O]);
+        expected.push([M + 4 * D + C, M + 7 * D + O]);   // merged Fri 16:00 -> Mon 09:30
+        for (let k = 7; k < 11; k++) expected.push([M + k * D + C, M + (k + 1) * D + O]);
+        expected.push([M + 11 * D + C, M + 14 * D]);     // clipped tail
+        assert.equal(bands.length, 11, 'exactly 11 bands');
+        for (let i = 0; i < 11; i++) {
+            assert.equal(bands[i].from, expected[i][0], `band ${i} from`);
+            assert.equal(bands[i].to, expected[i][1], `band ${i} to`);
+            assert.equal(bands[i].type, 'range');
+            assert.equal(bands[i].axis, 'x');
+            assert.equal(bands[i].fill, FILL);
+            assert.ok(bands[i].to > bands[i].from, 'no zero-width band');
+            if (i > 0) assert.ok(bands[i].from >= bands[i - 1].to, 'ordered, non-overlapping');
+        }
+    });
+
+    // -- TS16: chart-level counts -- subsumption, lunch-break, day masks -----
+    it('TS16: sessions subsume weekends (11 vs 2); lunch-break = 21; days mask honored', () => {
+        const mk = (shading) => {
+            const c = createTimeLineChart({ data: SDATA, shading, schedule: (fn) => fn() });
+            c.mount(createMockCanvas(800, 400));
+            return c;
+        };
+        const cs = mk({ sessions: [{ openMinutes: 570, closeMinutes: 960 }] });
+        assert.equal(cs._internal.annotations.count, 11, 'sessions -> 11 bands (weekends subsumed)');
+        cs.destroy();
+        const cw = mk(true);
+        assert.equal(cw._internal.annotations.count, 2, 'weekend-only baseline on the same data');
+        cw.destroy();
+        // Lunch-break: two sessions/day -> one extra midday gap per weekday.
+        const lb = _sessionBands(M, M + 14 * D, _normalizeSessionSpec({
+            sessions: [{ openMinutes: 570, closeMinutes: 690 }, { openMinutes: 750, closeMinutes: 960 }],
+        }), FILL);
+        assert.equal(lb.length, 21, '11 outer + 10 weekday midday gaps');
+        assert.ok(lb.some((b) => b.from === M + 690 * MIN && b.to === M + 750 * MIN),
+            'the Monday midday gap band is present');
+        for (let i = 1; i < lb.length; i++) assert.ok(lb[i].from >= lb[i - 1].to, 'no overlap');
+        // days:[1] (Mon only) over a pure-Saturday extent -> one full-extent band.
+        const sat = _sessionBands(M + 5 * D, M + 6 * D, _normalizeSessionSpec({
+            sessions: [{ openMinutes: 570, closeMinutes: 960, days: [1] }],
+        }), FILL);
+        assert.equal(sat.length, 1, 'extent outside every session day -> one band');
+        assert.equal(sat[0].from, M + 5 * D);
+        assert.equal(sat[0].to, M + 6 * D);
+    });
+
+    // -- TS17: validator fail-closed -----------------------------------------
+    it('TS17: _normalizeSessionSpec throws on junk; null sessions/days follow the != null convention', () => {
+        const mkc = (sessions) => () => createTimeLineChart({
+            data: SDATA, shading: { sessions }, schedule: (fn) => fn(),
+        });
+        assert.throws(mkc([{ openMinutes: null, closeMinutes: 960 }]), /lite-charts/,
+            'null openMinutes throws (null is not midnight)');
+        assert.throws(mkc([{ openMinutes: 570, closeMinutes: null }]), /lite-charts/);
+        assert.throws(mkc([{ openMinutes: 9.5, closeMinutes: 960 }]), /lite-charts/, 'non-integer');
+        assert.throws(mkc([{ openMinutes: 570, closeMinutes: 570 }]), /lite-charts/, 'zero-width');
+        assert.throws(mkc([{ openMinutes: 960, closeMinutes: 570 }]), /overnight/i,
+            'inverted names overnight as unsupported');
+        assert.throws(mkc([{ openMinutes: 570, closeMinutes: 1441 }]), /lite-charts/, 'close > 1440');
+        assert.throws(mkc([{ openMinutes: -1, closeMinutes: 960 }]), /lite-charts/, 'open < 0');
+        assert.throws(mkc([]), /lite-charts/, 'empty sessions array');
+        assert.throws(mkc({}), /lite-charts/, 'non-array sessions');
+        assert.throws(mkc([{ openMinutes: 570, closeMinutes: 960, days: [] }]), /lite-charts/);
+        assert.throws(mkc([{ openMinutes: 570, closeMinutes: 960, days: [7] }]), /lite-charts/);
+        assert.throws(mkc([{ openMinutes: 570, closeMinutes: 960, days: [null] }]), /lite-charts/);
+        assert.throws(mkc([{ openMinutes: 570, closeMinutes: 960, days: [1.5] }]), /lite-charts/);
+        // The != null convention (reviewer-pinned): a bare null is ABSENT, not junk.
+        assert.equal(_normalizeSessionSpec({ sessions: null }), null,
+            'sessions: null -> weekend path (spec null)');
+        const dn = _normalizeSessionSpec({ sessions: [{ openMinutes: 570, closeMinutes: 960, days: null }] });
+        const dnBands = _sessionBands(M, M + 14 * D, dn, FILL);
+        assert.equal(dnBands.length, 11, 'days: null falls to the Mon-Fri default mask');
+    });
+
+    // -- TS18: T0 -- explicit conflicting xScale.type throws -----------------
+    it('TS18: createTimeLineChart rejects an explicit non-time xScale.type', () => {
+        assert.throws(
+            () => createTimeLineChart({ data: SDATA, xScale: { type: 'log' }, schedule: (fn) => fn() }),
+            /time/, 'explicit log type throws instead of silent override');
+        assert.throws(
+            () => createTimeLineChart({ data: SDATA, xScale: { type: null }, schedule: (fn) => fn() }),
+            /time/, 'type: null is junk, not absence');
+        for (const xScale of [{}, { type: 'time' }, { type: undefined }]) {
+            const c = createTimeLineChart({ data: SDATA, xScale, schedule: (fn) => fn() });
+            c.mount(createMockCanvas(800, 400));
+            assert.equal(c.xScaleType, 'time');
+            c.destroy();
+        }
+    });
+
+    // -- TS19: per-row null-x guard holds under sessions (TS14 reuse) --------
+    it('TS19: dirty rows cannot collapse the session extent to 1970', () => {
+        const dirty = [
+            { x: M, y: 1 }, { x: null, y: 2 }, { x: undefined, y: 3 },
+            { x: 'not a date', y: 4 }, { x: M + 14 * D, y: 5 },
+        ];
+        const acc = _shadingAnnotationsAcc(true, null, [() => dirty], (row) => row.x, spec1());
+        const list = acc();
+        assert.equal(list.length, 11, 'dirty rows skipped: the 11 canonical bands, not ~10k from 1970');
+        assert.equal(list[0].from, M, 'extent unpolluted by the null row');
+    });
+
+    // -- TS20: tree-shake source confinement (extends TS11) ------------------
+    it('TS20: session helpers reachable only through createTimeLineChart', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        for (const [name, n] of [['_sessionBands', 1], ['_normalizeSessionSpec', 1],
+                                 ['_weekendBands', 1], ['_shadingAnnotationsAcc', 1]]) {
+            const calls = src.match(new RegExp(name + '\\(', 'g')) || [];
+            assert.equal(calls.length, n, `exactly ${n} immediate-paren call-site(s) of ${name}`);
+        }
+        assert.ok(
+            /export const createLineChart = \(config\) => createBaseAxisChart\(config, LINE_RENDERER\);/.test(src),
+            'createLineChart stays a plain one-liner');
+    });
+
+    // -- TS21: retention with sessions active --------------------------------
+    it('TS21: repeated mount+destroy with sessions leaves no retained nodes', () => {
+        const before = stats().activeNodes;
+        for (let i = 0; i < 50; i++) {
+            const c = createTimeLineChart({
+                data: SDATA, shading: { sessions: [{ openMinutes: 570, closeMinutes: 960 }] },
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(800, 400));
+            c.destroy();
+        }
+        assert.equal(stats().activeNodes - before, 0, 'no reactive-node retention');
+    });
+
+    // -- TS22: union invariants -- contained/overlapping/back-to-back --------
+    it('TS22: the cursor sweep unions hostile session sets without sort or spurious bands', () => {
+        const b = (sessions) => _sessionBands(M, M + 14 * D,
+            _normalizeSessionSpec({ sessions }), FILL);
+        // Every hostile set unions to the SAME shape as the plain {570,960}
+        // session, so compare exact from/to lists -- a count-only assertion
+        // would miss a cursor regression that corrupts bounds but not counts
+        // (proven: reverting `if (c > cursor)` to unconditional keeps 11 bands
+        // but shifts a band start from close(960') to the contained close(700')).
+        const canon = b([{ openMinutes: 570, closeMinutes: 960 }]).map((x) => [x.from, x.to]);
+        const flat = (set) => set.map((x) => [x.from, x.to]);
+        // Contained session (validator sorts by open; {600,700} sits inside {570,960}).
+        const contained = b([{ openMinutes: 600, closeMinutes: 700 }, { openMinutes: 570, closeMinutes: 960 }]);
+        assert.deepEqual(flat(contained), canon, 'contained session adds no band and regresses no cursor');
+        // Overlapping sessions merge into the single-session shape.
+        const overlap = b([{ openMinutes: 570, closeMinutes: 700 }, { openMinutes: 650, closeMinutes: 960 }]);
+        assert.deepEqual(flat(overlap), canon, 'overlapping sessions union-merge to the outer bounds');
+        // Back-to-back sessions must not emit a zero-width band at the seam.
+        const seam = b([{ openMinutes: 570, closeMinutes: 690 }, { openMinutes: 690, closeMinutes: 960 }]);
+        assert.deepEqual(flat(seam), canon, 'back-to-back seam emits no zero-width band');
+        for (const set of [contained, overlap, seam]) {
+            for (const band of set) assert.ok(band.to > band.from, 'positive width everywhere');
+        }
+        // sessionFill overrides the weekend default on every band.
+        const filled = _sessionBands(M, M + 14 * D,
+            _normalizeSessionSpec({ sessions: [{ openMinutes: 570, closeMinutes: 960 }], sessionFill: '#123456' }),
+            FILL);
+        assert.ok(filled.every((band) => band.fill === '#123456'), 'sessionFill reaches every band');
+    });
+});
