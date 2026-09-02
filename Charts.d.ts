@@ -309,6 +309,46 @@ export interface TooltipConfig {
 
 export type LegendPosition = 'top' | 'bottom' | 'left' | 'right';
 
+/**
+ * Options handed to a `LegendVirtualizer` factory, allocated ONCE per mount.
+ * The adapter owns row creation/position/height; `renderRow` (supplied here)
+ * writes the row's contents.
+ */
+export interface LegendVirtualizerOpts {
+    /** Total series count (>= 0); equals the normalized series length. */
+    count: number;
+    /** Fixed row height in CSS px (> 0 integer). */
+    itemHeight: number;
+    /** Viewport height in CSS px (> 0 integer). */
+    height: number;
+    /** Extra rows rendered beyond the viewport on each edge (>= 0 integer). */
+    overscan: number;
+    /**
+     * Bind (or re-bind) a pooled row element to a series index. Synchronous,
+     * void, allocation-free after the first bind of each element. MAY be called
+     * on an element previously bound to a different index (recycle): it re-reads
+     * both the series color and visibility on every call.
+     */
+    renderRow: (rowEl: HTMLElement, idx: number) => void;
+}
+
+/** Handle returned by a `LegendVirtualizer`. `dispose()` is called on unmount. */
+export interface LegendVirtualHandle {
+    dispose: () => void;
+}
+
+/**
+ * User-supplied windowing adapter for a very tall legend. lite-charts NEVER
+ * imports a windowing library; you pass the factory. It receives the scroll
+ * host and the options above, and must return a `{ dispose }` handle (else
+ * mount throws). Requires `position: 'left' | 'right'` and a numeric
+ * `legend.height`.
+ */
+export type LegendVirtualizer = (
+    host: HTMLElement,
+    opts: LegendVirtualizerOpts,
+) => LegendVirtualHandle;
+
 export interface LegendConfig {
     position?: LegendPosition;
     /**
@@ -317,6 +357,20 @@ export interface LegendConfig {
      * in different DOM trees.
      */
     container?: HTMLElement;
+    /**
+     * Opt-in legend virtualization (v1.12.0). A factory that windows the row
+     * list, so a legend with hundreds of series keeps only a bounded set of
+     * rows in layout. `false` (or absent) uses the eager path. Requires
+     * `position: 'left' | 'right'` and a numeric `height`. All invalid config
+     * throws at construction.
+     */
+    virtualize?: LegendVirtualizer | false;
+    /** Scroll-viewport height in CSS px. REQUIRED when `virtualize` is set. */
+    height?: number;
+    /** Fixed row height in CSS px. Default 28. Only used when virtualized. */
+    itemHeight?: number;
+    /** Rows rendered beyond each viewport edge. Default 2. Only used when virtualized. */
+    overscan?: number;
 }
 
 /** Minimal signal shape (lite-signal). Read = `sig()`, write = `sig.set(v)`. */
@@ -769,10 +823,7 @@ export interface BubbleChartConfig extends PanZoomConfig, BrushConfig {
         }) => string | { header?: string; rows?: Array<{ color: string; label: string; value: string }> };
     };
 
-    legend?: boolean | 'top' | 'bottom' | 'left' | 'right' | {
-        position?: 'top' | 'bottom' | 'left' | 'right';
-        container?: HTMLElement;
-    };
+    legend?: boolean | LegendPosition | LegendConfig;
 
     font?: string;
     labelColor?: string;
@@ -892,10 +943,7 @@ export interface RadarChartConfig {
         }) => string | { header?: string; rows?: Array<{ color: string; label: string; value: string }> };
     };
 
-    legend?: boolean | 'top' | 'bottom' | 'left' | 'right' | {
-        position?: 'top' | 'bottom' | 'left' | 'right';
-        container?: HTMLElement;
-    };
+    legend?: boolean | LegendPosition | LegendConfig;
 
     dpr?: number;
     schedule?: (cb: () => void) => unknown;
@@ -970,10 +1018,7 @@ export interface PieChartConfig {
         }) => string | { header?: string; value?: string };
     };
 
-    legend?: boolean | 'top' | 'bottom' | 'left' | 'right' | {
-        position?: 'top' | 'bottom' | 'left' | 'right';
-        container?: HTMLElement;
-    };
+    legend?: boolean | LegendPosition | LegendConfig;
 
     dpr?: number;
     schedule?: (cb: () => void) => unknown;

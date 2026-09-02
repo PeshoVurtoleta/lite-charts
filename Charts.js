@@ -2656,7 +2656,7 @@ const inferXScaleType = (firstRow, xKey) => {
 //
 // Why DOM and not canvas: legend rows are interactive (click targets) and
 // will eventually want accessibility (aria-pressed, keyboard nav), CSS
-// theming, and -- in v1.2 -- lite-virtual scrolling for series counts in
+// theming, and -- opt-in -- windowed scrolling for series counts in
 // the hundreds. All four are awkward on canvas, natural in DOM.
 //
 // Skipped in headless contexts (no `document`). Tests verify the visibility
@@ -2754,6 +2754,193 @@ const installLegend = (target, canvas, legendEl, position) => {
     wrapper.appendChild(legendEl);
     target.appendChild(wrapper);
     return wrapper;
+};
+
+// ---------------------------------------------------------------------------
+// Legend virtualization (v1.12.0) -- opt-in, adapter-driven
+// ---------------------------------------------------------------------------
+//
+// A very tall legend (hundreds of series) puts one DOM node per series into
+// layout. `legend.virtualize` hands windowing off to an external windowing
+// adapter WITHOUT lite-charts importing or depending on one: the caller
+// supplies a factory `(host, opts) => ({ dispose })`. Charts.js owns row
+// *contents* (children, dataset, aria, color, label); the adapter owns row
+// creation, positioning and height. Fail closed: every junk config THROWS at
+// construction (before any signal is allocated), never a silent draw-time zero.
+// null is not zero -- `legend.height: null` must NOT coerce to 0, so the
+// `== null` gate is BEFORE any unary +.
+
+const _normalizeLegendVirtualization = (legendConfigObj, legendPosition) => {
+    // Only the object form of `legend` can carry `virtualize`. String / false /
+    // absent forms fall through to the eager path untouched.
+    if (legendConfigObj == null || typeof legendConfigObj !== 'object') return null;
+    const v = legendConfigObj.virtualize;
+    // Absent -> eager. `false` mirrors `shading: false` -> eager.
+    if (v === undefined || v === false) return null;
+    if (typeof v !== 'function') {
+        const t = v === null ? 'null' : (Array.isArray(v) ? 'array' : typeof v);
+        throw new Error('lite-charts: legend.virtualize must be a function or absent, got ' + t);
+    }
+    if (legendPosition === 'top' || legendPosition === 'bottom') {
+        throw new Error("lite-charts: virtualized legend requires position 'left' or 'right', got '" + legendPosition + "'");
+    }
+    // Height is REQUIRED (the scroll viewport needs a fixed box). null is not
+    // zero: gate == null BEFORE any unary + so `height: null` cannot become 0.
+    const h = legendConfigObj.height;
+    if (h == null) {
+        throw new Error('lite-charts: virtualized legend requires a numeric legend.height');
+    }
+    if (!Number.isInteger(h) || h <= 0) {
+        throw new Error('lite-charts: legend.height must be a positive integer, got ' + h);
+    }
+    let itemHeight = 28;
+    const ih = legendConfigObj.itemHeight;
+    if (ih != null) {
+        if (!Number.isInteger(ih) || ih <= 0) {
+            throw new Error('lite-charts: legend.itemHeight must be a positive integer, got ' + ih);
+        }
+        itemHeight = ih;
+    }
+    let overscan = 2;
+    const os = legendConfigObj.overscan;
+    if (os != null) {
+        if (!Number.isInteger(os) || os < 0) {
+            throw new Error('lite-charts: legend.overscan must be a non-negative integer, got ' + os);
+        }
+        overscan = os;
+    }
+    return { itemHeight, height: h, overscan, factory: v };
+};
+
+// Builds the virtualized legend host + wires the adapter. Returns
+// { legendEl, handle, repaint } or null when there is no `document`. The
+// adapter calls `renderRow(rowEl, idx)` for each visible/pooled row; that
+// callback re-reads BOTH color and visibility UNTRACKED every time (an element
+// pooled/recycled onto a different idx must not carry stale state). ONE shared
+// effect subscribes to EVERY series-visibility signal (so any writer, including
+// a direct .set, triggers a repaint) and repaints only the currently-bound
+// rows -- a bounded array, O(window) not O(series). ONE delegated click
+// listener walks up to the element carrying data-lc-idx. Exactly 4 disposers
+// are added regardless of series count.
+const buildVirtualLegendDOM = (legendOpts, vspec, normalized, seriesVisibility, seriesRefs, font, labelColor, disposers) => {
+    if (typeof document === 'undefined') return null;
+
+    const legendEl = document.createElement('div');
+    legendEl.className = 'lite-charts-legend lite-charts-legend-virtual';
+    legendEl.style.display = 'block';
+    legendEl.style.overflowY = 'auto';
+    legendEl.style.overflowX = 'hidden';
+    legendEl.style.height = vspec.height + 'px';
+    legendEl.style.position = 'relative';
+    legendEl.style.padding = '8px 0';
+    legendEl.style.font = font;
+    legendEl.style.color = labelColor;
+    legendEl.style.lineHeight = '1.4';
+
+    // Bounded set of currently-rendered rows. The adapter recycles pooled
+    // elements, so this length tracks the window (+overscan), never the series
+    // count. First bind of an element registers it here; recycled elements
+    // keep their identity and stay registered.
+    const boundRows = [];
+
+    // renderRow: adapter owns row creation/position/height; we write children
+    // (once), dataset, aria, opacity, swatch bg, label text. Recycle-safe: BOTH
+    // reads (visibility + color) happen UNTRACKED on every call.
+    const _paintRow = (rowEl, idx) => {
+        if (rowEl.childNodes.length === 0) {
+            const swatch = document.createElement('span');
+            swatch.style.display = 'inline-block';
+            swatch.style.width = '12px';
+            swatch.style.height = '12px';
+            swatch.style.borderRadius = '2px';
+            swatch.style.flexShrink = '0';
+            const label = document.createElement('span');
+            rowEl.appendChild(swatch);
+            rowEl.appendChild(label);
+            boundRows.push(rowEl);
+        }
+        rowEl.dataset.lcIdx = idx;
+        rowEl.setAttribute('role', 'button');
+        rowEl.setAttribute('tabindex', '0');
+        // .peek() is an UNTRACKED read with no closure allocation -- an element
+        // recycled onto a different idx must not carry stale visibility, and the
+        // scroll hot path must not allocate a per-row untrack thunk.
+        const visible = seriesVisibility[idx].peek();
+        rowEl.setAttribute('aria-pressed', visible ? 'true' : 'false');
+        rowEl.style.opacity = visible ? '1' : '0.4';
+        rowEl.childNodes[0].style.background = seriesRefs[idx].colorRef.value;
+        rowEl.childNodes[1].textContent = normalized[idx].name;
+    };
+
+    // Repaint currently-bound rows from their own data-lc-idx. Shared by the
+    // visibility effect and by refreshTheme (swatch bg). Reads UNTRACKED so it
+    // never adds subscriptions -- the effect owns subscription.
+    const repaint = () => {
+        for (let i = 0; i < boundRows.length; i++) {
+            const rowEl = boundRows[i];
+            const raw = rowEl.dataset.lcIdx;
+            if (raw == null) continue; // null is not 0: gate before unary +
+            const idx = +raw;
+            if (!Number.isInteger(idx) || idx < 0 || idx >= seriesVisibility.length) continue;
+            const visible = seriesVisibility[idx].peek();
+            rowEl.setAttribute('aria-pressed', visible ? 'true' : 'false');
+            rowEl.style.opacity = visible ? '1' : '0.4';
+            rowEl.childNodes[0].style.background = seriesRefs[idx].colorRef.value;
+        }
+    };
+
+    // ONE delegated click listener. Walk up to the element carrying
+    // data-lc-idx; gate raw == null BEFORE +raw; require a valid integer index.
+    const onClick = (ev) => {
+        let node = ev.target;
+        while (node && node !== legendEl) {
+            if (node.dataset && node.dataset.lcIdx != null) break;
+            node = node.parentNode;
+        }
+        if (!node || node === legendEl || !node.dataset) return;
+        const raw = node.dataset.lcIdx;
+        if (raw == null) return;
+        const i = +raw;
+        if (!Number.isInteger(i) || i < 0 || i >= seriesVisibility.length) return;
+        seriesVisibility[i].update((x) => !x);
+    };
+    legendEl.addEventListener('click', onClick);
+    const removeClick = () => legendEl.removeEventListener('click', onClick);
+
+    // ONE shared visibility effect: subscribe to EVERY series so any writer
+    // triggers a repaint, then repaint only the bound rows. Body runs sub-Hz
+    // (only on a toggle), never on the scroll hot path.
+    const visEffect = effect(() => {
+        for (let i = 0; i < seriesVisibility.length; i++) seriesVisibility[i]();
+        repaint();
+    });
+
+    const optsObj = {
+        count: normalized.length,
+        itemHeight: vspec.itemHeight,
+        height: vspec.height,
+        overscan: vspec.overscan,
+        renderRow: _paintRow,
+    };
+    let handle;
+    try {
+        handle = vspec.factory(legendEl, optsObj);
+    } catch (e) {
+        removeClick();
+        visEffect();
+        throw e;
+    }
+    if (!handle || typeof handle.dispose !== 'function') {
+        removeClick();
+        visEffect();
+        throw new Error('lite-charts: legend.virtualize factory must return { dispose: function }');
+    }
+    disposers.push(removeClick);
+    disposers.push(visEffect);
+    disposers.push(() => handle.dispose());
+    disposers.push(() => { boundRows.length = 0; });
+
+    return { legendEl, handle, repaint };
 };
 
 // ---------------------------------------------------------------------------
@@ -4622,6 +4809,9 @@ const createBaseAxisChart = (config, renderer) => {
             legendContainer = config.legend.container;
         }
     }
+    // v1.12.0: opt-in legend virtualization. Cold validator; every junk config
+    // THROWS here (before any signal alloc), null (absent/false) -> eager path.
+    const legendVSpec = _normalizeLegendVirtualization(config.legend, legendPosition);
 
     // -- Crosshair / tooltip config --
     // Defaults (true) are alpha.1 milestones. Disable with `crosshair: false`
@@ -4708,6 +4898,8 @@ const createBaseAxisChart = (config, renderer) => {
     let ownedCanvas = false;
     let legendEl = null;          // DOM element if a legend was created
     let legendWrapper = null;     // wrapper around canvas+legend if we created one
+    let legendVHandle = null;     // adapter handle when the legend is virtualized
+    let legendVRepaint = null;    // closure-captured repaint for the virtual path
     const disposers = [];
     let mounted = false;
 
@@ -5734,15 +5926,38 @@ const createBaseAxisChart = (config, renderer) => {
         if (legendEnabled) {
             const fontResolved = config.font != null ? config.font : DEFAULT_FONT;
             const labelColorResolved = resolveColor(config.labelColor || DEFAULT_LABEL_COLOR, container);
-            legendEl = buildLegendDOM(
-                { position: legendPosition, container: legendContainer },
-                normalized,
-                seriesVisibility,
-                seriesRefs,
-                fontResolved,
-                labelColorResolved,
-                disposers,
-            );
+            if (legendVSpec) {
+                // v1.12.0: virtualized legend. Adapter owns row windowing; we
+                // own row contents + the shared visibility effect. Same
+                // attach/wrapper logic as the eager path (installLegend
+                // unchanged), same fail-closed gates (no document / bare canvas
+                // -> chart.legend stays null, adapter never called).
+                const vbuilt = buildVirtualLegendDOM(
+                    { position: legendPosition, container: legendContainer },
+                    legendVSpec,
+                    normalized,
+                    seriesVisibility,
+                    seriesRefs,
+                    fontResolved,
+                    labelColorResolved,
+                    disposers,
+                );
+                if (vbuilt) {
+                    legendEl = vbuilt.legendEl;
+                    legendVHandle = vbuilt.handle;
+                    legendVRepaint = vbuilt.repaint;
+                }
+            } else {
+                legendEl = buildLegendDOM(
+                    { position: legendPosition, container: legendContainer },
+                    normalized,
+                    seriesVisibility,
+                    seriesRefs,
+                    fontResolved,
+                    labelColorResolved,
+                    disposers,
+                );
+            }
             if (legendEl) {
                 if (legendContainer) {
                     // User-provided container: append directly, don't wrap canvas.
@@ -5756,6 +5971,8 @@ const createBaseAxisChart = (config, renderer) => {
                 // dangle. Drop it.
                 if (!legendContainer && !legendWrapper) {
                     legendEl = null;
+                    legendVHandle = null;
+                    legendVRepaint = null;
                 }
             }
         }
@@ -5794,6 +6011,9 @@ const createBaseAxisChart = (config, renderer) => {
         }
         legendEl = null;
         legendWrapper = null;
+        // v1.12.0: adapter dispose rides the disposers loop above; just drop refs.
+        legendVHandle = null;
+        legendVRepaint = null;
         canvas = null;
         container = null;
         mounted = false;
@@ -6104,7 +6324,11 @@ const createBaseAxisChart = (config, renderer) => {
         // fill / label colors track the theme. The markDirty below repaints.
         if (annThemeVersion) annThemeVersion.update((v) => (v + 1) | 0);
         // Update legend swatches too -- they were styled from colorRef at build time.
-        if (legendEl) {
+        // v1.12.0: the virtualized legend has no positional span:first-child map
+        // (rows are pooled/recycled), so repaint the bound rows by index instead.
+        if (legendVRepaint) {
+            legendVRepaint();
+        } else if (legendEl) {
             const swatches = legendEl.querySelectorAll('span:first-child');
             for (let i = 0; i < swatches.length && i < seriesRefs.length; i++) {
                 swatches[i].style.background = seriesRefs[i].colorRef.value;

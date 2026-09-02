@@ -21,6 +21,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 import { signal, createRegistry, setDefaultRegistry, stats, effect } from '@zakkster/lite-signal';
 // The full suite creates 200+ charts; each chart allocates ~12-20 reactive
@@ -3016,6 +3017,26 @@ describe('auto-resize (kernel-side ResizeObserver)', () => {
         style: mkStyleMap(),
         className: '',
         textContent: '',
+        // v1.12.0: attribute + dataset + listener surface for the virtualized
+        // legend. `dataset` is a plain bag (data-lc-idx); attributes back
+        // setAttribute/getAttribute (aria-pressed, role, tabindex); listeners
+        // back addEventListener/removeEventListener with a _fire(type, ev) hook.
+        dataset: {},
+        _attrs: {},
+        _listeners: {},
+        scrollTop: 0,
+        clientHeight: 0,
+        setAttribute(k, v) { this._attrs[k] = String(v); },
+        getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; },
+        addEventListener(type, fn) { (this._listeners[type] || (this._listeners[type] = [])).push(fn); },
+        removeEventListener(type, fn) {
+            const a = this._listeners[type]; if (!a) return;
+            const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+        },
+        _fire(type, ev) {
+            const a = this._listeners[type]; if (!a) return;
+            for (let i = 0; i < a.length; i++) a[i].call(this, ev);
+        },
         appendChild(c) {
             if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
             this.childNodes.push(c); c.parentNode = this; c.parentElement = this; return c;
@@ -8438,5 +8459,327 @@ describe('v1.11.0 -- market-hours session shading', () => {
             _normalizeSessionSpec({ sessions: [{ openMinutes: 570, closeMinutes: 960 }], sessionFill: '#123456' }),
             FILL);
         assert.ok(filled.every((band) => band.fill === '#123456'), 'sessionFill reaches every band');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.12.0 -- legend virtualization (opt-in, adapter-driven)
+// ---------------------------------------------------------------------------
+//
+// lite-charts NEVER imports a windowing library. `legend.virtualize` is a
+// user-supplied factory `(host, opts) => ({ dispose })`. The tests below stand
+// up an in-file `fakeVirtualizer` -- fixed-size windowing over renderRow -- so
+// the suite runs with NO extra devDependency. The eager legend region
+// (buildLegendDOM..installLegend) stays byte-identical (V5).
+
+describe('v1.12.0 -- legend virtualization', () => {
+    // -- self-contained DOM mock (attributes + dataset + listeners + scroll) ---
+    const mkVEl = (tag) => ({
+        tagName: (tag || 'div').toUpperCase(),
+        childNodes: [],
+        parentNode: null,
+        parentElement: null,
+        style: {},
+        className: '',
+        textContent: '',
+        dataset: {},
+        _attrs: {},
+        _listeners: {},
+        scrollTop: 0,
+        clientHeight: 0,
+        setAttribute(k, v) { this._attrs[k] = String(v); },
+        getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; },
+        addEventListener(type, fn) { (this._listeners[type] || (this._listeners[type] = [])).push(fn); },
+        removeEventListener(type, fn) {
+            const a = this._listeners[type]; if (!a) return;
+            const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+        },
+        _listenerCount(type) { const a = this._listeners[type]; return a ? a.length : 0; },
+        _fire(type, ev) {
+            const a = this._listeners[type]; if (!a) return;
+            for (let i = 0; i < a.length; i++) a[i].call(this, ev);
+        },
+        appendChild(c) {
+            if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
+            this.childNodes.push(c); c.parentNode = this; c.parentElement = this; return c;
+        },
+        removeChild(c) {
+            const i = this.childNodes.indexOf(c);
+            if (i >= 0) this.childNodes.splice(i, 1);
+            c.parentNode = null; c.parentElement = null; return c;
+        },
+        querySelectorAll() { return []; },
+    });
+
+    const withDOM = (fn) => {
+        const prev = globalThis.document;
+        globalThis.document = { createElement: (tag) => mkVEl(tag) };
+        try { return fn(); } finally { globalThis.document = prev; }
+    };
+
+    // Fixed-size windowing adapter. Pool of `window` recycled row elements;
+    // first index = floor(scrollTop / itemHeight), clamped; overscan widens the
+    // pool. renderRow (Charts.js-owned) writes the row's contents. Zero-alloc on
+    // the paint path except when the first index actually changes.
+    const fakeVirtualizer = (host, opts) => {
+        const count = opts.count;
+        const itemHeight = opts.itemHeight;
+        const win = count < (Math.ceil(opts.height / itemHeight) + opts.overscan * 2)
+            ? count
+            : (Math.ceil(opts.height / itemHeight) + opts.overscan * 2);
+        const pool = [];
+        for (let i = 0; i < win; i++) {
+            const row = document.createElement('div');
+            row.style.position = 'absolute';
+            row.style.height = itemHeight + 'px';
+            host.appendChild(row);
+            pool.push(row);
+        }
+        let firstBound = -1;
+        const paint = () => {
+            let first = (host.scrollTop | 0) / itemHeight | 0;
+            const maxFirst = count - win < 0 ? 0 : count - win;
+            if (first > maxFirst) first = maxFirst;
+            if (first < 0) first = 0;
+            if (first === firstBound) return;
+            firstBound = first;
+            for (let s = 0; s < pool.length; s++) {
+                const idx = first + s;
+                if (idx >= count) continue;
+                opts.renderRow(pool[s], idx);
+            }
+        };
+        paint();
+        const onScroll = () => paint();
+        host.addEventListener('scroll', onScroll);
+        return {
+            dispose() {
+                host.removeEventListener('scroll', onScroll);
+                for (let i = 0; i < pool.length; i++) {
+                    if (pool[i].parentNode) pool[i].parentNode.removeChild(pool[i]);
+                }
+                pool.length = 0;
+            },
+        };
+    };
+
+    const mkSeries = (n) => {
+        const s = new Array(n);
+        for (let i = 0; i < n; i++) s[i] = { name: 'S' + i, data: [{ x: 0, y: i }, { x: 1, y: i + 1 }] };
+        return s;
+    };
+
+    // Rows currently carrying a data-lc-idx, in DOM order.
+    const boundRows = (host) => host.childNodes.filter((n) => n.dataset && n.dataset.lcIdx != null);
+    const rowByIdx = (host, idx) => host.childNodes.find((n) => n.dataset && n.dataset.lcIdx != null && (+n.dataset.lcIdx) === idx);
+    const scrollTo = (host, top) => { host.scrollTop = top; host._fire('scroll'); };
+
+    const mkChart = (legendCfg, n) => createLineChart({
+        series: mkSeries(n == null ? 200 : n),
+        crosshair: false, tooltip: false, schedule: (fn) => fn(),
+        legend: legendCfg,
+    });
+
+    // -- V1: bounded DOM (virtualized) vs exactly-N eager control --------------
+    it('V1: virtualized legend binds a bounded window; eager binds every row', () => {
+        withDOM(() => {
+            const container = mkVEl('div');
+            const chart = mkChart({ position: 'right', container, virtualize: fakeVirtualizer, height: 240, itemHeight: 24, overscan: 2 }, 200);
+            chart.mount(createMockCanvas(800, 400));
+            const b = boundRows(chart.legend);
+            assert.ok(b.length >= 10 && b.length <= 14, 'bounded window: ' + b.length);
+            chart.destroy();
+
+            const c2 = mkVEl('div');
+            const eager = mkChart({ position: 'right', container: c2 }, 200);
+            eager.mount(createMockCanvas(800, 400));
+            assert.equal(eager.legend.childNodes.length, 200, 'eager control binds every row');
+            eager.destroy();
+        });
+    });
+
+    // -- V2: scroll reveal a distant window ------------------------------------
+    it('V2: scrolling rebinds the pool to a distant, still-bounded window', () => {
+        withDOM(() => {
+            const container = mkVEl('div');
+            const chart = mkChart({ position: 'right', container, virtualize: fakeVirtualizer, height: 240, itemHeight: 24, overscan: 2 }, 200);
+            chart.mount(createMockCanvas(800, 400));
+            const init = boundRows(chart.legend).map((n) => +n.dataset.lcIdx).sort((a, z) => a - z);
+            assert.equal(init[0], 0);
+            assert.equal(init[init.length - 1], 13);
+
+            scrollTo(chart.legend, 2400);
+            const b = boundRows(chart.legend);
+            const idxs = b.map((n) => +n.dataset.lcIdx);
+            assert.ok(Math.min(...idxs) >= 98, 'min bound ' + Math.min(...idxs));
+            assert.ok(Math.max(...idxs) <= 113, 'max bound ' + Math.max(...idxs));
+            assert.ok(b.length <= 14, 'still bounded: ' + b.length);
+            const r100 = rowByIdx(chart.legend, 100);
+            assert.ok(r100, 'row 100 present');
+            assert.equal(r100.childNodes[1].textContent, 'S100');
+            chart.destroy();
+        });
+    });
+
+    // -- V3: a click on a RECYCLED row toggles the right series ----------------
+    it('V3: delegated click on a recycled row toggles exactly its series', () => {
+        withDOM(() => {
+            const container = mkVEl('div');
+            const chart = mkChart({ position: 'right', container, virtualize: fakeVirtualizer, height: 240, itemHeight: 24, overscan: 2 }, 200);
+            chart.mount(createMockCanvas(800, 400));
+            scrollTo(chart.legend, 2400);
+            const first = boundRows(chart.legend)[0];
+            assert.equal(+first.dataset.lcIdx, 100, 'first bound row is the recycled idx 100');
+            chart.legend._fire('click', { target: first });
+            assert.equal(chart.seriesVisibility[100].peek(), false, 'clicked series toggled off');
+            assert.equal(chart.seriesVisibility[0].peek(), true, 'series 0 untouched');
+            let offCount = 0;
+            for (let i = 0; i < 200; i++) if (chart.seriesVisibility[i].peek() === false) offCount++;
+            assert.equal(offCount, 1, 'exactly one of 200 toggled');
+            chart.destroy();
+        });
+    });
+
+    // -- V4: a dimmed series survives recycle (idx re-read, not element state) --
+    it('V4: dimmed state follows the series index through recycle', () => {
+        withDOM(() => {
+            const container = mkVEl('div');
+            const chart = mkChart({ position: 'right', container, virtualize: fakeVirtualizer, height: 240, itemHeight: 24, overscan: 2 }, 200);
+            chart.mount(createMockCanvas(800, 400));
+            scrollTo(chart.legend, 2400);
+            chart.setSeriesVisible(100, false);
+            scrollTo(chart.legend, 0);
+            scrollTo(chart.legend, 2400);
+            const r100 = rowByIdx(chart.legend, 100);
+            const r101 = rowByIdx(chart.legend, 101);
+            assert.equal(r100.style.opacity, '0.4', 'dimmed idx survives recycle');
+            assert.equal(r100.getAttribute('aria-pressed'), 'false');
+            assert.equal(r101.style.opacity, '1', 'neighbour stays bright');
+            assert.equal(r101.getAttribute('aria-pressed'), 'true');
+            // Asymmetric hop: shift the window by exactly one row so every
+            // pool slot rebinds to a DIFFERENT index than it held at 2400.
+            // A renderRow that trusts element state instead of re-reading the
+            // signal keeps each slot's previous paint and fails here -- the
+            // symmetric scroll-out/back above cannot catch that, because each
+            // slot returns to the same index it left.
+            scrollTo(chart.legend, 2376);
+            const s100 = rowByIdx(chart.legend, 100);
+            const s101 = rowByIdx(chart.legend, 101);
+            assert.equal(s100.style.opacity, '0.4', 'dimmed idx survives asymmetric recycle');
+            assert.equal(s100.getAttribute('aria-pressed'), 'false');
+            assert.equal(s101.style.opacity, '1', 'shifted slot re-reads the signal');
+            assert.equal(s101.getAttribute('aria-pressed'), 'true');
+            chart.destroy();
+        });
+    });
+
+    // -- V5: byte-identity of the eager region + zero-import confinement -------
+    it('V5: eager legend region is byte-identical and the adapter is confined', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        const start = src.indexOf('const buildLegendDOM = ');
+        const endMarker = '    target.appendChild(wrapper);\n    return wrapper;\n};';
+        const end = src.indexOf(endMarker) + endMarker.length;
+        const sub = src.slice(start, end);
+        assert.ok(start >= 0 && end > start, 'region located');
+        assert.equal(
+            createHash('sha256').update(sub).digest('hex'),
+            '9a547f4bfc3d2d7a7a4852bcc3f3f6435307008596b8712bbc7faf04eb05ef57',
+            'buildLegendDOM..installLegend byte-identity',
+        );
+        const count = (s) => src.split(s).length - 1;
+        assert.equal(count('lite-virtual'), 0, 'no lite-virtual reference in source');
+        assert.equal(count('mountList'), 0, 'no mountList reference in source');
+        assert.equal(count('buildVirtualLegendDOM'), 2, 'decl + one call');
+        assert.equal(count('_normalizeLegendVirtualization'), 2, 'decl + one call');
+    });
+
+    // -- V6: construction-time validation matrix ------------------------------
+    it('V6: virtualize validation throws on junk and falls through on absent/false', () => {
+        const fn = (host, opts) => fakeVirtualizer(host, opts);
+        const mk = (cfg) => () => mkChart(cfg, 3);
+        // type errors (== null gated; null is not a function)
+        assert.throws(mk({ position: 'right', virtualize: null, height: 240 }), /must be a function or absent, got null/);
+        assert.throws(mk({ position: 'right', virtualize: 5, height: 240 }), /got number/);
+        assert.throws(mk({ position: 'right', virtualize: 'x', height: 240 }), /got string/);
+        assert.throws(mk({ position: 'right', virtualize: {}, height: 240 }), /got object/);
+        assert.throws(mk({ position: 'right', virtualize: [], height: 240 }), /got array/);
+        // position must be left/right
+        assert.throws(mk({ position: 'top', virtualize: fn, height: 240 }), /'left' or 'right'/);
+        assert.throws(mk({ position: 'bottom', virtualize: fn, height: 240 }), /'left' or 'right'/);
+        // height required and must be a positive integer -- null is NOT zero
+        assert.throws(mk({ position: 'right', virtualize: fn }), /legend\.height/);
+        assert.throws(mk({ position: 'right', virtualize: fn, height: null }), /legend\.height/);
+        assert.throws(mk({ position: 'right', virtualize: fn, height: 0 }), /positive integer/);
+        assert.throws(mk({ position: 'right', virtualize: fn, height: -5 }), /positive integer/);
+        assert.throws(mk({ position: 'right', virtualize: fn, height: 1.5 }), /positive integer/);
+        // itemHeight present-and-invalid throws; overscan present-and-invalid throws
+        assert.throws(mk({ position: 'right', virtualize: fn, height: 240, itemHeight: 0 }), /itemHeight/);
+        assert.throws(mk({ position: 'right', virtualize: fn, height: 240, itemHeight: 1.5 }), /itemHeight/);
+        assert.throws(mk({ position: 'right', virtualize: fn, height: 240, overscan: -1 }), /overscan/);
+        assert.throws(mk({ position: 'right', virtualize: fn, height: 240, overscan: 1.5 }), /overscan/);
+        // the two NON-throws: absent + false -> eager path (200 rows)
+        withDOM(() => {
+            for (const cfg of [{ position: 'right', container: mkVEl('div') }, { position: 'right', container: mkVEl('div'), virtualize: false }]) {
+                const chart = mkChart(cfg, 200);
+                chart.mount(createMockCanvas(800, 400));
+                assert.equal(chart.legend.childNodes.length, 200, 'eager rows for ' + JSON.stringify(cfg.virtualize));
+                chart.destroy();
+            }
+        });
+    });
+
+    // -- V7: handle validation at mount ---------------------------------------
+    it('V7: a factory that returns no dispose() throws at mount; legend stays null', () => {
+        withDOM(() => {
+            for (const bad of [() => undefined, () => ({})]) {
+                const chart = mkChart({ position: 'right', container: mkVEl('div'), virtualize: bad, height: 240 }, 10);
+                assert.throws(() => chart.mount(createMockCanvas(800, 400)), /dispose/);
+                assert.equal(chart.legend, null, 'nothing attached on a rejected handle');
+                chart.destroy();
+            }
+        });
+    });
+
+    // -- V8: retention across 50 mount/destroy cycles -------------------------
+    it('V8: 50 mount/destroy cycles dispose every adapter and retain no nodes', () => {
+        withDOM(() => {
+            let created = 0, disposed = 0;
+            const counting = (host, opts) => {
+                created++;
+                const inner = fakeVirtualizer(host, opts);
+                return { dispose() { disposed++; inner.dispose(); } };
+            };
+            const before = stats().activeNodes;
+            for (let i = 0; i < 50; i++) {
+                const chart = mkChart({ position: 'right', container: mkVEl('div'), virtualize: counting, height: 240, itemHeight: 24 }, 200);
+                chart.mount(createMockCanvas(800, 400));
+                chart.destroy();
+            }
+            assert.equal(disposed, 50, 'every adapter handle disposed');
+            assert.equal(created - disposed, 0, 'no live adapter handles');
+            assert.equal(stats().activeNodes - before, 0, 'no reactive-node retention');
+        });
+    });
+
+    // -- V9: O(1) -- one delegated listener regardless of series count ---------
+    it('V9: exactly one delegated listener + constant teardown across series counts', () => {
+        withDOM(() => {
+            for (const n of [20, 200, 2000]) {
+                let disposed = 0;
+                const counting = (host, opts) => {
+                    const inner = fakeVirtualizer(host, opts);
+                    return { dispose() { disposed++; inner.dispose(); } };
+                };
+                const chart = mkChart({ position: 'right', container: mkVEl('div'), virtualize: counting, height: 240, itemHeight: 24 }, n);
+                chart.mount(createMockCanvas(800, 400));
+                const host = chart.legend;
+                assert.equal(host._listenerCount('click'), 1, 'one delegated click listener at n=' + n);
+                assert.equal(host._listenerCount('scroll'), 1, 'one scroll listener at n=' + n);
+                chart.destroy();
+                assert.equal(host._listenerCount('click'), 0, 'click listener removed at n=' + n);
+                assert.equal(host._listenerCount('scroll'), 0, 'scroll listener removed at n=' + n);
+                assert.equal(disposed, 1, 'adapter disposed once at n=' + n);
+            }
+        });
     });
 });

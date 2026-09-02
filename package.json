@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-charts",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Reactive, zero-GC chart library. Signal-native data, scales, and dimensions; 60fps at 100k points; zero allocations in steady-state render. Built on @zakkster/lite-scene.",
   "type": "module",
   "main": "./Charts.js",
@@ -28,10 +28,14 @@
     "@zakkster/lite-axis": "^1.0.1",
     "@zakkster/lite-delaunay": "^1.0.0",
     "@zakkster/lite-scene": "^1.0.0",
-    "@zakkster/lite-signal": "^1.1.0"
+    "@zakkster/lite-signal": "^1.1.0",
+    "@zakkster/lite-virtual": "^1.1.0"
   },
   "peerDependenciesMeta": {
     "@zakkster/lite-delaunay": {
+      "optional": true
+    },
+    "@zakkster/lite-virtual": {
       "optional": true
     }
   },

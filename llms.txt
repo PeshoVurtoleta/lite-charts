@@ -10,7 +10,43 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.11.0 (current): market-hours session shading -- additive; one new config
+> v1.12.0 (current): legend virtualization -- additive, opt-in, fully
+> confined; a chart that does not set `legend.virtualize` is byte-unchanged
+> (the eager `buildLegendDOM`..`installLegend` region is byte-identical,
+> SHA-pinned by a test). `legend.virtualize: (host, opts) => ({ dispose })`
+> hands the legend's row WINDOWING to a caller-supplied adapter -- wire it to
+> @zakkster/lite-virtual's mountList (YOUR import; Charts.js contains ZERO
+> references to lite-virtual, asserted by test; optional peerDep only,
+> mirroring lite-delaunay's spatialIndex injection precedent). opts contract
+> (allocated once per mount): { count, itemHeight, height, overscan,
+> renderRow(rowEl, idx) }. The adapter owns row creation/position/height;
+> Charts.js owns row CONTENTS: renderRow builds children once per pooled
+> element, then on every (re)bind writes data-lc-idx, role/tabindex/
+> aria-pressed, opacity, swatch colour, and label -- re-reading BOTH
+> visibility (signal.peek(), untracked, no closure alloc) and colour per
+> bind, so a recycled row never shows stale state. ONE shared visibility
+> effect (subscribes to every seriesVisibility, repaints only bound rows via
+> their own data-lc-idx) and ONE delegated click listener (dataset lookup,
+> == null gated before unary +, integer + bounds checked) replace the eager
+> path's per-row effect + per-row listener: exactly 4 disposers at any
+> series count. Config: legend.height REQUIRED (int px > 0; null is not 0 --
+> throws), itemHeight default 28, overscan default 2, position 'left'|'right'
+> ONLY (top/bottom + virtualize throws; horizontal virtualization is a
+> candidate). FAILS CLOSED at construction: non-function virtualize (false =
+> absent = eager), bad height/itemHeight/overscan; at mount: a factory
+> return without a dispose fn throws with NOTHING attached (chart.legend
+> stays null). A11y: rows carry role="button"/tabindex/aria-pressed; focus
+> does not survive scroll-out (pooled rows -- documented). 9 new tests
+> (435->444): bounded 10..14-row window at 200 series, scroll rebind, the
+> recycled-click signal-index bug, ASYMMETRIC-recycle dimmed state (a
+> symmetric scroll-out/back cannot catch stale element state -- each slot
+> returns to the same idx; proven by reversion), eager byte-identity +
+> zero-reference confinement, validation matrix, handle validation, 50x
+> mount/destroy retention, O(1) listeners at 20/200/2000 series. Torture A18:
+> 50k-op scroll storm, chart-side 1.02 B/op vs 0.85 no-legend control (delta
+> 0.17 <= 0.5), ZERO new signal-graph nodes (peek never subscribes), major
+> GC 0.
+> v1.11.0: market-hours session shading -- additive; one new config
 > field + one new construction-time throw; every existing factory, the shared
 > kernel, and the v1.10.0 weekend path byte-unchanged. createTimeLineChart's
 > shading object gains sessions: [{openMinutes, closeMinutes, days?}] +
@@ -1433,14 +1469,12 @@ charts dynamically.
   established (mock-WebGL2-context unit tests + real-GPU
   Playwright). Bench target: 1M scatter points at 60fps with
   signal-driven pan/zoom.
-- v1.11.x / v1.12.0 (candidates): legend virtualization via
-  `@zakkster/lite-virtual` (grounded brief -- caller-injected `virtualize`
-  fn per the spatialIndex precedent, no import, vertical-first); overnight
-  session support (close < open via midnight-split open intervals -- throws
-  today); holiday-calendar convenience over the annotation range primitive;
-  horizontal-bar brush band-axis multi-select refinements + a configurable
-  brush modifier; brush ids across all visible series (currently
-  primary-series only).
+- v1.12.x / v1.13.0 (candidates): overnight session support (close < open
+  via midnight-split open intervals -- throws today); holiday-calendar
+  convenience over the annotation range primitive; horizontal (top/bottom)
+  legend virtualization (throws today); horizontal-bar brush band-axis
+  multi-select refinements + a configurable brush modifier; brush ids across
+  all visible series (currently primary-series only).
 - v2.0.0 (possible): renderer-agnostic kernel refactor (if
   lite-charts-gl proves out, fold the renderer choice into core);
   deeper SSR support.

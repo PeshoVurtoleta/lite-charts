@@ -30,7 +30,7 @@ import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, c
 import { signal } from '@zakkster/lite-signal';
 import {
     createEventCanvas, quietCanvas, fireShared, runOpsGate, allocFailMsg,
-    installCenterLabelDOM, BREAK, check, die,
+    installCenterLabelDOM, graphSnapshot, BREAK, check, die,
 } from './harness.mjs';
 
 const {
@@ -488,5 +488,98 @@ export function run() {
             () => `A17: session ${gS.bytesPerOp.toFixed(3)} B/op vs weekend ${gW.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
         sess.destroy();
         wknd.destroy();
+    }
+
+    // --- 12. virtualized legend scroll-storm budget (A18, v1.12.0) ------------
+    // A tall legend virtualized through a user adapter must keep the CHART side
+    // zero-alloc on the scroll hot path. Charts.js owns renderRow (row contents)
+    // and one shared visibility effect; the scroll storm rebinds the pooled rows
+    // ~every step (24px == itemHeight), calling _paintRow for the whole window on
+    // each op. That path reads visibility via signal.peek() (no untrack thunk)
+    // and writes only pooled DOM fields -- no per-row allocation. This gate mounts
+    // a 200-series line with a virtualized legend, drives 5000 scroll steps of
+    // 24px interleaved with redraw, and pins maxMajor:0 / maxArrayBuffersGrowth:0.
+    // The <=1.5 B/op absolute bounds the chart-side scroll cost; the <=0.5 B/op
+    // differential against a virtualize-ABSENT control (same 200-series redraw,
+    // no scroll) isolates the scroll storm; and a graph-node delta of ZERO proves
+    // no effect is (re-)registered during the storm -- peek() never subscribes.
+    {
+        const mkVEl = (tag) => ({
+            tagName: (tag || 'div').toUpperCase(),
+            childNodes: [], parentNode: null, parentElement: null,
+            style: {}, className: '', textContent: '',
+            dataset: {}, _attrs: {}, _listeners: {}, scrollTop: 0, clientHeight: 0,
+            setAttribute(k, v) { this._attrs[k] = v; },
+            getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; },
+            addEventListener(t, fn) { (this._listeners[t] || (this._listeners[t] = [])).push(fn); },
+            removeEventListener(t, fn) { const a = this._listeners[t]; if (!a) return; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+            _fire(t) { const a = this._listeners[t]; if (!a) return; for (let i = 0; i < a.length; i++) a[i].call(this); },
+            appendChild(c) { if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c); this.childNodes.push(c); c.parentNode = this; c.parentElement = this; return c; },
+            removeChild(c) { const i = this.childNodes.indexOf(c); if (i >= 0) this.childNodes.splice(i, 1); c.parentNode = null; c.parentElement = null; return c; },
+            querySelectorAll() { return []; },
+        });
+        const fakeVirtualizer = (host, opts) => {
+            const count = opts.count, itemHeight = opts.itemHeight;
+            const full = Math.ceil(opts.height / itemHeight) + opts.overscan * 2;
+            const win = count < full ? count : full;
+            const pool = [];
+            for (let i = 0; i < win; i++) { const r = document.createElement('div'); host.appendChild(r); pool.push(r); }
+            let firstBound = -1;
+            const paint = () => {
+                let first = (host.scrollTop | 0) / itemHeight | 0;
+                const maxFirst = count - win < 0 ? 0 : count - win;
+                if (first > maxFirst) first = maxFirst;
+                if (first < 0) first = 0;
+                if (first === firstBound) return;
+                firstBound = first;
+                for (let s = 0; s < pool.length; s++) { const idx = first + s; if (idx < count) opts.renderRow(pool[s], idx); }
+            };
+            paint();
+            const onScroll = () => paint();
+            host.addEventListener('scroll', onScroll);
+            return { dispose() { host.removeEventListener('scroll', onScroll); for (let i = 0; i < pool.length; i++) if (pool[i].parentNode) pool[i].parentNode.removeChild(pool[i]); pool.length = 0; } };
+        };
+        const prevDoc = globalThis.document;
+        globalThis.document = { createElement: (t) => mkVEl(t) };
+        try {
+            const mkSeries = (n) => { const s = new Array(n); for (let i = 0; i < n; i++) s[i] = { name: 'S' + i, data: [{ x: 0, y: i }, { x: 1, y: i + 1 }] }; return s; };
+            const mk = (virtualized) => {
+                const cfg = { series: mkSeries(200), x: 'x', y: 'y', width: 800, height: 400, crosshair: false, tooltip: false, schedule: (fn) => fn() };
+                cfg.legend = virtualized
+                    ? { position: 'right', container: mkVEl('div'), virtualize: fakeVirtualizer, height: 240, itemHeight: 24, overscan: 2 }
+                    : false;
+                const c = createLineChart(cfg);
+                const cv = createEventCanvas(800, 400);
+                c.mount(cv);
+                quietCanvas(cv);
+                return c;
+            };
+            const vc = mk(true);
+            const ctrl = mk(false);
+            const host = vc.legend;
+            // Sanity: the window is bounded (not one node per series).
+            let bound = 0;
+            for (let i = 0; i < host.childNodes.length; i++) { const n = host.childNodes[i]; if (n.dataset && n.dataset.lcIdx != null) bound++; }
+            check(bound >= 10 && bound <= 14,
+                () => `A18: expected a bounded 10..14-row window, got ${bound}`);
+            const maxScroll = 200 * 24 - 240; // 4560px of scrollable range
+            const before = graphSnapshot();
+            const hotV = (i) => { host.scrollTop = (i * 24) % maxScroll; host._fire('scroll'); vc.redraw(); };
+            const hotC = () => { ctrl.redraw(); };
+            const gV = runOpsGate(hotV, { ops: 50000, warmup: 500 });
+            const gC = runOpsGate(hotC, { ops: 50000, warmup: 500 });
+            const after = graphSnapshot();
+            if (!gV.report.ok) die(allocFailMsg('A18.legend-scroll', gV.report, gV.summary));
+            check(after.nodes - before.nodes === 0,
+                () => `A18: ${after.nodes - before.nodes} new signal-graph nodes during the scroll storm (expected 0)`);
+            check(gV.bytesPerOp <= 1.5,
+                () => `A18: virtualized scroll storm allocated ${gV.bytesPerOp.toFixed(3)} B/op > 1.5`);
+            check(Math.abs(gV.bytesPerOp - gC.bytesPerOp) <= 0.5,
+                () => `A18: scroll ${gV.bytesPerOp.toFixed(3)} B/op vs no-legend control ${gC.bytesPerOp.toFixed(3)} B/op (delta > 0.5)`);
+            vc.destroy();
+            ctrl.destroy();
+        } finally {
+            globalThis.document = prevDoc;
+        }
     }
 }

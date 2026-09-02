@@ -5,6 +5,42 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] -- 2026-09
+
+Opt-in legend virtualization: a legend with hundreds of series can hand its row
+windowing to an external adapter WITHOUT lite-charts importing one. Additive and
+fully confined -- the eager legend path (`buildLegendDOM`..`installLegend`) is
+byte-identical, and a chart that does not set `legend.virtualize` is unchanged.
+
+### Added -- legend virtualization
+
+- **`legend.virtualize`.** A user-supplied factory
+  `(host, opts) => ({ dispose })` that windows the legend rows, so only a bounded
+  set of DOM rows is ever in layout (e.g. wire it to `@zakkster/lite-virtual`'s
+  `mountList` -- YOUR import; lite-charts never imports it). Charts.js owns row
+  *contents* (children, `data-lc-idx`, `role`/`aria-pressed`/`tabindex`, swatch
+  colour, label text) and one shared visibility effect + one delegated click
+  listener; the adapter owns row creation, position, and height.
+- **`legend.height` / `legend.itemHeight` / `legend.overscan`.** Viewport height
+  (REQUIRED when virtualized -- `null` is not 0, it throws), fixed row height
+  (default 28), and off-viewport overscan rows (default 2).
+- **Fail closed.** Every invalid config throws at construction (before any signal
+  is allocated): a non-function `virtualize`, `position: 'top' | 'bottom'`, a
+  missing/`null`/non-positive-integer `height`, or an invalid `itemHeight` /
+  `overscan`. A factory that returns no `dispose()` throws at mount with nothing
+  attached (`chart.legend === null`).
+- **`@zakkster/lite-virtual`** added as an OPTIONAL peer dependency (mirrors
+  `lite-delaunay`); it is never imported by `Charts.js`.
+
+### Notes
+
+- Zero chart-side allocation on the scroll hot path: `renderRow` re-reads
+  visibility via `signal.peek()` (no `untrack` thunk) and writes only pooled DOM
+  fields. Gated by torture case A18 (`<= 1.5 B/op`, `<= 0.5 B/op` vs a
+  virtualize-absent control, zero new signal-graph nodes during a scroll storm).
+- Keyboard focus does not survive a row scrolling out of the window (rows are
+  pooled and recycled) -- a documented trade-off of virtualization.
+
 ## [1.11.0] -- 2026-09
 
 Market-hours session shading on `createTimeLineChart`, plus a fail-closed

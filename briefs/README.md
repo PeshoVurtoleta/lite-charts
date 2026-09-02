@@ -4,10 +4,10 @@ Local working scratch. **Not shipped** -- `briefs/` is absent from
 package.json `files[]`, so nothing here reaches npm. Each brief is a
 self-contained plan for one future `cd LiteCharts && claude` session.
 
-Current shipped state: **v1.11.0** (market-hours session shading on
-`createTimeLineChart`; weekend shading v1.10.0, on the annotation layer from
-v1.7.0; horizontal-bar pan/zoom/grid v1.8.0 + brush v1.9.0; x-axis log scale +
-mixed-sign log floor from v1.6.x).
+Current shipped state: **v1.12.0** (legend virtualization via caller-injected
+`virtualize` adapter; market-hours session shading v1.11.0; weekend shading
+v1.10.0, on the annotation layer from v1.7.0; horizontal-bar pan/zoom/grid
+v1.8.0 + brush v1.9.0; x-axis log scale + mixed-sign log floor from v1.6.x).
 The forward plan in `../ROADMAP.md` points here.
 
 ## The set, in recommended order
@@ -21,12 +21,15 @@ The forward plan in `../ROADMAP.md` points here.
 | 6 | `lite-charts-gl-companion.md` | design, SEPARATE PACKAGE | XL | Own package; re-verify lite-gl 1.4.0 `PointHiSink` before planning. |
 | ~~new~~ | ~~horizontal-brush~~ | **SHIPPED v1.9.0** | S-M | Brush on a horizontal bar: value-range + band-set payload `{valueMin,valueMax,bandMin,bandMax,bands,ids}`, distinct from the vertical `{xMin,xMax,yMin,yMax,ids}`. Kept for reference. |
 | ~~7~~ | ~~`market-hours.md`~~ | **SHIPPED v1.11.0** | S-M | Caller-supplied session calendar, complement-of-open-union band generation over the v1.10.0 shading machinery (`_weekendBands` byte-identical). Overnight sessions still OUT (throw; v1.11.x candidate). Kept for reference. |
-| 5 | `legend-virtualization.md` | **GROUNDED, target v1.12.0** | S | Re-grounded 2026-09-02: injection follows the `spatialIndex` precedent (caller-supplied `virtualize` fn, NO lite-virtual import), vertical-only, bounded-pool effects, delegated click. |
+| ~~5~~ | ~~`legend-virtualization.md`~~ | **SHIPPED v1.12.0** | S | Caller-supplied `virtualize` fn per the `spatialIndex` precedent (NO lite-virtual import), vertical-only, ONE shared visibility effect + ONE delegated click listener (the planner overturned the brief's bounded-pool-effects option -- a rebind inside a scroll callback cannot re-run an effect). Horizontal virtualization still throws (candidate). Kept for reference. |
 
 PLANNED ORDER (2026-09-02, user-confirmed): ~~#7 market-hours -> v1.11.0~~
-SHIPPED; next **#5 legend-virtualization -> v1.12.0**. Both feed the upcoming
-back-office build (time-series KPI panel + many-series dashboards). Item 6
-(lite-charts-gl) is a different package entirely.
+SHIPPED; ~~#5 legend-virtualization -> v1.12.0~~ SHIPPED. Both feed the
+upcoming back-office build (time-series KPI panel + many-series dashboards).
+Remaining: item 6 (lite-charts-gl, a different package entirely) and the
+v1.12.x candidates in ../ROADMAP.md. Also queued outside this repo:
+lite-delaunay 1.1.0 (findNearest/dispose so it can satisfy the charts
+SpatialIndex contract -- 1.0.0 is triangulate-only).
 
 ## Ground rules every brief inherits
 

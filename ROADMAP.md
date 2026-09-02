@@ -5,7 +5,46 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.11.0 (current)
+## v1.12.0 (current)
+
+Legend virtualization. Additive, opt-in, fully confined: a chart that does not
+set `legend.virtualize` is byte-unchanged (the eager
+`buildLegendDOM`..`installLegend` region is byte-identical, SHA-pinned in the
+test suite).
+
+- **`legend.virtualize: (host, opts) => ({ dispose })`.** Hands the legend's
+  row windowing to a caller-supplied adapter -- wire it to
+  `@zakkster/lite-virtual`'s `mountList` (YOUR import; `Charts.js` contains
+  zero references to lite-virtual, asserted by test; optional peerDep only,
+  mirroring the lite-delaunay `spatialIndex` injection precedent). The opts
+  contract: `{ count, itemHeight, height, overscan, renderRow(rowEl, idx) }`.
+  The adapter owns row creation/position/height; lite-charts owns row
+  contents -- `renderRow` re-reads swatch colour and visibility per bind
+  (untracked `.peek()`, no closure alloc), so recycled rows never show stale
+  state.
+- **O(1) reactive surface.** One shared visibility effect (subscribes to every
+  `seriesVisibility`, repaints only bound rows via their own `data-lc-idx`)
+  and one delegated click listener replace the eager path's per-row effect +
+  per-row listener; exactly 4 disposers at any series count. A 200-series
+  legend holds <= 14 DOM rows.
+- **Fail-closed.** Non-function `virtualize` (only `false`/absent = eager),
+  `position: 'top' | 'bottom'`, missing/`null` `height` (null is not 0),
+  invalid `itemHeight`/`overscan` all throw at construction; a factory return
+  without a `dispose` fn throws at mount with nothing attached
+  (`chart.legend` stays `null`). Vertical (`left`/`right`) only in this cut.
+- 9 new tests (435 -> 444): bounded window, scroll rebind, the recycled-click
+  signal-index bug, asymmetric-recycle dimmed state (a symmetric
+  scroll-out/back cannot catch stale element state -- proven by reversion),
+  eager byte-identity + confinement, validation matrix, handle validation,
+  50x mount/destroy retention, O(1) listeners at 20/200/2000 series. Torture
+  A18: 50k-op scroll storm, chart-side 1.02 B/op vs 0.85 no-legend control,
+  zero new signal-graph nodes. ASCII clean.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.11.0
 
 Market-hours session shading on `createTimeLineChart`. Additive: one new
 config field and one new construction-time throw; every existing factory, the
@@ -530,12 +569,11 @@ The v1.4 interaction-primitives arc is complete and released:
 Each item below has a grounded working brief in `briefs/` (local scratch,
 not shipped in `files[]`). They are independent; pick by appetite.
 
-- **Legend virtualization** (`briefs/legend-virtualization.md`, target
-  v1.12.0) -- via `@zakkster/lite-virtual` for charts with 100+ series
-  (real-time monitoring dashboards). Renders only visible legend rows.
-  Grounded: caller-injected `virtualize` fn per the `spatialIndex` optional-
-  peer precedent (no import), vertical positions first.
-- **Overnight sessions** (v1.11.x candidate) -- `closeMinutes < openMinutes`
+- ~~**Legend virtualization**~~ -- **SHIPPED v1.12.0** (caller-injected
+  `virtualize` fn per the `spatialIndex` optional-peer precedent, no import,
+  vertical positions only). Horizontal (top/bottom) virtualization remains a
+  candidate (throws today).
+- **Overnight sessions** (v1.12.x candidate) -- `closeMinutes < openMinutes`
   throws today; support needs midnight-split open intervals and a real merge
   in `_sessionBands`. Holiday-calendar convenience is a sibling candidate;
   both ride the shipped session machinery.
@@ -589,8 +627,9 @@ whichever minor they land in rather than one combined cut: **x-log** shipped
 as v1.6.0, the **annotation layer** as v1.7.0, **horizontal-bar interactions**
 as v1.8.0, the **horizontal-bar `brush`** as v1.9.0, and **`createTimeLineChart`
 + weekend shading** as v1.10.0, and **market-hours session shading** as
-v1.11.0; the remaining items (legend virtualization, overnight sessions) stay
-independent entries in the "Next -- polish + reach" list above.
+v1.11.0, and **legend virtualization** as v1.12.0; the remaining items
+(overnight sessions, horizontal legend virtualization) stay independent
+entries in the "Next -- polish + reach" list above.
 
 ### v2.0.0 -- (possible)
 

@@ -17,16 +17,28 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.11.0 -- market-hours session shading (minor). `createTimeLineChart`'s
-`shading` config gains a caller-supplied session calendar: `sessions:
-[{ openMinutes, closeMinutes, days? }]` shades all non-trading time as the
-complement of the open-interval union -- Fri close -> Mon open is one band,
-weekends are subsumed, lunch-break markets get their midday gaps. Data-driven:
-no exchange, timezone, or holiday table built in. Also: an explicit conflicting
-`xScale.type` now throws instead of being silently forced to `'time'`.
-Every existing factory, the shared kernel, and the v1.10.0 weekend path are
-byte-unchanged. **435/435 tests pass** plus a torture/stress gate
-(`npm run torture`).
+**Status:** v1.12.0 -- legend virtualization (minor). `legend.virtualize` hands
+the legend's row windowing to a caller-supplied adapter (e.g. over
+`@zakkster/lite-virtual`'s `mountList` -- YOUR import; lite-charts never
+imports a windowing library), so a 500-series legend keeps a bounded set of DOM
+rows, one shared visibility effect, and one delegated click listener instead of
+500 of each. Explicit opt-in, vertical (`left`/`right`) only; the eager legend
+path is byte-identical and every invalid config throws at construction.
+**444/444 tests pass** plus a torture/stress gate (`npm run torture`).
+
+**New in v1.12.0:**
+- **`legend.virtualize`.** `(host, opts) => ({ dispose })` -- the adapter owns
+  row creation/position/height; lite-charts owns row contents (`renderRow`
+  re-reads swatch colour + visibility per bind, so recycled rows never show
+  stale state), toggling, and a11y (`role`/`aria-pressed`/`tabindex`). With
+  `legend.height` (required), `legend.itemHeight` (default 28), and
+  `legend.overscan` (default 2). See "Virtualizing a tall legend" below.
+- **Fail-closed doors.** Non-function `virtualize`, `position: 'top'|'bottom'`,
+  a missing/`null`/non-positive-integer `height`, or a factory returning no
+  `dispose()` all throw (construction or mount) with nothing attached;
+  `virtualize: false` or absent keeps the byte-identical eager legend.
+- **`@zakkster/lite-virtual`** added as an OPTIONAL peer (mirrors
+  `lite-delaunay`); never imported.
 
 **New in v1.11.0:**
 - **Session-calendar shading.** `shading: { sessions: [{ openMinutes: 570,
@@ -453,8 +465,9 @@ ribbon-style min-max area is a separate primitive in v1.1+.
 Rendered as a DOM element (sibling of the canvas, inside an auto-created
 flex wrapper), so it's keyboard-accessible (each row is a `<button>` with
 `aria-pressed`), CSS-themable (`.lite-charts-legend` class on the
-container), and ready to drop a virtualizer into when v1.2 ships the
-`lite-virtual` integration. Click-to-toggle is wired by default.
+container), and -- opt-in -- windowable for hundreds of series (see
+[Virtualizing a tall legend](#virtualizing-a-tall-legend-v1120)).
+Click-to-toggle is wired by default.
 
 ```javascript
 createLineChart({
@@ -476,6 +489,58 @@ Position controls the auto-wrapper's flex direction:
 For custom DOM placement, pass an existing element via
 `legend: { container: someEl }` -- the legend appends into your element and
 the canvas stays put.
+
+### Virtualizing a tall legend (v1.12.0)
+
+A legend with hundreds of series puts one DOM node per series into layout.
+`legend.virtualize` hands the row windowing to an external adapter so only a
+bounded set of rows is ever mounted. **lite-charts never imports a windowing
+library** -- you pass the factory. Wire it to `@zakkster/lite-virtual`'s
+`mountList` (your import), or any windowing primitive with the same shape:
+
+```javascript
+import { createLineChart } from '@zakkster/lite-charts';
+import { mountList } from '@zakkster/lite-virtual'; // YOUR import, not ours
+
+createLineChart({
+    series: manySeries,                  // hundreds of rows
+    legend: {
+        position: 'right',               // must be 'left' or 'right'
+        height: 320,                     // required: scroll-viewport px
+        itemHeight: 28,                  // fixed row height (default 28)
+        overscan: 2,                     // off-viewport rows (default 2)
+        virtualize: (host, opts) => mountList(host, opts), // -> { dispose }
+    },
+});
+```
+
+The factory is called once at mount with `(host, opts)`:
+
+| `opts` field | Type | Meaning |
+|---|---|---|
+| `count` | `number` | Total series count (`>= 0`). |
+| `itemHeight` | `number` | Fixed row height in px (`> 0` integer). |
+| `height` | `number` | Viewport height in px (`> 0` integer). |
+| `overscan` | `number` | Extra rows rendered per edge (`>= 0` integer). |
+| `renderRow` | `(rowEl, idx) => void` | Bind a pooled row to series `idx`. |
+
+The adapter owns row creation, position, and height; it calls `renderRow` for
+each visible (and overscan) row. `renderRow` -- owned by lite-charts -- writes
+the row's children, `data-lc-idx`, `role`/`aria-pressed`/`tabindex`, swatch
+colour, opacity, and label text, re-reading colour and visibility on every call
+so a recycled row never carries stale state. A single delegated click listener
+on the host toggles the series under the clicked `data-lc-idx`.
+
+The factory **must** return `{ dispose: function }`, or mount throws with nothing
+attached (`chart.legend` stays `null`). Every invalid config -- a non-function
+`virtualize`, `position: 'top' | 'bottom'`, a missing/`null`/non-positive-integer
+`height`, or an invalid `itemHeight` / `overscan` -- throws at construction,
+before any signal is allocated. `virtualize: false` (or absent) uses the eager
+path unchanged.
+
+> **Focus does not survive scroll-out.** Rows are pooled and recycled, so a row
+> that scrolls out of the window is rebound to a different series -- keyboard
+> focus on it is lost. This is an inherent trade-off of virtualization.
 
 ### Series visibility
 
@@ -1528,8 +1593,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.8.0** | Horizontal-bar interactions. `createBarChart({ orientation: 'horizontal' })` now accepts `pan` / `zoom` / value `grid`: the value axis (on screen-X under the swap) pans and zooms while the band axis stays pinned, `view.yMin` / `view.yMax` addressing the value axis. Built by remapping the linear pan/zoom kernels at each gesture boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical and the vertical path is unchanged; the per-frame draw is still 0 B. Horizontal + `brush` and horizontal + a `log` value axis still fail closed at construction. 406 tests (6 new: value-axis pan, band-pin control, cursor-anchored zoom, vertical value grid, fail-closed throws, mount/pan/destroy retention -- each proven load-bearing by measured reversion) + a horizontal-interaction 0-B torture case. |
 | **v1.9.0** | Horizontal-bar `brush`. A shift-drag on `createBarChart({ orientation: 'horizontal', brush: true })` selects a value range (screen-X) crossed with a band set (screen-Y), emitting a distinct `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` payload; the vertical brush keeps `{ xMin, xMax, yMin, yMax, ids }`. Every branch is a `swapAxes ? ...` selection at a brush call site, so `_normalizeBrushRect` / `_brushPxToData` / `_computeBrushIds` / `makeBandScale` stay byte-identical and the vertical path is unchanged; the overlay draw stays 0 B. Fail-closed: an empty-category chart commits `null` (no undefined band), `setBrush` rejects a `null` bound instead of coercing it to 0, and a `log` value axis still throws. 413 tests (7 new: value-range + band-set mapping, full-plot select, click-to-clear, facade validation, a vertical-brush regression guard, band-edge overlay alignment, empty-category fail-close -- HB1/HB3/HB5/HB7 proven load-bearing by reversion) + a 0-B horizontal-brush torture case. |
 | **v1.10.0** | `createTimeLineChart` + weekend shading. A time-series line preset over `createLineChart`: forces `xScale.type: 'time'`, defaults `panBounds: 'data'`, and adds opt-in `shading: true | 'weekends' | { fill? }` -- one `{ type: 'range', axis: 'x' }` band per Sat -> Mon UTC span in the data domain. Bands ride the v1.7.0 annotation layer (0 B per frame; re-clipped by the existing project effect) and are derived from the series data extent, not `scaleVersion`, so they regenerate on a data change but not per pan/zoom frame; SoA `{ xs, ys }` data is shaded like AoS. New factory + new config field only; every existing factory and the shared kernel are byte-unchanged, and the shading helpers tree-shake out of a `createLineChart`-only bundle. Fail-closed: a `null`/non-finite extent bound emits no bands (never epoch 0), a per-row `x: null` is gated before coercion (one missing timestamp cannot collapse the extent to 1970), `shading: false` opts out like absent, an invalid `shading` throws. 427 tests (14 new: weekend-walk boundaries, null/non-finite fail-close, SoA regression, forced time scale, count integration, opt-in null handle, config validation, tree-shake confinement, retention, false opt-out, row-level null guard -- TS2/TS5/TS13/TS14 proven load-bearing by reversion) + a 0-B weekend-shading torture case (A16). |
-| **v1.11.0** (this) | Market-hours session shading. `shading: { sessions: [{ openMinutes, closeMinutes, days? }], sessionFill? }` shades non-trading time as the complement of the open-interval union over the data domain: one band per overnight gap, ONE merged Fri-close -> Mon-open band per weekend (weekends subsumed, no double paint), lunch-break midday gaps free. Single-cursor sweep, no sort at generation (ordering is a validator invariant: open-ascending sort + `close <= 1440`); `_weekendBands` and the extent scan byte-identical -- the accessor changed by one generator-selection line. Fail-closed: overnight (`close < open`), zero-width, `null`/non-integer/out-of-range minutes, bad `days` all throw at construction; explicit conflicting `xScale.type` now throws instead of silent override. 435 tests (8 new: exact 11-band fixture, subsumption 11-vs-2, 21-band lunch-break, validator matrix, per-row null reuse, tree-shake confinement, retention, exact-bounds union invariants -- TS18/TS22 proven load-bearing by reversion) + a 0-B session-shading torture case (A17). |
-| v1.11.x / v1.12.0 (candidates) | legend virtualization via `lite-virtual` (grounded brief: caller-injected `virtualize`, no import, vertical-first); overnight session support (midnight-split open intervals); holiday-calendar convenience; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
+| **v1.11.0** | Market-hours session shading. `shading: { sessions: [{ openMinutes, closeMinutes, days? }], sessionFill? }` shades non-trading time as the complement of the open-interval union over the data domain: one band per overnight gap, ONE merged Fri-close -> Mon-open band per weekend (weekends subsumed, no double paint), lunch-break midday gaps free. Single-cursor sweep, no sort at generation (ordering is a validator invariant: open-ascending sort + `close <= 1440`); `_weekendBands` and the extent scan byte-identical -- the accessor changed by one generator-selection line. Fail-closed: overnight (`close < open`), zero-width, `null`/non-integer/out-of-range minutes, bad `days` all throw at construction; explicit conflicting `xScale.type` now throws instead of silent override. 435 tests (8 new: exact 11-band fixture, subsumption 11-vs-2, 21-band lunch-break, validator matrix, per-row null reuse, tree-shake confinement, retention, exact-bounds union invariants -- TS18/TS22 proven load-bearing by reversion) + a 0-B session-shading torture case (A17). |
+| **v1.12.0** (this) | Legend virtualization. `legend.virtualize: (host, opts) => ({ dispose })` windows the legend rows through a caller-supplied adapter (wire it to `@zakkster/lite-virtual`'s `mountList` -- your import; `Charts.js` contains zero references to it, asserted by test). A 200-series legend holds <= 14 DOM rows, ONE shared visibility effect, and ONE delegated click listener regardless of series count; `renderRow` re-reads swatch colour + visibility per bind so recycled rows never carry stale state. Explicit opt-in, vertical (`left`/`right`) only; the eager path `buildLegendDOM`..`installLegend` is byte-identical (SHA-pinned in the suite). Fail-closed: non-function `virtualize`, horizontal position, missing/`null` `height` (null is not 0), invalid `itemHeight`/`overscan`, and a dispose-less factory handle all throw with nothing attached. 444 tests (9 new: bounded window, scroll rebind, recycled-click signal index, asymmetric-recycle dimmed-state, byte-identity + confinement, validation matrix, handle validation, 50x retention, O(1) listeners -- V3/V4/V6 proven load-bearing by reversion) + a 50k-op scroll-storm torture case (A18: 1.02 B/op vs 0.85 control, zero new signal-graph nodes). |
+| v1.12.x / v1.13.0 (candidates) | overnight session support (midnight-split open intervals); holiday-calendar convenience; horizontal legend virtualization; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
 
 ## Ecosystem
 
