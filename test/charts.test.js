@@ -29,7 +29,7 @@ import { signal, createRegistry, setDefaultRegistry, stats, effect } from '@zakk
 // for a single app session but not enough for an exhaustive test suite that
 // runs every chart variant back-to-back. Bump to 32k for headroom.
 setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
-import { createLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, _testHelpers } from '../Charts.js';
+import { createLineChart, createTimeLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, _testHelpers } from '../Charts.js';
 import {
     createMockCanvas,
     countCalls,
@@ -8028,5 +8028,224 @@ describe('v1.9.0 -- horizontal-bar brush', () => {
         shiftDrag(canvas, 120, 40, 360, 260);
         assert.strictEqual(c.brush(), null, 'empty-category brush must be null (fail closed)');
         c.destroy();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.10.0 -- time-series variants: createTimeLineChart + weekend shading
+// ---------------------------------------------------------------------------
+//
+// createTimeLineChart is createLineChart with time-first defaults: xScale.type
+// forced to 'time' (regardless of the x key, which inferXScaleType would read
+// as 'linear'), panBounds defaulting to 'data', and an optional `shading` config
+// that wraps the user's annotations with COLD-generated weekend range bands. The
+// bands ride the v1.7.0 annotation layer unchanged -- plain {type:'range',
+// axis:'x'} rows re-clipped per frame by the existing project effect, so there
+// is NO new hot-path code. The generator derives its x-extent from the DATA
+// accessors (never the scale), so bands regenerate on data change but NOT per
+// pan/zoom frame.
+//
+// Fixed reference domain below: Mon 2021-01-04 -> Mon 2021-01-18 UTC (14 days)
+// contains exactly two full weekends (Sat Jan 9 -> Mon Jan 11, Sat Jan 16 -> Mon
+// Jan 18). The Jan 2-3 weekend ends exactly at the xMin midnight (to <= xMin)
+// and is excluded. HB-style load-bearing proof: TS2 (null-gate) and TS5 (SoA
+// branch) each go red under reversion of their guard.
+describe('v1.10.0 -- time-series variants', () => {
+    const { _weekendBands, _shadingAnnotationsAcc } = _testHelpers;
+    const MON_04 = Date.UTC(2021, 0, 4);   // Monday
+    const MON_18 = Date.UTC(2021, 0, 18);  // Monday, +14 days
+    const DAY = 86400000;
+    const FILL = 'rgba(0,0,0,0.05)';
+    const TDATA = [{ x: MON_04, y: 1 }, { x: MON_18, y: 2 }];
+
+    // -- TS1: _weekendBands emits exactly the Sat->Mon spans in range --------
+    it('TS1: _weekendBands walks UTC weekends, Sat 00:00 -> Mon 00:00, in-range only', () => {
+        const bands = _weekendBands(MON_04, MON_18, FILL);
+        assert.equal(bands.length, 2, 'Mon->Mon 14-day span has exactly 2 weekends');
+        for (const b of bands) {
+            assert.equal(b.type, 'range');
+            assert.equal(b.axis, 'x');
+            assert.equal(b.fill, FILL);
+            assert.equal(b.to - b.from, 2 * DAY, 'each band is a 48h Sat->Mon span');
+            assert.equal(new Date(b.from).getUTCDay(), 6, 'band starts on a Saturday');
+            assert.equal(new Date(b.to).getUTCDay(), 1, 'band ends on a Monday');
+        }
+        assert.equal(bands[0].from, Date.UTC(2021, 0, 9), 'first weekend starts Sat Jan 9');
+        assert.equal(bands[0].to, Date.UTC(2021, 0, 11), 'first weekend ends Mon Jan 11');
+        assert.equal(bands[1].from, Date.UTC(2021, 0, 16), 'second weekend starts Sat Jan 16');
+        assert.equal(bands[1].to, Date.UTC(2021, 0, 18), 'second weekend ends Mon Jan 18');
+    });
+
+    // -- TS2: fail-closed -- null / non-finite / inverted extent -> no bands --
+    it('TS2: _weekendBands fails closed on null/non-finite/inverted extent (null is not zero)', () => {
+        assert.deepEqual(_weekendBands(null, MON_18, FILL), [], 'null xMin -> no bands (not epoch 0)');
+        assert.deepEqual(_weekendBands(MON_04, null, FILL), [], 'null xMax -> no bands');
+        assert.deepEqual(_weekendBands(undefined, MON_18, FILL), [], 'undefined xMin -> no bands');
+        assert.deepEqual(_weekendBands(NaN, MON_18, FILL), [], 'NaN xMin -> no bands');
+        assert.deepEqual(_weekendBands(MON_18, MON_04, FILL), [], 'inverted extent -> no bands');
+        assert.deepEqual(_weekendBands(MON_04, MON_04, FILL), [], 'zero-width extent -> no bands');
+        // The +null===0 trap: null bounds must NOT coerce to 1970 and emit ~2600
+        // years of weekends. This is the guard the whole fail-closed law protects.
+        assert.equal(_weekendBands(null, null, FILL).length, 0, 'null bounds must not coerce to epoch 0');
+    });
+
+    // -- TS3: no shading -> byte-identical passthrough of user annotations ----
+    it('TS3: no shading -> passthrough of the user annotations accessor (zero added cost)', () => {
+        assert.equal(_shadingAnnotationsAcc(null, null, [], null), null,
+            'no shading + no annotations -> null (no annotation machinery)');
+        const user = [{ type: 'line', axis: 'y', value: 5 }];
+        const acc = _shadingAnnotationsAcc(null, user, [], null);
+        assert.deepEqual(acc(), user, 'no shading -> user annotations pass through unchanged');
+    });
+
+    // -- TS4: shading concatenates weekend bands ahead of user annotations ----
+    it('TS4: shading:true concatenates weekend bands then the user annotations', () => {
+        const user = [{ type: 'line', axis: 'y', value: 5 }];
+        const acc = _shadingAnnotationsAcc(true, user, [() => TDATA], buildAccessor('x'));
+        const list = acc();
+        assert.equal(list.length, 3, '2 weekend bands + 1 user annotation');
+        assert.equal(list[0].type, 'range', 'weekend bands come first');
+        assert.equal(list[2].type, 'line', 'user annotation preserved after the bands');
+    });
+
+    // -- TS5: SoA {xs,ys} data still yields weekend bands --------------------
+    //    Regression for the reviewer's blocker: Array.isArray(rows) is false for
+    //    SoA, so an unguarded scan would contribute no extent and silently emit
+    //    zero bands (fail-open) for a first-class data shape. Interior noon
+    //    endpoints keep the count robust to Float32 epoch quantization.
+    it('TS5: SoA {xs,ys} data contributes an extent (no silent zero bands)', () => {
+        const xs = Float32Array.from([Date.UTC(2021, 0, 6, 12), Date.UTC(2021, 0, 13, 12)]);
+        const ys = Float32Array.from([1, 2]);
+        const acc = _shadingAnnotationsAcc(true, null, [() => ({ xs, ys })], buildAccessor('x'));
+        const list = acc();
+        assert.equal(list.length, 1, 'SoA extent (Jan 6 -> Jan 13) yields the one interior weekend');
+        assert.equal(list[0].type, 'range', 'the SoA-derived band is a range annotation');
+    });
+
+    // -- TS6: createTimeLineChart forces a time x-scale regardless of key -----
+    it('TS6: createTimeLineChart forces xScaleType time even for a plain numeric x key', () => {
+        const chart = createTimeLineChart({ data: TDATA, x: 'x', y: 'y', schedule: (fn) => fn() });
+        chart.mount(createMockCanvas(800, 400));
+        assert.equal(chart.xScaleType, 'time',
+            'time preset forces time (inferXScaleType would read key x as linear)');
+        chart.destroy();
+    });
+
+    // -- TS7: shading renders exactly the weekend bands as annotations -------
+    it('TS7: shading:true adds exactly the in-domain weekend bands to the annotation layer', () => {
+        const chart = createTimeLineChart({
+            data: TDATA, x: 'x', y: 'y', shading: true, schedule: (fn) => fn(),
+        });
+        chart.mount(createMockCanvas(800, 400));
+        const ann = chart._internal.annotations;
+        assert.ok(ann, 'shading -> annotation handle exists');
+        assert.equal(ann.count, 2, 'exactly the 2 in-domain weekends');
+        chart.destroy();
+    });
+
+    // -- TS8: shading composes with user annotations ------------------------
+    it('TS8: shading composes with user annotations (count = bands + user)', () => {
+        const chart = createTimeLineChart({
+            data: TDATA, x: 'x', y: 'y', shading: true,
+            annotations: [{ type: 'line', axis: 'y', value: 1.5 }],
+            schedule: (fn) => fn(),
+        });
+        chart.mount(createMockCanvas(800, 400));
+        assert.equal(chart._internal.annotations.count, 3, '2 weekend bands + 1 user line');
+        chart.destroy();
+    });
+
+    // -- TS9: no shading -> no annotation machinery (opt-in, zero cost) ------
+    it('TS9: no shading config -> null annotation handle', () => {
+        const chart = createTimeLineChart({ data: TDATA, x: 'x', y: 'y', schedule: (fn) => fn() });
+        chart.mount(createMockCanvas(800, 400));
+        assert.equal(chart._internal.annotations, null,
+            'no shading + no annotations -> null handle (nothing added)');
+        chart.destroy();
+    });
+
+    // -- TS10: fail-closed config validation --------------------------------
+    it('TS10: createTimeLineChart validates its config and the shading kind', () => {
+        assert.throws(() => createTimeLineChart(), /requires a config object/);
+        assert.throws(() => createTimeLineChart(null), /requires a config object/);
+        assert.throws(
+            () => createTimeLineChart({ data: TDATA, shading: 42, schedule: (fn) => fn() }),
+            /shading` must be/,
+            'a numeric shading is rejected before any signal alloc');
+    });
+
+    // -- TS11: tree-shake confinement (source proxy; no esbuild in harness) --
+    it('TS11: the weekend generator is reachable only through createTimeLineChart', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        // Match an immediate `(` -- a real call-site, never `name (` prose in a
+        // comment (this codebase puts no space before a call paren). The defs are
+        // `const _weekendBands = (` / `const _shadingAnnotationsAcc = (`, unmatched.
+        const wbCalls = src.match(/_weekendBands\(/g) || [];
+        assert.equal(wbCalls.length, 1,
+            'the only _weekendBands() call-site is inside _shadingAnnotationsAcc');
+        const saCalls = src.match(/_shadingAnnotationsAcc\(/g) || [];
+        assert.equal(saCalls.length, 1,
+            'the only _shadingAnnotationsAcc() call-site is inside createTimeLineChart');
+        assert.ok(
+            /export const createLineChart = \(config\) => createBaseAxisChart\(config, LINE_RENDERER\);/.test(src),
+            'createLineChart stays a plain one-liner with no shading reference');
+    });
+
+    // -- TS12: mount/destroy retention with shading active -------------------
+    it('TS12: repeated mount+destroy with shading leaves no retained nodes', () => {
+        const before = stats().activeNodes;
+        for (let i = 0; i < 50; i++) {
+            const chart = createTimeLineChart({
+                data: TDATA, x: 'x', y: 'y', shading: true, schedule: (fn) => fn(),
+            });
+            chart.mount(createMockCanvas(800, 400));
+            chart.destroy();
+        }
+        assert.equal(stats().activeNodes - before, 0,
+            'shading mount/destroy cycles must not retain reactive nodes');
+    });
+
+    // -- TS13: shading:false is a first-class opt-out (cloud-review finding) --
+    //    The declared type is boolean | 'weekends' | {fill?}; a boolean flag
+    //    variable must not throw on false. Other falsy junk (0, '') still throws.
+    it('TS13: shading:false behaves exactly like absent; 0 and empty string still throw', () => {
+        const chart = createTimeLineChart({
+            data: TDATA, x: 'x', y: 'y', shading: false, schedule: (fn) => fn(),
+        });
+        chart.mount(createMockCanvas(800, 400));
+        assert.equal(chart._internal.annotations, null,
+            'shading:false -> no annotation machinery, same as omitting it');
+        chart.destroy();
+        assert.throws(
+            () => createTimeLineChart({ data: TDATA, shading: 0, schedule: (fn) => fn() }),
+            /shading` must be/, 'shading:0 is junk, not an opt-out');
+        assert.throws(
+            () => createTimeLineChart({ data: TDATA, shading: '', schedule: (fn) => fn() }),
+            /shading` must be/, 'shading:"" is junk, not an opt-out');
+    });
+
+    // -- TS14: a per-row null x must not collapse the extent to epoch 0 -------
+    //    (cloud-review finding). The coercing accessor turns {x: null} into
+    //    +null === 0, so one missing timestamp in AoS data would span the extent
+    //    1970 -> now and emit ~2600 bogus weekend bands. The scan uses a RAW
+    //    accessor and gates == null before coercion; NaN garbage self-skips.
+    //    Date-valued x rows still contribute (raw accessor + instanceof branch).
+    it('TS14: per-row null/undefined/garbage x contributes no extent (null is not zero)', () => {
+        const dirty = [
+            { x: MON_04, y: 1 },
+            { x: null, y: 2 },        // the +null === 0 trap, row-level
+            { x: undefined, y: 3 },
+            { x: 'not a date', y: 4 }, // -> NaN, self-skips both comparisons
+            { x: MON_18, y: 5 },
+        ];
+        const acc = _shadingAnnotationsAcc(true, null, [() => dirty], (row) => row.x);
+        const list = acc();
+        assert.equal(list.length, 2,
+            'dirty rows are skipped: still exactly the 2 in-domain weekends, not ~2600 from 1970');
+        assert.equal(list[0].from, Date.UTC(2021, 0, 9), 'extent unpolluted by the null row');
+        // Date-valued x still contributes via the instanceof branch.
+        const dated = [{ x: new Date(MON_04), y: 1 }, { x: new Date(MON_18), y: 2 }];
+        const acc2 = _shadingAnnotationsAcc(true, null, [() => dated], (row) => row.x);
+        assert.equal(acc2().length, 2, 'Date x values map through getTime()');
     });
 });

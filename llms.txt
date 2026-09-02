@@ -10,7 +10,42 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.9.0 (current): horizontal-bar brush -- additive; completes the horizontal
+> v1.10.0 (current): createTimeLineChart + weekend shading -- additive; a new
+> factory and a new config field, every existing factory + the shared kernel
+> byte-unchanged. createTimeLineChart(config) is createLineChart with three
+> time-first defaults: (1) xScale.type forced to 'time' regardless of the x key
+> or data probe (inferXScaleType only infers time for a Date probe or a
+> {time,date,t} key >= 1e11, so a plain numeric x key would render linear);
+> (2) panBounds defaults to 'data' so the reachable view equals the data domain;
+> (3) an optional shading config (true | 'weekends' | {fill?}) adds one weekend
+> band per Sat 00:00 -> Mon 00:00 UTC span in the data domain. Bands are plain
+> {type:'range',axis:'x',from,to,fill} rows riding the v1.7.0 annotation layer:
+> generated COLD inside the annotation resolve effect, re-clipped each frame by
+> the existing project effect at 0 B (no new draw-path code), composing with any
+> user annotations (bands first) and exported by exportSVG. The extent is derived
+> from the series DATA accessors (epoch ms, UTC), NEVER xScale.dMin/dMax -- the
+> annotation resolve effect tracks themeVersion + the annotations accessor but
+> not scaleVersion, so reading the scale would re-allocate bands every pan/zoom
+> frame; reading the data regenerates them only on data change. _weekendBands +
+> _shadingAnnotationsAcc are referenced ONLY from createTimeLineChart (tree-shake
+> out of a createLineChart-only bundle). FAILS CLOSED: a null extent bound is
+> gated (== null) before any unary + so it becomes NaN not epoch 0 (+null===0);
+> a non-finite/inverted extent emits no bands; the scan reads x through a RAW
+> accessor and gates each ROW == null before coercion, so one {x:null} row
+> cannot collapse the extent to 1970 (NaN garbage self-skips; Date x maps via
+> getTime()); SoA {xs,ys} data is scanned like AoS (an Array.isArray-only gate
+> silently unshaded it -- caught in review); shading:false is a first-class
+> opt-out (behaves like absent, matching the boolean type); other invalid
+> shading values throw at construction. Timezone-agnostic (epoch ms in; caller
+> formats). Market-hours / session calendars out of scope (v1.10.x).
+> 14 new tests (413->427): weekend-walk boundaries, null/non-finite/inverted
+> fail-close, no-shading passthrough, band+user composition, SoA regression,
+> forced time scale, annotation-count integration, opt-in null handle, config
+> validation, tree-shake source confinement, retention, false opt-out, row-level
+> null guard -- TS2 (null-gate), TS5 (SoA), TS13 (false opt-out), TS14 (row null)
+> proven load-bearing by reversion. torture ok (A16 0-B weekend-shading redraw
+> storm), ASCII clean.
+> v1.9.0: horizontal-bar brush -- additive; completes the horizontal
 > interaction set (the slice deferred from v1.8.0). createBarChart({
 > orientation:'horizontal', brush:true}) selects on shift-drag a value range
 > (screen-X, the value axis under the swap, via yScale.invert) crossed with a

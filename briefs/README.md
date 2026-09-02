@@ -4,8 +4,9 @@ Local working scratch. **Not shipped** -- `briefs/` is absent from
 package.json `files[]`, so nothing here reaches npm. Each brief is a
 self-contained plan for one future `cd LiteCharts && claude` session.
 
-Current shipped state: **v1.8.0** (horizontal-bar pan/zoom/value-grid, on the
-annotation layer from v1.7.0, x-axis log scale + mixed-sign log floor from v1.6.x).
+Current shipped state: **v1.10.0** (`createTimeLineChart` + weekend shading, on
+the annotation layer from v1.7.0; horizontal-bar pan/zoom/grid v1.8.0 + brush
+v1.9.0; x-axis log scale + mixed-sign log floor from v1.6.x).
 The forward plan in `../ROADMAP.md` points here.
 
 ## The set, in recommended order
@@ -15,15 +16,15 @@ The forward plan in `../ROADMAP.md` points here.
 | ~~1~~ | ~~`v1.6.1-mixedsign-log-floor.md`~~ | **SHIPPED v1.6.1** | XS | Closed the one known gap in v1.6.0. Kept for reference. |
 | ~~2~~ | ~~`annotation-layer.md`~~ | **SHIPPED v1.7.0** | M | Data-pinned line/range/point/text marks; zero per-frame alloc, fail-closed, exportSVG + theme aware. Range primitive now unblocks #4. Kept for reference. |
 | ~~3~~ | ~~`horizontal-bar-interactions.md`~~ | **SHIPPED v1.8.0** | M-L | pan/zoom/value-grid on horizontal bars; VALUE axis only, band pinned. brush + log-value still fail-closed (deferred). Kept for reference. |
-| 4 | `time-series-variants.md` | design | M | **Unblocked** -- weekend/market-hours shading rides the v1.7.0 annotation range primitive. |
+| ~~4~~ | ~~`time-series-variants.md`~~ | **SHIPPED v1.10.0** (weekend shading) | M | `createTimeLineChart` + weekend shading, riding the v1.7.0 annotation range primitive. Market-hours deferred to v1.10.x. Kept for reference. |
 | 5 | `legend-virtualization.md` | design | S | Narrow reach (100+ series dashboards); optional lite-virtual peer. |
 | 6 | `lite-charts-gl-companion.md` | design, SEPARATE PACKAGE | XL | Own package; re-verify lite-gl 1.4.0 `PointHiSink` before planning. |
-| new | horizontal-brush (no brief yet) | carved from #3 | S-M | The one cut deferred from v1.8.0: brush on a horizontal bar needs a value-range + band-ids payload, distinct from the vertical `{xMin,xMax,yMin,yMax,ids}`. |
+| ~~new~~ | ~~horizontal-brush~~ | **SHIPPED v1.9.0** | S-M | Brush on a horizontal bar: value-range + band-set payload `{valueMin,valueMax,bandMin,bandMax,bands,ids}`, distinct from the vertical `{xMin,xMax,yMin,yMax,ids}`. Kept for reference. |
+| new | time-series market-hours | carved from #4 | S-M | The slice deferred from v1.10.0: a data-driven session calendar (shade/skip non-trading hours), riding the same annotation `range` primitive as the weekend bands. Target v1.10.x. |
 
-Recommended next: **#4 time-series-variants** (unblocked by the shipped annotation
-range) or **horizontal-brush** (finishes the horizontal interaction story from
-v1.8.0) -- pick by appetite. Items 4, 5 are independent. Item 6 is a different
-package entirely.
+Recommended next: **#5 legend-virtualization** (narrow reach, optional lite-virtual
+peer) or **time-series market-hours** (v1.10.x, finishes the finance story from
+v1.10.0) -- pick by appetite. Item 6 is a different package entirely.
 
 ## Ground rules every brief inherits
 

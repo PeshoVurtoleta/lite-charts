@@ -26,7 +26,7 @@
  * plain `npm run torture` already proves the gate bites.
  */
 
-import { _testHelpers, createLineChart, createDonutChart, createBarChart } from '../../Charts.js';
+import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, createBarChart } from '../../Charts.js';
 import { signal } from '@zakkster/lite-signal';
 import {
     createEventCanvas, quietCanvas, fireShared, runOpsGate, allocFailMsg,
@@ -400,5 +400,47 @@ export function run() {
             () => `A15: horizontal ${gH.bytesPerOp.toFixed(3)} B/op vs vertical ${gV.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
         hz.destroy();
         vt.destroy();
+    }
+
+    // --- 10. time-series weekend-shading redraw budget (A16, v1.10.0) ---------
+    // createTimeLineChart's weekend bands are COLD-generated (inside the annotation
+    // resolve effect, off the draw path) but they ride the annotation layer as
+    // range rows, so the per-frame OVERLAY re-clip must stay 0 B -- the same
+    // guarantee A9 pins for user annotations, here for the generated bands. This
+    // gate mounts a time line with shading active over a ~2-month domain (~8
+    // weekend bands) and drives a redraw storm, pinning maxMajor:0 /
+    // maxArrayBuffersGrowth:0. The <=16 B/op ceiling matches A9/A15; the
+    // shading-specific claim is the <=2 B/op differential against an identical
+    // time line WITHOUT shading, so a per-frame regression in the generated-band
+    // projection shows up the same as a pooled-buffer leak would.
+    {
+        const DAY = 86400000;
+        const BASE = Date.UTC(2021, 0, 4); // Monday
+        const mkT = (shading) => {
+            const data = Array.from({ length: 60 }, (_, i) => ({
+                x: BASE + i * DAY, y: Math.sin(i / 5) * 40 + 50,
+            }));
+            const cfg = { data, x: 'x', y: 'y', width: 800, height: 400, schedule: (fn) => fn() };
+            if (shading) cfg.shading = true;
+            const c = createTimeLineChart(cfg);
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const sh = mkT(true), plain = mkT(false);
+        // Sanity: shading actually produced bands (else the differential is vacuous).
+        const nBands = sh._internal.annotations ? sh._internal.annotations.count : 0;
+        check(nBands >= 6,
+            () => `A16: expected >=6 weekend bands over a 2-month domain, got ${nBands}`);
+        const gS = runOpsGate(() => { sh.redraw(); }, { ops: 50000, warmup: 500 });
+        const gP = runOpsGate(() => { plain.redraw(); }, { ops: 50000, warmup: 500 });
+        if (!gS.report.ok) die(allocFailMsg('A16.shading-redraw', gS.report, gS.summary));
+        check(gS.bytesPerOp <= 16.0,
+            () => `A16: weekend-shading redraw allocated ${gS.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gS.bytesPerOp - gP.bytesPerOp) <= 2.0,
+            () => `A16: shaded ${gS.bytesPerOp.toFixed(3)} B/op vs plain ${gP.bytesPerOp.toFixed(3)} B/op (delta > 2.0)`);
+        sh.destroy();
+        plain.destroy();
     }
 }

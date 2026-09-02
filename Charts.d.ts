@@ -510,6 +510,44 @@ export interface Chart {
 export function createLineChart(config: LineChartConfig): Chart;
 
 // ---------------------------------------------------------------------------
+// Time-series line chart (v1.10.0)
+// ---------------------------------------------------------------------------
+//
+// createTimeLineChart is createLineChart with three time-first defaults baked
+// in: (1) xScale.type is forced to 'time' regardless of the x key or data probe
+// (inferXScaleType only infers time for a Date probe or a {time,date,t} key with
+// value >= 1e11); (2) panBounds defaults to 'data', so the reachable view equals
+// the data domain; (3) an optional `shading` config wraps the chart's annotations
+// with cold-generated weekend range bands. The bands ride the v1.7.0 annotation
+// layer unchanged (plain {type:'range',axis:'x'} rows), so there is zero
+// per-frame draw cost; the band set is derived from the DATA extent (epoch ms,
+// UTC), not the live scale, so it regenerates on data change but not per frame.
+// The chart stays timezone-agnostic. Market-hours / session calendars are out of
+// scope in v1.10.0.
+
+export interface TimeShadingConfig {
+    /**
+     * Fill for the weekend bands. Any Canvas2D fillStyle string; a CSS custom
+     * property (var(--x)) resolves via the theme like other chart colors.
+     * Default 'rgba(0,0,0,0.05)'.
+     */
+    fill?: string;
+}
+
+export interface TimeLineChartConfig extends LineChartConfig {
+    /**
+     * Weekend background shading. Opt-in: omit (or pass `false`, which behaves
+     * identically) for a plain time line at zero added cost. `true` or
+     * 'weekends' shades every Sat 00:00 -> Mon 00:00 UTC span within the data
+     * domain with the default fill; an object overrides the fill. Bands compose
+     * with any `annotations` you supply (bands first).
+     */
+    shading?: boolean | 'weekends' | TimeShadingConfig;
+}
+
+export function createTimeLineChart(config: TimeLineChartConfig): Chart;
+
+// ---------------------------------------------------------------------------
 // Area chart (v1.0.0-alpha.2)
 // ---------------------------------------------------------------------------
 //

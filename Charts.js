@@ -8235,6 +8235,114 @@ export const createRadarChart = (config) => {
 // `import { createLineChart }` never references it, so the bundler drops it
 // and (transitively) drops every helper that's only reachable through it.
 
+// ---------------------------------------------------------------------------
+// v1.10.0 -- weekend shading helpers (used only by createTimeLineChart)
+// ---------------------------------------------------------------------------
+// Defined here (above _testHelpers, below createBaseAxisChart) so they are out
+// of the shared axis kernel's source region -- the tree-shake confinement the
+// v1.7.0 annotation split established. See createTimeLineChart for wiring.
+
+const _DAY_MS = 86400000;   // 24h in ms -- a UTC day is exactly this (no DST)
+const _WEEK_MS = 604800000; // 7 * _DAY_MS
+const DEFAULT_WEEKEND_FILL = 'rgba(0,0,0,0.05)';
+
+// COLD band generator. Runs ONLY inside the annotation resolve effect (sub-Hz,
+// data-tracked) -- never on the per-frame draw path -- so it MAY allocate. It
+// walks UTC weeks over the DATA x-extent (epoch ms) and emits one range
+// annotation per weekend, the natural unit being Sat 00:00 UTC -> Mon 00:00 UTC
+// (a 48h span). Fail closed: a null bound is gated BEFORE any unary + (recall
+// +null === 0 is a finite epoch -- a null bound must become NaN, not 1970), and
+// a non-finite or inverted extent emits NO bands.
+const _weekendBands = (xMinRaw, xMaxRaw, fill) => {
+    const out = [];
+    if (xMinRaw == null || xMaxRaw == null) return out; // null is not zero
+    const xMin = +xMinRaw;
+    const xMax = +xMaxRaw;
+    if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !(xMax > xMin)) return out;
+    // Midnight UTC of xMin's day, then step back to the most recent Saturday.
+    const d = new Date(xMin);
+    const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const dow = new Date(dayStart).getUTCDay(); // 0=Sun .. 6=Sat
+    const daysSinceSat = (dow + 1) % 7;         // days from `dow` back to Saturday
+    const satStart = dayStart - daysSinceSat * _DAY_MS;
+    for (let t = satStart; t < xMax; t += _WEEK_MS) {
+        const to = t + 2 * _DAY_MS; // Mon 00:00 UTC
+        if (to <= xMin) continue;   // weekend ends at/before the domain -> skip
+        out.push({ type: 'range', axis: 'x', from: t, to, fill });
+    }
+    return out;
+};
+
+// Returns the annotations accessor createBaseAxisChart will consume. When
+// `shading` is ABSENT this is a byte-identical passthrough of the user's
+// annotations (their accessor, or null) -- zero added cost, _weekendBands never
+// referenced at runtime. When PRESENT it returns an accessor that concatenates
+// generated weekend bands with the user's annotations (static array or thunk).
+//
+// CRITICAL: the extent is derived from the raw series DATA accessors -- the same
+// source that BUILDS the scale domain -- NOT xScale.dMin/dMax (which is
+// scaleVersion and moves with pan/zoom). This accessor is invoked inside the
+// annotation resolve effect (the effect that tracks annotationsAcc()); reading
+// the data accessors makes THAT effect track DATA, so bands regenerate only when
+// data changes -- never per pan/zoom frame. Reading a scale signal here would
+// transitively couple resolve to scaleVersion and re-allocate bands every frame,
+// the exact coupling the annotation layer was built to avoid.
+const _shadingAnnotationsAcc = (shading, annotations, dataAccs, xAccessor) => {
+    if (shading == null) {
+        return annotations != null ? asAccessor(annotations) : null;
+    }
+    const fill = (typeof shading === 'object' && shading.fill != null)
+        ? shading.fill
+        : DEFAULT_WEEKEND_FILL;
+    const userAcc = annotations != null ? asAccessor(annotations) : null;
+    return () => {
+        let xMin = Infinity;
+        let xMax = -Infinity;
+        for (let s = 0; s < dataAccs.length; s++) {
+            const rows = dataAccs[s](); // tracked -> DATA reactivity (not scale)
+            if (rows && rows.xs && rows.ys && typeof rows.xs.length === 'number') {
+                // SoA fast path -- x lives in rows.xs directly (mirrors
+                // extractSeriesData's shape check); no accessor. Handling it here
+                // is load-bearing: SoA is a first-class data shape, so skipping it
+                // would silently emit zero bands for valid input (fail-open).
+                const xs = rows.xs;
+                const n = xs.length < rows.ys.length ? xs.length : rows.ys.length;
+                for (let i = 0; i < n; i++) {
+                    const x = xs[i];
+                    if (x < xMin) xMin = x;
+                    if (x > xMax) xMax = x;
+                }
+            } else if (Array.isArray(rows)) {
+                for (let i = 0; i < rows.length; i++) {
+                    // xAccessor is a RAW accessor (no numeric coercion), so a
+                    // per-row null/undefined x is gated BEFORE any unary + --
+                    // the coercing accessor would turn {x: null} into +null === 0
+                    // and collapse xMin to epoch 1970, emitting ~2600 bogus
+                    // weekend bands from one missing timestamp (null is not
+                    // zero, at row level too). A NaN after coercion self-skips:
+                    // both comparisons below are false for NaN.
+                    const raw = xAccessor(rows[i]);
+                    if (raw == null) continue;
+                    const x = raw instanceof Date ? raw.getTime() : +raw;
+                    if (x < xMin) xMin = x;
+                    if (x > xMax) xMax = x;
+                }
+            }
+            // else: neither AoS nor SoA -> contributes no extent; an all-empty
+            // scan leaves xMin/xMax at +/-Infinity, which _weekendBands rejects
+            // via !(xMax > xMin) (fail-closed: no bands, never wrong bands).
+        }
+        const bands = _weekendBands(xMin, xMax, fill);
+        if (userAcc) {
+            const user = userAcc();
+            if (Array.isArray(user)) {
+                for (let i = 0; i < user.length; i++) bands.push(user[i]);
+            }
+        }
+        return bands;
+    };
+};
+
 export const _testHelpers = {
     // Axis-chart kernel helpers
     decimateMinMax,
@@ -8286,9 +8394,66 @@ export const _testHelpers = {
     computeRadarGeometry,
     radarHitTest,
     makeRadarSeriesState,
+    // v1.10.0: time-series preset internals (weekend shading)
+    _weekendBands,
+    _shadingAnnotationsAcc,
 };
 
 export const createLineChart = (config) => createBaseAxisChart(config, LINE_RENDERER);
+
+// ---------------------------------------------------------------------------
+// v1.10.0 -- time-series variants: createTimeLineChart + weekend shading
+// ---------------------------------------------------------------------------
+//
+// createTimeLineChart is createLineChart with three time-first defaults baked
+// in: (1) xScale.type is FORCED to 'time' regardless of the x key or the data
+// probe (bypassing inferXScaleType, which only infers time for a Date probe or
+// a {time,date,t} key whose value is >= 1e11); (2) panBounds defaults to 'data'
+// so the reachable view equals the data domain; (3) an optional `shading`
+// config wraps the user's annotations with cold-generated weekend bands.
+//
+// Tree-shake: _weekendBands + _shadingAnnotationsAcc (defined just above the
+// _testHelpers export) are referenced ONLY from createTimeLineChart. A bundle
+// importing createLineChart (or any non-time factory) never names
+// createTimeLineChart, so the bundler drops both helpers and
+// DEFAULT_WEEKEND_FILL. The shading wrap is applied HERE, at the preset
+// call-site, NOT inside the shared createBaseAxisChart kernel, precisely so the
+// kernel (and every other axis factory) stays free of it.
+
+// v1.10.0: time-series preset. See _weekendBands / _shadingAnnotationsAcc.
+export const createTimeLineChart = (config) => {
+    if (!config || typeof config !== 'object') {
+        throw new Error('lite-charts: createTimeLineChart requires a config object');
+    }
+    // (1) force a time x-scale, preserving any other xScale fields (domain, etc.)
+    const xScale = config.xScale
+        ? Object.assign({}, config.xScale, { type: 'time' })
+        : { type: 'time' };
+    // (2) default panBounds to 'data' (reachable view == data domain)
+    const panBounds = config.panBounds != null ? config.panBounds : 'data';
+    // (3) optional weekend shading, wrapped over the user's annotations.
+    // `false` is a first-class opt-out (the declared type is boolean |
+    // 'weekends' | {fill?}), treated exactly like absent; other falsy junk
+    // (0, '') still throws below.
+    let annotations = config.annotations;
+    if (config.shading != null && config.shading !== false) {
+        const sh = config.shading;
+        if (sh !== true && sh !== 'weekends' && typeof sh !== 'object') {
+            throw new Error('lite-charts: createTimeLineChart `shading` must be a boolean, ' +
+                '\'weekends\', or a config object { fill? } -- got ' + typeof sh);
+        }
+        const xKey = config.x != null ? config.x : 'x';
+        // RAW accessor: the extent scan gates a per-row null BEFORE coercion
+        // (buildAccessor's `+v` would turn a null x into epoch 0).
+        const xAccessor = buildRawAccessor(xKey);
+        const dataAccs = Array.isArray(config.series)
+            ? config.series.map((sr) => asAccessor(sr.data))
+            : [asAccessor(config.data)];
+        annotations = _shadingAnnotationsAcc(sh, config.annotations, dataAccs, xAccessor);
+    }
+    const merged = Object.assign({}, config, { xScale, panBounds, annotations });
+    return createBaseAxisChart(merged, LINE_RENDERER);
+};
 
 export const createAreaChart = (config) => createBaseAxisChart(config, AREA_RENDERER);
 

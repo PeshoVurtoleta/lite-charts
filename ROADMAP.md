@@ -5,7 +5,52 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.9.0 (current)
+## v1.10.0 (current)
+
+`createTimeLineChart` + weekend shading -- a time-series line preset over the
+axis kernel. Additive: a new factory and a new config field; every existing
+factory and the shared kernel are byte-unchanged.
+
+- **`createTimeLineChart(config)`.** `createLineChart` with three time-first
+  defaults: (1) `xScale.type` forced to `'time'` regardless of the x key or data
+  probe (`inferXScaleType` only infers time for a `Date` probe or a
+  `{time,date,t}` key `>= 1e11`); (2) `panBounds` defaults to `'data'`, so the
+  reachable view equals the data domain; (3) an optional `shading` config
+  (`true | 'weekends' | { fill? }`) adds one weekend band per Sat 00:00 -> Mon
+  00:00 UTC span in the data domain.
+- **Rides the v1.7.0 annotation layer, 0 B per frame.** Weekend bands are plain
+  `{ type: 'range', axis: 'x' }` rows generated cold inside the annotation
+  resolve effect and re-clipped each frame by the existing project effect -- no
+  new draw-path code. They compose with any user `annotations` (bands first) and
+  export through `exportSVG`.
+- **Extent from data, not scale.** The band set is derived from the series data
+  extent (epoch ms, UTC), never `xScale.dMin/dMax`. The resolve effect tracks
+  `themeVersion` + the annotations accessor but not `scaleVersion`, so reading
+  the scale would re-allocate bands every pan/zoom frame; reading the data
+  regenerates them only on a data change. `_weekendBands` / `_shadingAnnotationsAcc`
+  tree-shake out of a `createLineChart`-only bundle.
+- **Fail-closed.** A `null` extent bound is gated (`== null`) before any unary
+  `+`, so it becomes `NaN`, not epoch 0 (`+null === 0`); a non-finite / inverted
+  extent emits no bands; SoA `{ xs, ys }` data is scanned like AoS (an
+  `Array.isArray`-only gate silently unshaded it -- caught in review); an invalid
+  `shading` value throws at construction. Timezone-agnostic. Market-hours /
+  session calendars are out of scope (v1.10.x).
+- 14 new tests (413 -> 427): weekend-walk boundaries, null / non-finite /
+  inverted fail-close, no-shading passthrough, band + user-annotation
+  composition, the SoA regression, forced time scale, annotation-count
+  integration, opt-in null handle, config validation, tree-shake source
+  confinement, mount/destroy retention, the `shading: false` opt-out, and the
+  per-row null-x guard (a raw accessor gates `== null` before coercion, so one
+  `{ x: null }` row cannot collapse the extent to 1970). TS2 (null-gate), TS5
+  (SoA), TS13 (false opt-out) and TS14 (row-level null) proven load-bearing by
+  measured reversion. Plus a 0-B/frame weekend-shading redraw torture case
+  (A16). Torture green, ASCII clean.
+
+See CHANGELOG.md for the full detail.
+
+---
+
+## v1.9.0
 
 Horizontal-bar `brush` -- shift-drag selection on
 `createBarChart({ orientation: 'horizontal', brush: true })`. Completes the
@@ -450,11 +495,11 @@ The v1.4 interaction-primitives arc is complete and released:
 Each item below has a grounded working brief in `briefs/` (local scratch,
 not shipped in `files[]`). They are independent; pick by appetite.
 
-- **Time-series specialized variants** (`briefs/time-series-variants.md`) --
-  `createTimeLineChart` etc. with built-in date tick generation,
-  weekday/weekend shading, market-hours awareness for finance dashboards.
-  The shading now rides the shipped v1.7.0 annotation `range` primitive
-  instead of duplicating it.
+- **Time-series market-hours** (v1.10.x) -- the deferred slice of
+  `briefs/time-series-variants.md`. `createTimeLineChart` + weekend shading
+  shipped in v1.10.0; a data-driven session calendar (shade / skip non-trading
+  hours, opt-in, no hardcoded exchanges) rides the same annotation `range`
+  primitive as the weekend bands.
 - **Legend virtualization** (`briefs/legend-virtualization.md`) -- via
   `@zakkster/lite-virtual` for charts with 100+ series (real-time
   monitoring dashboards). Renders only visible legend rows.
@@ -506,9 +551,10 @@ The "v1.6.0 -- Scale + polish" grab-bag from earlier drafts has been
 unbundled into independent minors, each with its own brief, released as
 whichever minor they land in rather than one combined cut: **x-log** shipped
 as v1.6.0, the **annotation layer** as v1.7.0, **horizontal-bar interactions**
-as v1.8.0, and the **horizontal-bar `brush`** as v1.9.0; the remaining items
-(time-series variants, legend virtualization) stay independent entries in the
-"Next -- polish + reach" list above.
+as v1.8.0, the **horizontal-bar `brush`** as v1.9.0, and **`createTimeLineChart`
++ weekend shading** as v1.10.0; the remaining items (time-series market-hours,
+legend virtualization) stay independent entries in the "Next -- polish + reach"
+list above.
 
 ### v2.0.0 -- (possible)
 

@@ -17,15 +17,26 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.9.0 -- horizontal-bar `brush` (minor). `createBarChart({
-orientation: 'horizontal', brush: true })` now selects a value range crossed
-with a band set on shift-drag, emitting a `{ valueMin, valueMax, bandMin,
-bandMax, bands, ids }` payload through `chart.brush`. Completes the horizontal
-interaction set (pan / zoom / grid landed in v1.8.0). Built as a `swapAxes ?
-...` selection at each brush call site, so the vertical / line / scatter brush
-path is byte-unchanged. A `log` value axis on a horizontal bar still fails
-closed at construction. **413/413 tests pass** plus a torture/stress gate
+**Status:** v1.10.0 -- `createTimeLineChart` + weekend shading (minor). A
+time-series line preset that forces a `'time'` x-scale, defaults `panBounds` to
+`'data'`, and adds opt-in weekend background bands via `shading: true`. The
+bands ride the v1.7.0 annotation layer as `range` rows (zero per-frame draw
+cost) and are derived from the data extent, not the live scale. Additive: a new
+factory and a new config field; every existing factory and the shared kernel
+are byte-unchanged. **427/427 tests pass** plus a torture/stress gate
 (`npm run torture`).
+
+**New in v1.10.0:**
+- **`createTimeLineChart(config)`.** `createLineChart` with time-first defaults:
+  `xScale.type` forced to `'time'` (a plain numeric `x` key infers `'linear'`
+  otherwise), `panBounds` defaulting to `'data'`, and an optional `shading`
+  config. See "Time-series line chart" below.
+- **Weekend shading.** `shading: true | 'weekends' | { fill? }` shades every
+  Sat 00:00 -> Mon 00:00 UTC span in the data domain. Bands are plain
+  `{ type: 'range', axis: 'x' }` annotations, so they compose with any
+  `annotations` you pass and export through `exportSVG`; omit `shading` for a
+  plain time line at zero cost. Fail-closed: a `null`/non-finite extent bound
+  emits no bands (never epoch 0), and SoA `{ xs, ys }` data is shaded like AoS.
 
 **New in v1.9.0:**
 - **Horizontal bars brush.** `createBarChart({ orientation: 'horizontal',
@@ -1149,6 +1160,51 @@ chart.mount(document.querySelector('#bars'));
   the vertical path, and the per-frame overlay draw stays 0 B. The commit
   allocates only at gesture rate.
 
+## Time-series line chart (v1.10.0)
+
+`createTimeLineChart` is `createLineChart` with three time-first defaults baked
+in, so finance / ops dashboards get batteries-included time handling instead of
+hand-wiring `xScale: { type: 'time' }` and a `panBounds`:
+
+```js
+const chart = createTimeLineChart({
+  data: series,          // [{ x: <epoch ms>, y }, ...] or { xs, ys } SoA
+  x: 'x', y: 'y',
+  shading: true,         // optional: shade weekends
+  width: 800, height: 300,
+});
+chart.mount(target);
+```
+
+- **Forced time scale.** `xScale.type` is set to `'time'` regardless of the x
+  key or data probe. Plain `createLineChart` only infers `'time'` for a `Date`
+  probe or a `{ time, date, t }` key whose value is `>= 1e11`, so a numeric
+  epoch under a plain `x` key would otherwise render as a linear axis. Any other
+  `xScale` fields you pass (an explicit `domain`, etc.) are preserved.
+- **`panBounds` defaults to `'data'`.** The reachable view equals the data
+  domain, so weekend bands (derived over that domain) always cover what you can
+  pan to. Pass `panBounds: 'free'` to override.
+- **Weekend shading.** `shading: true | 'weekends' | { fill? }` adds one band
+  per Sat 00:00 -> Mon 00:00 UTC span inside the data domain. Bands are ordinary
+  `{ type: 'range', axis: 'x' }` annotations, so they render below the series,
+  compose with any `annotations` you pass (bands first), and are emitted by
+  `exportSVG`. Default fill `rgba(0,0,0,0.05)`; override with `{ fill: '...' }`
+  (a CSS `var(--x)` resolves through the theme).
+- **Zero per-frame cost, extent from data.** Bands are generated cold, inside
+  the annotation resolve effect, and re-clipped each frame by the existing
+  project effect at 0 B. The extent is read from the series data (epoch ms,
+  UTC), never `xScale.dMin/dMax` -- the resolve effect deliberately does not
+  track `scaleVersion`, so bands regenerate on a data change but not per pan /
+  zoom frame. SoA `{ xs, ys }` data is scanned like AoS.
+- **Fail-closed.** A `null` / non-finite / inverted extent emits no bands (a
+  `null` bound becomes `NaN`, never epoch 0), and the scan gates each ROW's x
+  `== null` before coercion, so a single `{ x: null }` row cannot collapse the
+  extent to 1970 (non-numeric garbage coerces to `NaN` and self-skips; `Date`
+  x values map through `getTime()`). `shading: false` opts out exactly like
+  omitting it; other invalid `shading` values throw at construction. The chart
+  stays timezone-agnostic -- it operates on epoch ms and leaves formatting to
+  the caller. Market-hours / session calendars are out of scope in v1.10.0.
+
 ## Log scale (y: v1.4.0-alpha.0; x: v1.6.0)
 
 Opt in with `yScale: { type: 'log' }` on any axis-kernel chart
@@ -1403,7 +1459,8 @@ forward plan and the development history that led here. Headlines:
 | **v1.6.1** | Correctness patch. A mixed-sign log domain (`min <= 0, max > 0`) floored to positive for drawing but kept the raw non-positive min in the pan/zoom bounds snapshot (`_dataDomain`), so the first gesture took `log()` of a value `<= 0` and NaN'd the view. `_dataDomain`'s min is now floored to the same positive part the render path uses, on both x and y. The no-positive-extent case still throws at mount (the floor cannot mask it); the linear/time path and the per-frame draw are byte-unchanged. 390 tests (7 new: y-pan, x/y positive-domain regression, x/y fail-closed throw, x/y zoom-path) + the T6.A13 torture gate. |
 | **v1.7.0** | Annotation layer. `annotations: [...]` (static or `() => Annotation[]`) puts data-pinned `line` / `range` / `point` / `text` marks on any axis-kernel chart. They re-project through the live scales -- tracking pan / zoom and log axes (a value `<= 0` on a log axis does not draw, fail-closed like the series) -- render above the series and below the crosshair, and appear in `exportSVG`. `color` / `fill` accept `--css-var` tokens, re-resolved on `refreshTheme`. Zero per-frame allocation (the project step writes pooled-node fields directly; color resolution is confined to a cold resolve step); the whole layer is absent when unset. 400 tests (10 new: projection, pan-clip, reactive range, exportSVG parity, theme re-resolve, log + linear fail-closed, runtime isolation, horizontal-bar swap, pool retention) + a 0-B/frame annotation torture case. |
 | **v1.8.0** | Horizontal-bar interactions. `createBarChart({ orientation: 'horizontal' })` now accepts `pan` / `zoom` / value `grid`: the value axis (on screen-X under the swap) pans and zooms while the band axis stays pinned, `view.yMin` / `view.yMax` addressing the value axis. Built by remapping the linear pan/zoom kernels at each gesture boundary, so `_applyPan` / `_applyZoom` / `_clampToBounds` stay byte-identical and the vertical path is unchanged; the per-frame draw is still 0 B. Horizontal + `brush` and horizontal + a `log` value axis still fail closed at construction. 406 tests (6 new: value-axis pan, band-pin control, cursor-anchored zoom, vertical value grid, fail-closed throws, mount/pan/destroy retention -- each proven load-bearing by measured reversion) + a horizontal-interaction 0-B torture case. |
-| **v1.9.0** (this) | Horizontal-bar `brush`. A shift-drag on `createBarChart({ orientation: 'horizontal', brush: true })` selects a value range (screen-X) crossed with a band set (screen-Y), emitting a distinct `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` payload; the vertical brush keeps `{ xMin, xMax, yMin, yMax, ids }`. Every branch is a `swapAxes ? ...` selection at a brush call site, so `_normalizeBrushRect` / `_brushPxToData` / `_computeBrushIds` / `makeBandScale` stay byte-identical and the vertical path is unchanged; the overlay draw stays 0 B. Fail-closed: an empty-category chart commits `null` (no undefined band), `setBrush` rejects a `null` bound instead of coercing it to 0, and a `log` value axis still throws. 413 tests (7 new: value-range + band-set mapping, full-plot select, click-to-clear, facade validation, a vertical-brush regression guard, band-edge overlay alignment, empty-category fail-close -- HB1/HB3/HB5/HB7 proven load-bearing by reversion) + a 0-B horizontal-brush torture case. |
+| **v1.9.0** | Horizontal-bar `brush`. A shift-drag on `createBarChart({ orientation: 'horizontal', brush: true })` selects a value range (screen-X) crossed with a band set (screen-Y), emitting a distinct `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` payload; the vertical brush keeps `{ xMin, xMax, yMin, yMax, ids }`. Every branch is a `swapAxes ? ...` selection at a brush call site, so `_normalizeBrushRect` / `_brushPxToData` / `_computeBrushIds` / `makeBandScale` stay byte-identical and the vertical path is unchanged; the overlay draw stays 0 B. Fail-closed: an empty-category chart commits `null` (no undefined band), `setBrush` rejects a `null` bound instead of coercing it to 0, and a `log` value axis still throws. 413 tests (7 new: value-range + band-set mapping, full-plot select, click-to-clear, facade validation, a vertical-brush regression guard, band-edge overlay alignment, empty-category fail-close -- HB1/HB3/HB5/HB7 proven load-bearing by reversion) + a 0-B horizontal-brush torture case. |
+| **v1.10.0** (this) | `createTimeLineChart` + weekend shading. A time-series line preset over `createLineChart`: forces `xScale.type: 'time'`, defaults `panBounds: 'data'`, and adds opt-in `shading: true | 'weekends' | { fill? }` -- one `{ type: 'range', axis: 'x' }` band per Sat -> Mon UTC span in the data domain. Bands ride the v1.7.0 annotation layer (0 B per frame; re-clipped by the existing project effect) and are derived from the series data extent, not `scaleVersion`, so they regenerate on a data change but not per pan/zoom frame; SoA `{ xs, ys }` data is shaded like AoS. New factory + new config field only; every existing factory and the shared kernel are byte-unchanged, and the shading helpers tree-shake out of a `createLineChart`-only bundle. Fail-closed: a `null`/non-finite extent bound emits no bands (never epoch 0), a per-row `x: null` is gated before coercion (one missing timestamp cannot collapse the extent to 1970), `shading: false` opts out like absent, an invalid `shading` throws. 427 tests (14 new: weekend-walk boundaries, null/non-finite fail-close, SoA regression, forced time scale, count integration, opt-in null handle, config validation, tree-shake confinement, retention, false opt-out, row-level null guard -- TS2/TS5/TS13/TS14 proven load-bearing by reversion) + a 0-B weekend-shading torture case (A16). |
 | v1.9.x / v1.10.0 (candidates) | band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series; time-series variants (ride the annotation `range` primitive for weekend / market-hours shading); legend virtualization via `lite-virtual`. |
 
 ## Ecosystem

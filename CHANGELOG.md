@@ -5,6 +5,67 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] -- 2026-09
+
+`createTimeLineChart` -- a time-series line preset over the axis kernel, plus
+opt-in weekend background shading. Additive: a new factory and a new config
+field; every existing factory and the shared kernel are byte-unchanged.
+
+### Added -- time-series line preset + weekend shading
+
+- **`createTimeLineChart(config)`.** `createLineChart` with three time-first
+  defaults: (1) `xScale.type` is forced to `'time'` regardless of the x key or
+  data probe (plain `createLineChart` infers `'linear'` for a numeric `x` key);
+  (2) `panBounds` defaults to `'data'`, so the reachable view equals the data
+  domain; (3) an optional `shading` config adds weekend bands.
+- **`shading: true | 'weekends' | { fill? }`.** Shades every Sat 00:00 -> Mon
+  00:00 UTC span within the data domain. Bands are plain `{ type: 'range',
+  axis: 'x' }` annotation rows, so they compose with any `annotations` you
+  supply (bands first) and export through `exportSVG`. Omit `shading` for a
+  plain time line at zero added cost. Default fill `rgba(0,0,0,0.05)`.
+
+### Design
+
+- **Rides the v1.7.0 annotation layer, zero per-frame cost.** Weekend bands are
+  generated cold, inside the annotation resolve effect, and re-clipped each
+  frame by the existing project effect at 0 B -- no new draw-path code.
+- **Extent from data, not scale.** The band set is derived from the series data
+  extent (epoch ms, UTC), never `xScale.dMin/dMax`. The annotation resolve
+  effect tracks `themeVersion` + the annotations accessor but not `scaleVersion`,
+  so reading the scale would re-allocate bands every pan/zoom frame; reading the
+  data accessors regenerates them only on data change. Timezone-agnostic (epoch
+  ms in; caller formats). Market-hours / session calendars are out of scope.
+- **Tree-shake isolated.** `createTimeLineChart` is the only referent of the
+  weekend-shading helpers; a `createLineChart`-only bundle drops them.
+
+### Fixed
+
+- **SoA data no longer silently unshaded.** The weekend-extent scan now handles
+  the `{ xs, ys }` typed-array shape (mirroring `extractSeriesData`); previously
+  an `Array.isArray` gate skipped SoA input and emitted zero bands with no error.
+- **Fail-closed band bounds.** A `null` extent bound is gated (`== null`) before
+  any unary `+`, so it becomes `NaN`, not epoch 0 (`+null === 0`); a non-finite
+  or inverted extent emits no bands.
+- **Fail-closed per-row x.** The extent scan reads x through a raw (uncoerced)
+  accessor and gates `== null` per row; the coercing accessor would turn a
+  single `{ x: null }` row into `+null === 0` and collapse the extent to
+  epoch 1970 (~2600 bogus bands). Non-numeric garbage coerces to `NaN` and
+  self-skips; `Date` x values map through `getTime()`.
+- **`shading: false` is a first-class opt-out.** It behaves exactly like
+  omitting `shading` (matching the declared `boolean` type); previously it
+  threw at construction. Other falsy junk (`0`, `''`) still throws.
+
+### Coverage
+
+- 14 new tests (413 -> 427): weekend-walk boundaries, null/non-finite/inverted
+  fail-close, no-shading passthrough, band + user-annotation composition, the
+  SoA regression, forced time scale, annotation-count integration, opt-in null
+  handle, config validation, tree-shake source confinement, mount/destroy
+  retention, the `shading: false` opt-out, and the per-row null-x guard.
+  TS2 (null-gate), TS5 (SoA), TS13 (false opt-out) and TS14 (row-level null)
+  proven load-bearing by reversion. One 0-B weekend-shading redraw torture case
+  (A16). torture ok, ASCII clean.
+
 ## [1.9.0] -- 2026-08
 
 Horizontal-bar `brush` -- shift-drag selection on
