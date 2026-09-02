@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>@zakkster/lite-charts -- v1.6.0</title>
+    <title>@zakkster/lite-charts -- v1.12.0</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -98,9 +98,10 @@
         }
 
         /* Block accidental horizontal page scroll. If a chart canvas or its
-         * legend ever measures wider than the viewport (e.g. a 100+ series
-         * legend that hasn't been virtualized yet), it stays inside its card
-         * instead of pushing the page wide. */
+         * legend ever measures wider than the viewport, it stays inside its
+         * card instead of pushing the page wide. (A 100+ series legend is no
+         * longer the culprit it once was -- see the v1.12.0 legend
+         * virtualization section, where 200 series render ~14 DOM rows.) */
         html, body {
             overflow-x: hidden;
             max-width: 100vw;
@@ -623,6 +624,36 @@
             background: var(--bg-card-hover) !important;
         }
 
+        /* v1.12.0 virtualized legend. The library owns row CONTENTS (swatch,
+         * label, aria state); the adapter owns row position/height; the page
+         * owns the cosmetics. The host's absolutely-positioned pooled rows
+         * give it no intrinsic width, so the flex wrapper needs an explicit
+         * one -- without it the legend collapses to 0px beside the canvas. */
+        .lite-charts-legend-virtual {
+            flex: 0 0 200px;
+            width: 200px;
+        }
+
+        .lite-charts-legend-virtual [data-lc-idx] {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0 12px;
+            box-sizing: border-box;
+            cursor: pointer;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .lite-charts-legend-virtual [data-lc-idx]:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .lite-charts-legend-virtual [data-lc-idx] > span:last-child {
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
         /* =========================================================================
          * High density
          * ========================================================================= */
@@ -802,6 +833,7 @@
         "@zakkster/lite-signal": "https://cdn.jsdelivr.net/npm/@zakkster/lite-signal@1.1.5/Signal.js",
         "@zakkster/lite-scene":  "https://cdn.jsdelivr.net/npm/@zakkster/lite-scene@1.0.0/Scene.js",
         "@zakkster/lite-axis":   "https://cdn.jsdelivr.net/npm/@zakkster/lite-axis@1.0.1/Axis.js",
+        "@zakkster/lite-virtual": "https://cdn.jsdelivr.net/npm/@zakkster/lite-virtual@1.1.0/Virtual.js",
         "@zakkster/lite-charts": "../Charts.js"
     }
 }
@@ -815,7 +847,7 @@
         <div class="brand">
             <span class="brand-logo"></span>
             <span class="brand-name">@zakkster/lite-charts</span>
-            <span class="brand-version">v1.6.0</span>
+            <span class="brand-version">v1.12.0</span>
         </div>
         <button class="theme-toggle" id="theme-toggle">
             <span class="indicator"></span>
@@ -831,10 +863,11 @@
          ================================================================= -->
     <section>
         <div class="hero-intro">
-            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.6.0</span>
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.12.0</span>
             <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
             <p>
-                Single-file ESM. Three peer deps. Signal-native data, dimensions, theme,
+                Single-file ESM. Three peer deps (two more optional, injected --
+                never imported). Signal-native data, dimensions, theme,
                 and series visibility. The hot path is allocation-free; per-frame work is
                 two O(n) scans plus a min/max decimation kernel. The live chart below
                 streams at <span class="num">30 Hz</span> with crosshair + tooltip --
@@ -950,18 +983,27 @@
                     branch and no cost to charts that stay vertical.
                 </p>
                 <p>
-                    Fail-closed by design: the v1.5.0 cut is a static ranking
-                    chart. Combining <span class="mono">horizontal</span> with
-                    <span class="mono">pan</span>, <span class="mono">zoom</span>,
-                    <span class="mono">brush</span>, a value
-                    <span class="mono">grid</span>, or a log value axis throws at
-                    construction rather than rendering something half-wired --
-                    those land in a later 1.5.x.
+                    Interactive since v1.8.0: drag pans and the wheel zooms the
+                    VALUE axis (screen-X here) around the cursor value; the band
+                    axis stays pinned -- panning categories is a non-gesture by
+                    design. The value grid works too. And since v1.9.0,
+                    shift+drag brushes a value range crossed with a band set,
+                    emitting a payload DISTINCT from the vertical rect brush:
+                    <span class="mono">{ valueMin, valueMax, bandMin, bandMax,
+                    bands, ids }</span> -- category keys, not free y-coords.
+                    Still fail-closed where it matters: a log value axis on a
+                    horizontal bar throws at construction.
                 </p>
             </div>
         </div>
         <div class="card dashboard-card">
             <div class="chart-area" id="hbar-chart"></div>
+            <div class="control-row">
+                <button class="btn" id="hbar-reset">reset view</button>
+                <button class="btn" id="hbar-brush-clear">clear brush</button>
+                <span class="pill"><span class="dot"></span><span
+                        id="hbar-brush-status">brush: null (shift+drag the bars)</span></span>
+            </div>
         </div>
     </section>
 
@@ -1458,6 +1500,134 @@
     </section>
 
     <!-- =================================================================
+         Annotations -- v1.7.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// annotations -- v1.7.0</span>
+                <h2>Marks that live in data space.</h2>
+                <p>
+                    <span class="mono">config.annotations</span> takes
+                    line / range / point / text marks pinned to DATA
+                    coordinates -- an SLO rule at <span class="mono">y = 4.5</span>,
+                    a shaded deploy window, a labeled incident peak. They
+                    re-project through the live scales on every scale change,
+                    so pan or zoom the chart and the marks track their data,
+                    not their pixels. Rendered above the series, below the
+                    crosshair; included in <span class="mono">exportSVG</span>;
+                    CSS-var colors re-resolve on theme switch.
+                </p>
+                <p>
+                    The config accepts a static array or a
+                    <span class="mono">() => Annotation[]</span> thunk -- this
+                    one reads a signal, so the toggle button below swaps the
+                    annotation set reactively. Fail-closed: an entry with a
+                    non-finite coordinate draws nothing and throws nothing.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="annotations-chart"></div>
+            <div class="control-row">
+                <button class="btn" id="annotations-toggle">hide deploy window</button>
+                <button class="btn" id="annotations-reset">reset view</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Time-series preset + session shading -- v1.10.0 / v1.11.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// time series -- v1.10.0 + v1.11.0</span>
+                <h2>Time-first, with the market's gaps shaded in.</h2>
+                <p>
+                    <span class="mono">createTimeLineChart</span> is
+                    <span class="mono">createLineChart</span> with time-first
+                    defaults: the x-scale is FORCED to
+                    <span class="mono">'time'</span> (a conflicting explicit
+                    type throws), <span class="mono">panBounds</span> defaults
+                    to <span class="mono">'data'</span>, and opt-in
+                    <span class="mono">shading</span> paints closed time as
+                    range bands on the v1.7.0 annotation layer -- zero
+                    per-frame allocation, regenerated on data change, never
+                    per pan frame.
+                </p>
+                <p>
+                    Left: <span class="mono">shading: true</span> -- one band
+                    per Sat-00:00 -> Mon-00:00 UTC span. Right, v1.11.0:
+                    <span class="mono">sessions: [{ openMinutes: 810,
+                    closeMinutes: 1200 }]</span> (13:30-20:00 UTC = NYSE
+                    09:30-16:00 ET) shades the COMPLEMENT of the open-interval
+                    union -- after-hours and weekends merge, so Fri-close ->
+                    Mon-open is ONE contiguous band. Everything is epoch-ms
+                    UTC; converting local session times is the caller's job,
+                    and overnight (close &lt; open) sessions throw by design.
+                    Both charts pan and zoom -- drag around and the bands track.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card two-col-grid">
+            <div>
+                <div class="caption centered">shading: true -- weekends (v1.10.0)</div>
+                <div class="chart-area" id="ts-weekend-chart"></div>
+            </div>
+            <div>
+                <div class="caption centered">shading.sessions -- non-trading time (v1.11.0)</div>
+                <div class="chart-area" id="ts-sessions-chart"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Legend virtualization -- v1.12.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// legend virtualization -- v1.12.0</span>
+                <h2>200 series. 14 legend rows in the DOM.</h2>
+                <p>
+                    A legend with hundreds of series used to put one node per
+                    series into layout. <span class="mono">legend.virtualize</span>
+                    hands the row WINDOWING to a caller-supplied adapter --
+                    lite-charts contains zero references to any windowing
+                    library (same injection pattern as
+                    <span class="mono">spatialIndex</span>). This page wires it
+                    to <span class="mono">@zakkster/lite-virtual</span>'s
+                    <span class="mono">mountList</span> via a ~20-line bridge
+                    (view source): the adapter owns row creation and position,
+                    the chart owns row contents, and a recycled row re-reads
+                    color + visibility on every bind so it never shows stale
+                    state.
+                </p>
+                <p>
+                    Scroll the legend, click rows to toggle series, then check
+                    the counter -- the DOM row count stays put at
+                    window + overscan while <span class="mono">count</span> is
+                    200. Listeners and effects stay O(1) too: one delegated
+                    click listener, one shared visibility effect, exactly 4
+                    disposers at any series count. Trade-off, documented:
+                    keyboard focus does not survive a row scrolling out of the
+                    pool.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="virt-legend-chart"></div>
+            <div class="control-row">
+                <button class="btn" id="virt-hide-odd">hide odd series</button>
+                <button class="btn" id="virt-show-all">show all</button>
+                <span class="pill"><span class="dot"></span><span
+                        id="virt-legend-status">--</span></span>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
          SVG export -- v1.3.0
          ================================================================= -->
     <section>
@@ -1608,7 +1778,9 @@
     <div class="container">
         <div>built on <a href="https://www.npmjs.com/package/@zakkster/lite-signal">lite-signal</a>
             &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-scene">lite-scene</a>
-            &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-axis">lite-axis</a></div>
+            &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-axis">lite-axis</a>
+            &middot; optional: <a href="https://www.npmjs.com/package/@zakkster/lite-delaunay">lite-delaunay</a>
+            &middot; <a href="https://www.npmjs.com/package/@zakkster/lite-virtual">lite-virtual</a></div>
         <div class="deps">MIT &copy; 2026 Zahary Shinikchiev &middot; sub-frame at 100k pts &middot; 326 B/cycle p50
             heap
         </div>
@@ -1619,19 +1791,22 @@
      Demo logic. All bare specifiers are resolved by the import-map above.
      ===================================================================== -->
 <script type="module">
-    import {signal, effect, createRegistry, setDefaultRegistry} from '@zakkster/lite-signal';
+    import {signal, effect, batch, createRegistry, setDefaultRegistry} from '@zakkster/lite-signal';
 
     // lite-signal's default node-arena capacity is 1024, comfortable for a few
-    // charts but easy to exhaust on a page like this with ~15 simultaneous
+    // charts but easy to exhaust on a page like this with ~20 simultaneous
     // charts (each consumes ~45-60 nodes between signals, effects, and scene-
     // node-backing effects -- the per-axis tick pool alone is ~24 nodes per
-    // axis at max tick count). Bumping to 32k is cheap (a few tens of KB of
-    // arena memory) and gives plenty of headroom. Must run BEFORE any chart
-    // is constructed, since charts pick up whichever registry is current at
-    // the moment they're created.
+    // axis at max tick count; the 200-series virtualized-legend chart alone
+    // holds ~200 visibility signals plus extraction effects). Bumping to 32k
+    // is cheap (a few tens of KB of arena memory) and still leaves an order
+    // of magnitude of headroom. Must run BEFORE any chart is constructed,
+    // since charts pick up whichever registry is current at the moment
+    // they're created.
     setDefaultRegistry(createRegistry({maxNodes: 32768}));
     import {
         createLineChart,
+        createTimeLineChart,
         createAreaChart,
         createBarChart,
         createPieChart,
@@ -1641,6 +1816,11 @@
         createScatterChart,
         createHeatmap,
     } from '@zakkster/lite-charts';
+    // The virtualized-legend section's windowing adapter. lite-charts itself
+    // has ZERO references to lite-virtual (asserted by its test suite) -- the
+    // import happens HERE, at the consumer, and is injected via
+    // legend.virtualize. Same dependency direction as spatialIndex above.
+    import {mountList} from '@zakkster/lite-virtual';
 
     // ---------------------------------------------------------------------
     // Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
@@ -2053,14 +2233,16 @@
     ALL_CHARTS.push(barChart);
 
     // ---------------------------------------------------------------------
-    // HORIZONTAL BAR -- v1.5.0 (orientation: 'horizontal')
+    // HORIZONTAL BAR -- v1.5.0 orientation + v1.8.0 pan/zoom/value-grid
+    //                   + v1.9.0 brush
     // ---------------------------------------------------------------------
     //
-    // Same axis kernel, category band swapped onto the Y axis. Single-series
-    // ranking with labels long enough to justify the horizontal layout. No
-    // `grid` key here on purpose: horizontal + value grid is a fail-closed
-    // throw in the v1.5.0 cut, so this chart sets its colours explicitly
-    // instead of spreading SHARED_OPTS (which carries a grid).
+    // Same axis kernel, category band swapped onto the Y axis. Since v1.8.0
+    // the value grid no longer throws, so this chart spreads SHARED_OPTS like
+    // everyone else; drag pans and the wheel zooms the VALUE axis (screen-X
+    // under the swap), the band axis stays pinned. v1.9.0 adds shift+drag
+    // brushing with the distinct value-range x band-set payload -- wired to
+    // the status pill below.
     const hbarChart = createBarChart({
         orientation: 'horizontal',
         series: [{
@@ -2075,11 +2257,12 @@
                 {x: 'Swift', y: 260},
             ],
         }],
+        pan: true,
+        zoom: true,
+        brush: true,
         width: responsiveWidth('hbar-chart', 800),
         height: 380,
-        axisColor: '--text-faint',
-        labelColor: '--text-muted',
-        font: '11px "Geist Mono", monospace',
+        ...SHARED_OPTS,
         paddingInner: 0.25,
         paddingOuter: 0.12,
         cornerRadius: 4,
@@ -2093,6 +2276,25 @@
     });
     hbarChart.mount(document.getElementById('hbar-chart'));
     ALL_CHARTS.push(hbarChart);
+
+    // Horizontal-bar brush status. The payload shape is the v1.9.0 DISTINCT
+    // one: { valueMin, valueMax, bandMin, bandMax, bands, ids } -- bands are
+    // category KEYS. Runs once per brush commit; the join/toFixed allocations
+    // are status-readout cost, not chart cost (same as the vertical brush
+    // status above).
+    const $hbarBrushStatus = document.getElementById('hbar-brush-status');
+    effect(() => {
+        const b = hbarChart.brush();
+        if (!b) {
+            $hbarBrushStatus.textContent = 'brush: null (shift+drag the bars)';
+            return;
+        }
+        $hbarBrushStatus.textContent = 'brush: value=[' + b.valueMin.toFixed(0)
+            + ', ' + b.valueMax.toFixed(0) + '] bands=[' + b.bands.join(', ')
+            + '] ids=' + (b.ids ? b.ids.length : 0);
+    });
+    document.getElementById('hbar-reset').addEventListener('click', () => hbarChart.resetView());
+    document.getElementById('hbar-brush-clear').addEventListener('click', () => hbarChart.clearBrush());
 
     // ---------------------------------------------------------------------
     // STACKED BAR -- v1.1.0 (same kernel, stack: true)
@@ -3002,6 +3204,259 @@
     });
 
     $brushClear.addEventListener('click', () => brushSourceChart.clearBrush());
+
+    // ---------------------------------------------------------------------
+    // ANNOTATIONS -- v1.7.0 (data-pinned marks)
+    // ---------------------------------------------------------------------
+    //
+    // Synthetic "error rate" with an incident bump around x = 120. Four mark
+    // types on one chart: an SLO line rule, a shaded deploy-window range, a
+    // point at the incident peak, and a text label. The annotations config is
+    // a thunk reading a signal, so the toggle button swaps the set reactively.
+    // With pan/zoom enabled you can drag the chart and watch the marks stay
+    // pinned to their DATA coordinates (cold resolve / hot project split --
+    // zero per-frame allocation).
+
+    const annoData = (() => {
+        const out = new Array(200);
+        for (let i = 0; i < 200; i++) {
+            const bump = 3.2 * Math.exp(-Math.pow((i - 120) / 6, 2));   // the incident
+            out[i] = {
+                x: i,
+                y: 2.4 + Math.sin(i * 0.09) * 0.9 + bump + (Math.random() - 0.5) * 0.35,
+            };
+        }
+        return out;
+    })();
+
+    // Peak of the incident, found once so the point/text marks pin to it.
+    let annoPeakIdx = 0;
+    for (let i = 1; i < annoData.length; i++) {
+        if (annoData[i].y > annoData[annoPeakIdx].y) annoPeakIdx = i;
+    }
+    const annoPeak = annoData[annoPeakIdx];
+
+    // Two static mark sets, allocated once; the thunk just picks one. The SLO
+    // rule + incident marks are always on; the deploy-window range toggles.
+    const ANNO_BASE = [
+        {type: 'line', axis: 'y', value: 4.5, color: '--c-rose', dash: [6, 4], width: 1.5, label: 'SLO 4.5%'},
+        {type: 'point', x: annoPeak.x, y: annoPeak.y, color: '--c-amber', radius: 5},
+        {type: 'text', x: annoPeak.x, y: annoPeak.y + 0.55, text: 'incident peak', color: '--text-secondary', anchor: 'middle'},
+    ];
+    const ANNO_WITH_WINDOW = [
+        {type: 'range', axis: 'x', from: 110, to: 132, fill: 'rgba(148,163,184,0.16)', label: 'deploy window'},
+        ...ANNO_BASE,
+    ];
+    const annoShowWindow = signal(true);
+
+    const annotationsChart = createLineChart({
+        data: annoData,
+        annotations: () => annoShowWindow() ? ANNO_WITH_WINDOW : ANNO_BASE,
+        pan: true,
+        zoom: true,
+        width: responsiveWidth('annotations-chart', 800),
+        height: 340,
+        margin: {top: 24, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-cyan',
+        lineWidth: 1.5,
+        ...SHARED_OPTS,
+        crosshair: {color: '--text-secondary', dash: [3, 4]},
+        tooltip: false,
+    });
+    annotationsChart.mount(document.getElementById('annotations-chart'));
+    ALL_CHARTS.push(annotationsChart);
+
+    const $annoToggle = document.getElementById('annotations-toggle');
+    $annoToggle.addEventListener('click', () => {
+        const next = !annoShowWindow.peek();
+        annoShowWindow.set(next);
+        $annoToggle.textContent = next ? 'hide deploy window' : 'show deploy window';
+    });
+    document.getElementById('annotations-reset').addEventListener('click', () => annotationsChart.resetView());
+
+    // ---------------------------------------------------------------------
+    // TIME-SERIES PRESET -- v1.10.0 weekend shading + v1.11.0 sessions
+    // ---------------------------------------------------------------------
+    //
+    // One shared 3-week hourly dataset (epoch ms UTC), two charts differing
+    // only in the shading config. The window is anchored to the most recent
+    // UTC Monday so the weekend bands land in the same relative spots no
+    // matter when the page is opened. Bands are derived from the DATA extent
+    // (not the live scale) -- pan/zoom just re-clips them per frame at 0 B.
+
+    const HOUR_MS = 3600000;
+    const DAY_MS = 86400000;
+    const _tsNow = Date.now();
+    const _tsMonday = Math.floor(_tsNow / DAY_MS) * DAY_MS
+        - (((new Date(_tsNow).getUTCDay() + 6) % 7) * DAY_MS);
+    const TS_START = _tsMonday - 21 * DAY_MS;
+    const TS_POINTS = 21 * 24;
+
+    const tsData = (() => {
+        const out = new Array(TS_POINTS);
+        let v = 100;
+        for (let i = 0; i < TS_POINTS; i++) {
+            v += (Math.random() - 0.5) * 1.6 + Math.sin(i * 0.26) * 0.7;
+            out[i] = {x: TS_START + i * HOUR_MS, y: v};
+        }
+        return out;
+    })();
+
+    // 'rgba(148,163,184,0.16)' (slate) reads on both themes; the library
+    // default rgba(0,0,0,0.05) is tuned for light backgrounds.
+    const TS_SHADE_FILL = 'rgba(148,163,184,0.16)';
+
+    const tsWeekendChart = createTimeLineChart({
+        data: tsData,
+        shading: {fill: TS_SHADE_FILL},          // no sessions key => weekend walker
+        pan: true,
+        zoom: true,
+        width: responsiveWidth('ts-weekend-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-cyan',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    tsWeekendChart.mount(document.getElementById('ts-weekend-chart'));
+    ALL_CHARTS.push(tsWeekendChart);
+
+    // v1.11.0: NYSE regular hours in UTC minutes-from-midnight. 13:30-20:00
+    // UTC = 09:30-16:00 ET (the chart is UTC-only; local->UTC conversion is
+    // the caller's job). Sessions present => the weekend walker never runs;
+    // Fri close -> Mon open comes out as ONE contiguous band.
+    const tsSessionsChart = createTimeLineChart({
+        data: tsData,
+        shading: {
+            sessions: [{openMinutes: 810, closeMinutes: 1200}],
+            sessionFill: TS_SHADE_FILL,
+        },
+        pan: true,
+        zoom: true,
+        width: responsiveWidth('ts-sessions-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-violet',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    tsSessionsChart.mount(document.getElementById('ts-sessions-chart'));
+    ALL_CHARTS.push(tsSessionsChart);
+
+    // ---------------------------------------------------------------------
+    // LEGEND VIRTUALIZATION -- v1.12.0 (caller-injected adapter)
+    // ---------------------------------------------------------------------
+    //
+    // Bridge lite-charts' virtualize contract onto lite-virtual's mountList.
+    // lite-charts calls factory(host, opts) and needs { dispose } back;
+    // mountList wants (host, scope, opts) with a lite-element-shaped scope
+    // ({ effect, on, onCleanup }) and viewport/render key names. The bridge
+    // builds a throwaway scope whose collected teardowns become the single
+    // dispose() lite-charts requires. ~20 lines; this is the production
+    // wiring pattern, not a demo shortcut.
+    const legendVirtualizer = (host, opts) => {
+        const cleanups = [];
+        const scope = {
+            effect: (fn) => {
+                const stop = effect(fn);
+                cleanups.push(stop);
+                return stop;
+            },
+            on: (el, ev, fn, o) => {
+                el.addEventListener(ev, fn, o);
+                cleanups.push(() => el.removeEventListener(ev, fn, o));
+            },
+            onCleanup: (fn) => cleanups.push(fn),
+        };
+        mountList(host, scope, {
+            count: opts.count,
+            itemHeight: opts.itemHeight,
+            viewport: opts.height,
+            overscan: opts.overscan,
+            render: opts.renderRow,
+        });
+        return {
+            dispose: () => {
+                for (let i = cleanups.length - 1; i >= 0; i--) cleanups[i]();
+                cleanups.length = 0;
+            },
+        };
+    };
+
+    // 200 series, 48 points each, stable SoA buffers. Colors walk the golden
+    // angle so neighbouring rows stay distinguishable in the legend.
+    const VIRT_SERIES = 200;
+    const VIRT_POINTS = 48;
+    const virtSeries = new Array(VIRT_SERIES);
+    for (let s = 0; s < VIRT_SERIES; s++) {
+        const xs = new Float32Array(VIRT_POINTS);
+        const ys = new Float32Array(VIRT_POINTS);
+        const base = 20 + (s % 40) * 2;
+        const freq = 0.15 + (s % 7) * 0.04;
+        for (let i = 0; i < VIRT_POINTS; i++) {
+            xs[i] = i;
+            ys[i] = base + 12 * Math.sin(i * freq + s * 0.7);
+        }
+        virtSeries[s] = {
+            name: 'sensor-' + String(s).padStart(3, '0'),
+            data: {xs, ys},
+            color: 'hsl(' + ((s * 137.508) % 360).toFixed(1) + ', 62%, 55%)',
+            lineWidth: 1,
+        };
+    }
+
+    const virtLegendChart = createLineChart({
+        series: virtSeries,
+        width: responsiveWidth('virt-legend-chart', 800),
+        height: 380,
+        ...SHARED_OPTS,
+        tooltip: false,          // 200 tooltip rows would be its own problem
+        legend: {
+            position: 'right',   // virtualize requires 'left' | 'right'
+            height: 320,         // REQUIRED scroll-viewport px (null is not 0 -- throws)
+            itemHeight: 28,
+            overscan: 2,
+            virtualize: legendVirtualizer,
+        },
+    });
+    virtLegendChart.mount(document.getElementById('virt-legend-chart'));
+    ALL_CHARTS.push(virtLegendChart);
+
+    // Live proof of O(window): count the pooled rows actually displayed vs
+    // the series count. A 2 Hz interval with a querySelectorAll is status-
+    // readout cost, deliberately outside any hot path.
+    const $virtStatus = document.getElementById('virt-legend-status');
+    const _virtCountRows = () => {
+        const host = virtLegendChart.legend;
+        if (!host) return;
+        const rows = host.querySelectorAll('[data-lc-idx]');
+        let shown = 0;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].style.display !== 'none') shown++;
+        }
+        $virtStatus.textContent = 'DOM rows: ' + shown + ' / ' + VIRT_SERIES + ' series';
+    };
+    _virtCountRows();
+    setInterval(_virtCountRows, 500);
+
+    // Bulk toggles, batched: 100 signal writes collapse into one repaint of
+    // the ~14 bound rows instead of 100.
+    document.getElementById('virt-hide-odd').addEventListener('click', () => {
+        batch(() => {
+            for (let i = 1; i < VIRT_SERIES; i += 2) virtLegendChart.setSeriesVisible(i, false);
+        });
+    });
+    document.getElementById('virt-show-all').addEventListener('click', () => {
+        batch(() => {
+            for (let i = 0; i < VIRT_SERIES; i++) virtLegendChart.setSeriesVisible(i, true);
+        });
+    });
 
     // ---------------------------------------------------------------------
     // RADAR -- multi-axis polygon layout, separate kernel

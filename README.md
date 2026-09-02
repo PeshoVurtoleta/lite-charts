@@ -500,7 +500,37 @@ library** -- you pass the factory. Wire it to `@zakkster/lite-virtual`'s
 
 ```javascript
 import { createLineChart } from '@zakkster/lite-charts';
+import { effect } from '@zakkster/lite-signal';
 import { mountList } from '@zakkster/lite-virtual'; // YOUR import, not ours
+
+// mountList wants (host, scope, opts) with a lite-element-shaped scope
+// ({ effect, on, onCleanup }) and viewport/render key names; lite-charts
+// hands the factory (host, opts) and wants { dispose } back. This bridge
+// closes the gap -- its collected teardowns become the one dispose().
+const virtualize = (host, opts) => {
+    const cleanups = [];
+    const scope = {
+        effect: (fn) => { const stop = effect(fn); cleanups.push(stop); return stop; },
+        on: (el, ev, fn, o) => {
+            el.addEventListener(ev, fn, o);
+            cleanups.push(() => el.removeEventListener(ev, fn, o));
+        },
+        onCleanup: (fn) => cleanups.push(fn),
+    };
+    mountList(host, scope, {
+        count: opts.count,
+        itemHeight: opts.itemHeight,
+        viewport: opts.height,
+        overscan: opts.overscan,
+        render: opts.renderRow,
+    });
+    return {
+        dispose: () => {
+            for (let i = cleanups.length - 1; i >= 0; i--) cleanups[i]();
+            cleanups.length = 0;
+        },
+    };
+};
 
 createLineChart({
     series: manySeries,                  // hundreds of rows
@@ -509,10 +539,14 @@ createLineChart({
         height: 320,                     // required: scroll-viewport px
         itemHeight: 28,                  // fixed row height (default 28)
         overscan: 2,                     // off-viewport rows (default 2)
-        virtualize: (host, opts) => mountList(host, opts), // -> { dispose }
+        virtualize,                      // -> { dispose }
     },
 });
 ```
+
+One styling note: the pooled rows are absolutely positioned, so the legend
+host has no intrinsic width -- give `.lite-charts-legend-virtual` an explicit
+width (e.g. `flex: 0 0 200px`) or it collapses beside the canvas.
 
 The factory is called once at mount with `(host, opts)`:
 
