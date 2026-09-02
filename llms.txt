@@ -10,7 +10,26 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.12.0 (current): legend virtualization -- additive, opt-in, fully
+> v1.13.0 (current): overnight sessions + holiday calendar for
+> createTimeLineChart shading. shading.sessions now accepts closeMinutes <
+> openMinutes (overnight): the session splits at the UTC midnight seam into
+> an evening half [open, 1440] on the original day mask and a morning half
+> [0, close] on the mask rotated one weekday forward -- the single-cursor
+> complement sweep is structurally unchanged and the seam never emits a band.
+> `days` names the UTC weekday the session OPENS (a Mon-Fri overnight spec
+> has morning halves Tue-Sat). closeMinutes === openMinutes still throws; a
+> 24h session is {0, 1440}. NEW shading.holidays: number[] -- epoch-ms
+> timestamps truncated to UTC day starts (Math.floor division; pre-1970
+> floors correctly); each holiday closes its whole UTC day and FUSES with
+> adjacent gap bands into one range. holidays without sessions synthesize a
+> full-day Mon-Fri calendar internally (weekends + holidays), same
+> validation. Fail-closed: [], null entries (null is not epoch 0),
+> non-integers, strings, Date objects all throw at construction -- pass
+> Date.UTC(...) values (new Date(y,m,d).getTime() is LOCAL midnight). No
+> per-holiday fill (would break fusion); whole-UTC-day closure only (no
+> early-close support). No-overnight/no-holiday specs produce band lists
+> identical to v1.11.0-v1.12.0.
+> v1.12.0: legend virtualization -- additive, opt-in, fully
 > confined; a chart that does not set `legend.virtualize` is byte-unchanged
 > (the eager `buildLegendDOM`..`installLegend` region is byte-identical,
 > SHA-pinned by a test). `legend.virtualize: (host, opts) => ({ dispose })`

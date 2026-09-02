@@ -8472,20 +8472,28 @@ const DEFAULT_WEEKEND_FILL = 'rgba(0,0,0,0.05)';
 
 // v1.11.0 -- market-hours session shading. COLD, construction-time validator,
 // called ONCE from createTimeLineChart (never inside the accessor). Returns null
-// unless `shading` is an object carrying `sessions` -- the v1.10.0 weekend forms
-// (true / 'weekends' / {fill?}) fall through to _weekendBands untouched. Otherwise
-// it validates the session calendar and returns a normalized, open-sorted spec.
-// Fail closed: EVERY junk config THROWS here (a config error, at build time, not
-// a silent draw-time zero). null is not zero -- an openMinutes of null must NOT
-// coerce to midnight, so the `== null` gate is BEFORE any unary +. `dayMask` is a
-// bitfield over UTC weekdays (bit d = weekday d); absent `days` -> 62 (Mon-Fri,
-// bits 1..5). Overnight sessions (close < open) are rejected here, not silently
-// mispainted -- the complement walker in _sessionBands assumes close <= 1440.
+// unless `shading` is an object carrying `sessions` OR `holidays` -- the v1.10.0
+// weekend forms (true / 'weekends' / {fill?}) fall through to _weekendBands
+// untouched. Otherwise it validates the calendar and returns a normalized,
+// open-sorted spec. Fail closed: EVERY junk config THROWS here (a config error,
+// at build time, not a silent draw-time zero). null is not zero -- an openMinutes
+// of null must NOT coerce to midnight, so the `== null` gate is BEFORE any unary
+// +. `dayMask` is a bitfield over UTC weekdays (bit d = weekday d); absent `days`
+// -> 62 (Mon-Fri, bits 1..5). `days` names the UTC weekday the session OPENS.
+// v1.13.0 -- overnight sessions (close < open) are SPLIT at the UTC midnight seam
+// into an evening half [open, 1440] today and a morning half [0, close] on the
+// NEXT UTC day (weekday bits rotated d -> (d+1)%7), so a Mon-Fri overnight spec
+// has its morning halves on Tue-Sat. Both halves keep close <= 1440, so the
+// complement walker in _sessionBands still assumes close <= 1440. Holidays
+// (shading.holidays) are epoch ms truncated to their UTC day start into a Set;
+// _sessionBands closes the whole UTC day (fuses with adjacent gap bands).
 const _normalizeSessionSpec = (shading) => {
-    if (!(typeof shading === 'object' && shading !== null && shading.sessions != null)) {
+    if (!(typeof shading === 'object' && shading !== null && (shading.sessions != null || shading.holidays != null))) {
         return null;
     }
-    const raw = shading.sessions;
+    // Holidays without sessions: synthesize a full-day Mon-Fri calendar so the
+    // complement (weekends + holidays) rides the SAME validation loop and sweep.
+    const raw = shading.sessions != null ? shading.sessions : [{ openMinutes: 0, closeMinutes: 1440, days: [1, 2, 3, 4, 5] }];
     if (!Array.isArray(raw) || raw.length === 0) {
         throw new Error('lite-charts: createTimeLineChart `shading.sessions` must be a non-empty array');
     }
@@ -8510,9 +8518,6 @@ const _normalizeSessionSpec = (shading) => {
         if (close < 1 || close > 1440) {
             throw new Error('lite-charts: createTimeLineChart session closeMinutes must be in 1..1440');
         }
-        if (close < open) {
-            throw new Error('lite-charts: createTimeLineChart session closeMinutes must be > openMinutes -- overnight sessions (close < open) are not supported in v1.11.0');
-        }
         if (close === open) {
             throw new Error('lite-charts: createTimeLineChart session has zero width (closeMinutes === openMinutes)');
         }
@@ -8530,12 +8535,47 @@ const _normalizeSessionSpec = (shading) => {
                 dayMask |= (1 << d);
             }
         }
-        sessions.push({ open, close, dayMask });
+        if (close < open) {
+            // Overnight: split at the UTC midnight seam. Evening half [open, 1440]
+            // fires today; morning half [0, close] fires on the NEXT UTC day, its
+            // weekday bits rotated d -> (d+1)%7. Both halves keep close <= 1440, so
+            // the sweep's single-cursor invariant (ascending starts, every interval
+            // ends within its own day) survives. The seam emits NO band: the evening
+            // half closes at exactly next-day 00:00 and the morning half opens at 0
+            // (sorts first within its day), so `o > cursor` is strict -- no sliver.
+            sessions.push({ open, close: 1440, dayMask });
+            sessions.push({ open: 0, close, dayMask: ((dayMask << 1) | (dayMask >> 6)) & 127 });
+        } else {
+            sessions.push({ open, close, dayMask });
+        }
     }
     // Ascending by open: the single-cursor sweep in _sessionBands relies on this
     // (with every close <= 1440) to emit the complement in one forward pass.
     sessions.sort((a, b) => a.open - b.open);
-    return { fill: shading.sessionFill != null ? shading.sessionFill : null, sessions };
+    // Holiday calendar (COLD, MAY allocate): each epoch-ms entry truncated to its
+    // UTC day start (Math.floor, NOT `h % _DAY_MS` -- subtraction truncates toward
+    // zero and lands pre-1970 dates on the wrong UTC day). null is not epoch 0, so
+    // the `== null` gate is BEFORE Number.isInteger (which also rejects Date, NaN,
+    // Infinity, strings, 1.5). _sessionBands closes each holiday's whole UTC day.
+    let hol = null;
+    if (shading.holidays != null) {
+        const rawHol = shading.holidays;
+        if (!Array.isArray(rawHol) || rawHol.length === 0) {
+            throw new Error('lite-charts: createTimeLineChart `shading.holidays` must be a non-empty array');
+        }
+        hol = new Set();
+        for (let i = 0; i < rawHol.length; i++) {
+            const h = rawHol[i];
+            if (h == null) {
+                throw new Error('lite-charts: createTimeLineChart `shading.holidays` entries must be numeric epoch ms (null is not epoch 0)');
+            }
+            if (!Number.isInteger(h)) {
+                throw new Error('lite-charts: createTimeLineChart `shading.holidays` entries must be integer epoch ms');
+            }
+            hol.add(Math.floor(h / _DAY_MS) * _DAY_MS);
+        }
+    }
+    return { fill: shading.sessionFill != null ? shading.sessionFill : null, sessions, holidays: hol };
 };
 
 // v1.11.0 -- COLD session-band generator, sibling of _weekendBands. Runs ONLY
@@ -8544,7 +8584,9 @@ const _normalizeSessionSpec = (shading) => {
 // extent it opens the day's active sessions ([dayStart+open, dayStart+close]) and
 // pushes one range band per GAP between them, clipped to [xMin, xMax]. Fail closed:
 // the prologue is byte-identical to _weekendBands (null gated BEFORE any unary +,
-// non-finite/inverted extent -> no bands).
+// non-finite/inverted extent -> no bands). v1.13.0 -- a holiday day (spec.holidays
+// Set) contributes no open intervals, so the cursor swallows the whole UTC day and
+// fuses it with the neighboring gaps into one band.
 const _sessionBands = (xMinRaw, xMaxRaw, spec, fill) => {
     const out = [];
     if (xMinRaw == null || xMaxRaw == null) return out; // null is not zero
@@ -8552,16 +8594,21 @@ const _sessionBands = (xMinRaw, xMaxRaw, spec, fill) => {
     const xMax = +xMaxRaw;
     if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !(xMax > xMin)) return out;
     const f = spec.fill != null ? spec.fill : fill;
+    const hol = spec.holidays;
     let cursor = xMin;
     const d = new Date(xMin);
     const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-    // Seed one day early (harmless; closes <= 1440 can't reach past a day boundary,
-    // but the seed keeps the walk shape obviously safe).
+    // Seed one day early so the prior day's evening overnight half (which closes at
+    // exactly this day's 00:00, never past it) is visited before its seam.
     const first = dayStart - _DAY_MS;
-    // No sort/merge pass here: sessions are open-sorted (T1) and every close <= 1440,
-    // so a single forward cursor yields the complement. Overnight support (close >
-    // 1440 / next-day) would require a real sort/merge at generation time.
+    // No sort/merge pass here: sessions are open-sorted (T1) and every close reaches
+    // the day boundary exactly (evening overnight halves close at next-day 00:00)
+    // but never past it, so a single forward cursor yields the complement.
     for (let day = first; day < xMax; day += _DAY_MS) {
+        // Holiday: skip the day's sessions entirely. `day` is a true UTC midnight
+        // (seeded from Date.UTC parts, stepped by _DAY_MS -- UTC has no DST), so it
+        // matches the Set keys. The cursor advances over the whole closed day.
+        if (hol !== null && hol.has(day)) continue;
         const dow = new Date(day).getUTCDay();
         for (let j = 0; j < spec.sessions.length; j++) {
             const s = spec.sessions[j];

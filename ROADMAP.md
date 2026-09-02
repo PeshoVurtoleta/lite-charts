@@ -5,7 +5,32 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.12.0 (current)
+## v1.13.0 (current)
+
+Overnight sessions + holiday calendar. Both ride the v1.11.0 session
+machinery; a chart using neither is band-for-band unchanged (asserted).
+
+- **Overnight sessions.** `shading.sessions` with `closeMinutes <
+  openMinutes` is normalized at construction into an evening half
+  `[open, 1440]` on the original day mask plus a morning half `[0, close]`
+  on the mask rotated one weekday forward, so `_sessionBands`' single-cursor
+  complement sweep is structurally unchanged and the midnight seam can never
+  emit a band. `days` names the UTC weekday the session OPENS.
+- **`shading.holidays: number[]`.** Epoch ms truncated to UTC day starts
+  (`Math.floor` division -- pre-1970 dates floor correctly); a holiday day
+  contributes no open intervals, so the whole UTC day fuses with adjacent
+  gaps into ONE band. Holidays without sessions synthesize a full-day
+  Mon-Fri calendar inside the validator (weekends + holidays, no bypass).
+- **Fail-closed.** Zero-width sessions still throw; `[]`, `null`,
+  non-integer, string, and `Date` holiday entries throw at construction.
+  One fill for all gap bands (per-holiday fills would break fusion).
+- 453 tests (9 new; four mechanisms proven load-bearing by reversion:
+  rotate wrap-drop, split removal, day-skip deletion, floor->% truncation)
+  + torture A19 (band-regeneration storm, 0 major GC).
+
+---
+
+## v1.12.0
 
 Legend virtualization. Additive, opt-in, fully confined: a chart that does not
 set `legend.virtualize` is byte-unchanged (the eager
@@ -573,10 +598,16 @@ not shipped in `files[]`). They are independent; pick by appetite.
   `virtualize` fn per the `spatialIndex` optional-peer precedent, no import,
   vertical positions only). Horizontal (top/bottom) virtualization remains a
   candidate (throws today).
-- **Overnight sessions** (v1.12.x candidate) -- `closeMinutes < openMinutes`
-  throws today; support needs midnight-split open intervals and a real merge
-  in `_sessionBands`. Holiday-calendar convenience is a sibling candidate;
-  both ride the shipped session machinery.
+- ~~**Overnight sessions + holiday calendar**~~ -- **SHIPPED v1.13.0** (the
+  midnight-split normalization made the predicted "real merge in
+  `_sessionBands`" unnecessary -- the single-cursor sweep survived
+  unchanged; holidays are a day-skip in the same sweep). Early-close
+  (half-day) calendar entries remain a candidate.
+- **Voronoi cell layer** (v1.14.0 candidate, brief `briefs/voronoi-cells.md`)
+  -- fat hover (`hitTolerance: 'nearest'`, charts-side only) + an injected
+  cell-tessellation layer on scatter (`cells: { index }`, spatialIndex
+  precedent). Blocks on lite-delaunay v1.2.0 `createCellIndex`; the brief
+  carries the consumer contract that release is built against.
 
 ### Companion track -- `@zakkster/lite-charts-gl` (separate package)
 
@@ -627,9 +658,10 @@ whichever minor they land in rather than one combined cut: **x-log** shipped
 as v1.6.0, the **annotation layer** as v1.7.0, **horizontal-bar interactions**
 as v1.8.0, the **horizontal-bar `brush`** as v1.9.0, and **`createTimeLineChart`
 + weekend shading** as v1.10.0, and **market-hours session shading** as
-v1.11.0, and **legend virtualization** as v1.12.0; the remaining items
-(overnight sessions, horizontal legend virtualization) stay independent
-entries in the "Next -- polish + reach" list above.
+v1.11.0, and **legend virtualization** as v1.12.0, and **overnight sessions
++ holiday calendar** as v1.13.0; the remaining items (horizontal legend
+virtualization, early-close calendar entries) stay independent entries in
+the "Next -- polish + reach" list above.
 
 ### v2.0.0 -- (possible)
 

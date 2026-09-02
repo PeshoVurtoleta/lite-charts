@@ -582,4 +582,65 @@ export function run() {
             globalThis.document = prevDoc;
         }
     }
+
+    // --- 13. overnight + holiday band-regeneration storm (A19, v1.13.0) --------
+    // v1.13.0 adds overnight sessions (close < open, split at the UTC midnight seam
+    // into two half-sessions at normalize time) and a holiday calendar (whole UTC
+    // days closed, fused with adjacent gaps). Both are COLD: the split happens once
+    // in _normalizeSessionSpec at construction, the holiday day-skip lives in the
+    // sub-Hz data-tracked resolve effect (_sessionBands). This gate drives a
+    // data-change storm on a time line carrying an overnight Globex-style calendar
+    // + a 12-entry holiday array, alternating the data signal between two prebuilt
+    // arrays (same 60-day UTC domain, different y -- so bands regenerate every set
+    // without the set() itself allocating a fresh array). Two structural claims:
+    // (1) the resolve effect only RECOMPUTES on data change, never registering new
+    // signal-graph nodes (delta 0 across the storm); (2) the per-frame redraw path
+    // is byte-unchanged from A17 -- overnight/holiday bands ride the annotation
+    // layer as plain range rows, so redraw stays <=16 B/op with maxMajor:0.
+    {
+        const DAY = 86400000;
+        const BASE = Date.UTC(2021, 0, 4); // Monday
+        const N = 60;
+        const mkData = (phase) => {
+            const arr = new Array(N);
+            for (let i = 0; i < N; i++) arr[i] = { x: BASE + i * DAY, y: Math.sin((i + phase) / 5) * 40 + 50 };
+            return arr;
+        };
+        const dataA = mkData(0);
+        const dataB = mkData(1);
+        // 12 holidays scattered across the domain, each a true UTC midnight.
+        const holidays = [];
+        for (let k = 3; holidays.length < 12; k += 4) holidays.push(BASE + k * DAY);
+        // Globex-style overnight: opens Sun-Thu 22:00 UTC, closes 21:00 next day.
+        const shading = {
+            sessions: [{ openMinutes: 1320, closeMinutes: 1260, days: [0, 1, 2, 3, 4] }],
+            holidays,
+        };
+        const data = signal(dataA);
+        const c = createTimeLineChart({
+            data, x: 'x', y: 'y', width: 800, height: 400, shading, schedule: (fn) => fn(),
+        });
+        const cv = createEventCanvas(800, 400);
+        c.mount(cv);
+        quietCanvas(cv);
+        // Sanity: overnight + holidays actually produced a non-trivial band set.
+        const nBands = c._internal.annotations ? c._internal.annotations.count : 0;
+        check(nBands >= 20,
+            () => `A19: expected >=20 bands from the overnight+holiday calendar, got ${nBands}`);
+        // Warmup the data-change path, THEN pin the graph. ~200 alternating sets:
+        // each fires the resolve effect (band regen) but must add zero graph nodes.
+        for (let i = 0; i < 8; i++) data.set(i & 1 ? dataA : dataB);
+        const before = graphSnapshot();
+        for (let i = 0; i < 200; i++) data.set(i & 1 ? dataA : dataB);
+        const after = graphSnapshot();
+        check(after.nodes - before.nodes === 0,
+            () => `A19: ${after.nodes - before.nodes} new signal-graph nodes across the data-change storm (expected 0)`);
+        // Per-frame redraw budget: the overnight/holiday bands are plain range rows,
+        // so the draw path matches A17's <=16 B/op with maxMajor:0.
+        const gR = runOpsGate(() => { c.redraw(); }, { ops: 50000, warmup: 500 });
+        if (!gR.report.ok) die(allocFailMsg('A19.overnight-holiday-redraw', gR.report, gR.summary));
+        check(gR.bytesPerOp <= 16.0,
+            () => `A19: overnight+holiday redraw allocated ${gR.bytesPerOp.toFixed(3)} B/op > 16`);
+        c.destroy();
+    }
 }

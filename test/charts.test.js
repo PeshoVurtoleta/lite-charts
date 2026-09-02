@@ -8358,8 +8358,15 @@ describe('v1.11.0 -- market-hours session shading', () => {
         assert.throws(mkc([{ openMinutes: 570, closeMinutes: null }]), /lite-charts/);
         assert.throws(mkc([{ openMinutes: 9.5, closeMinutes: 960 }]), /lite-charts/, 'non-integer');
         assert.throws(mkc([{ openMinutes: 570, closeMinutes: 570 }]), /lite-charts/, 'zero-width');
-        assert.throws(mkc([{ openMinutes: 960, closeMinutes: 570 }]), /overnight/i,
-            'inverted names overnight as unsupported');
+        // v1.13.0: overnight (close < open) no longer throws -- it splits at the
+        // UTC midnight seam into two half-sessions. No days -> original mask 62,
+        // rotated mask ((62<<1)|(62>>6))&127 = 124. Morning half sorts first.
+        const ov = _normalizeSessionSpec({ sessions: [{ openMinutes: 960, closeMinutes: 570 }] });
+        assert.equal(ov.sessions.length, 2, 'overnight splits into two half-sessions');
+        assert.deepEqual(ov.sessions[0], { open: 0, close: 570, dayMask: 124 },
+            'morning half [0,570] on the rotated next-day mask, sorted first');
+        assert.deepEqual(ov.sessions[1], { open: 960, close: 1440, dayMask: 62 },
+            'evening half [960,1440] on the original mask');
         assert.throws(mkc([{ openMinutes: 570, closeMinutes: 1441 }]), /lite-charts/, 'close > 1440');
         assert.throws(mkc([{ openMinutes: -1, closeMinutes: 960 }]), /lite-charts/, 'open < 0');
         assert.throws(mkc([]), /lite-charts/, 'empty sessions array');
@@ -8459,6 +8466,205 @@ describe('v1.11.0 -- market-hours session shading', () => {
             _normalizeSessionSpec({ sessions: [{ openMinutes: 570, closeMinutes: 960 }], sessionFill: '#123456' }),
             FILL);
         assert.ok(filled.every((band) => band.fill === '#123456'), 'sessionFill reaches every band');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.13.0 -- overnight sessions + holiday calendar
+// ---------------------------------------------------------------------------
+//
+// Overnight (closeMinutes < openMinutes) is normalized into TWO half-sessions
+// at the UTC midnight seam -- evening [open, 1440] on the original dayMask,
+// morning [0, close] on the mask rotated d -> (d+1)%7 -- so the single-cursor
+// sweep in _sessionBands is structurally unchanged and the seam can never emit
+// a band (`o > cursor` is strict). Holidays (shading.holidays, epoch ms) are
+// truncated to UTC day starts into a Set; a holiday day contributes no open
+// intervals, so the cursor fuses it with the neighboring gaps into ONE band.
+// Holidays without sessions synthesize a full-day Mon-Fri calendar INSIDE
+// _normalizeSessionSpec (same validation loop -- no fail-open bypass).
+// Canonical fixture: Globex-style ES {open 1320, close 1260, days Sun-Thu}
+// over one UTC week = EXACTLY 5 bands (4 x 1h maintenance + 1 x 49h weekend).
+describe('v1.13.0 -- overnight sessions + holiday calendar', () => {
+    const { _sessionBands, _normalizeSessionSpec } = _testHelpers;
+    const M = Date.UTC(2021, 0, 4);   // Monday
+    const D = 86400000;
+    const MIN = 60000;
+    const FILL = 'rgba(0,0,0,0.05)';
+    const GLOBEX = [{ openMinutes: 1320, closeMinutes: 1260, days: [0, 1, 2, 3, 4] }];
+    const NYSE = [{ openMinutes: 810, closeMinutes: 1200 }];
+    const flat = (bands) => bands.map((b) => [b.from, b.to]);
+
+    // -- OH1: v1.11.0 behavioral identity (the sweep was edited; byte-identity
+    //    is gone, so exact band lists replace it) ----------------------------
+    it('OH1: no-overnight/no-holiday specs produce the exact v1.11.0 band lists', () => {
+        const spec = _normalizeSessionSpec({ sessions: [{ openMinutes: 570, closeMinutes: 960 }] });
+        const bands = _sessionBands(M, M + 14 * D, spec, FILL);
+        const O = 570 * MIN, C = 960 * MIN;
+        const expected = [[M, M + O]];
+        for (let k = 0; k < 4; k++) expected.push([M + k * D + C, M + (k + 1) * D + O]);
+        expected.push([M + 4 * D + C, M + 7 * D + O]);
+        for (let k = 7; k < 11; k++) expected.push([M + k * D + C, M + (k + 1) * D + O]);
+        expected.push([M + 11 * D + C, M + 14 * D]);
+        assert.deepEqual(flat(bands), expected, 'TS15 canonical 11-band list unchanged');
+        const lb = _sessionBands(M, M + 14 * D, _normalizeSessionSpec({
+            sessions: [{ openMinutes: 570, closeMinutes: 690 }, { openMinutes: 750, closeMinutes: 960 }],
+        }), FILL);
+        assert.equal(lb.length, 21, 'lunch-break variant unchanged');
+    });
+
+    // -- OH2: confinement -- _weekendBands byte-identical (SHA-pinned) -------
+    it('OH2: _weekendBands source region is byte-identical (v1.12.x confinement)', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        const region = src.match(/const _weekendBands[\s\S]*?\n};/);
+        assert.ok(region, '_weekendBands region found');
+        const sha = createHash('sha256').update(region[0]).digest('hex').slice(0, 16);
+        assert.equal(sha, '61df350f5a50136a',
+            '_weekendBands untouched by the overnight/holiday work');
+    });
+
+    // -- OH3: the midnight seam never emits (D1 auto-merge) ------------------
+    it('OH3: overnight seam emits no band at any in-session UTC midnight', () => {
+        const bands = _sessionBands(M, M + 7 * D, _normalizeSessionSpec({ sessions: GLOBEX }), FILL);
+        for (let k = 1; k <= 4; k++) {
+            const mid = M + k * D; // Tue..Fri 00:00 -- inside an open overnight span
+            for (const b of bands) {
+                assert.ok(b.from !== mid && b.to !== mid,
+                    `no band boundary at in-session midnight M+${k}D`);
+            }
+        }
+        for (const b of bands) assert.ok(b.to > b.from, 'positive width everywhere');
+    });
+
+    // -- OH4: Globex week -- exact from/to (counts lie; lists do not) --------
+    it('OH4: Globex Sun-Thu 1320/1260 over one week = exactly the 5 complement bands', () => {
+        const spec = _normalizeSessionSpec({ sessions: GLOBEX });
+        assert.deepEqual(spec.sessions,
+            [{ open: 0, close: 1260, dayMask: 62 }, { open: 1320, close: 1440, dayMask: 31 }],
+            'split halves: morning on the rotated mask sorts first');
+        const bands = _sessionBands(M, M + 7 * D, spec, FILL);
+        assert.deepEqual(flat(bands), [
+            [M + 1260 * MIN, M + 1320 * MIN],
+            [M + D + 1260 * MIN, M + D + 1320 * MIN],
+            [M + 2 * D + 1260 * MIN, M + 2 * D + 1320 * MIN],
+            [M + 3 * D + 1260 * MIN, M + 3 * D + 1320 * MIN],
+            [M + 4 * D + 1260 * MIN, M + 6 * D + 1320 * MIN], // Fri 21:00 -> Sun 22:00
+        ], '4 x 1h maintenance gaps + the 49h weekend, no tail band');
+    });
+
+    // -- OH5: holiday fusion -- exact bounds, chart-level count --------------
+    it('OH5: a holiday closes its whole UTC day and fuses with adjacent gaps', () => {
+        // (a) Globex + Wednesday holiday: still 5 bands; band 3 is the clean
+        // day band [Wed 00:00, Thu 00:00] -- Tuesday's evening half still runs
+        // to Wed 00:00 (the documented whole-UTC-day approximation).
+        const ga = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ sessions: GLOBEX, holidays: [M + 2 * D] }), FILL);
+        assert.deepEqual(flat(ga), [
+            [M + 1260 * MIN, M + 1320 * MIN],
+            [M + D + 1260 * MIN, M + D + 1320 * MIN],
+            [M + 2 * D, M + 3 * D],
+            [M + 3 * D + 1260 * MIN, M + 3 * D + 1320 * MIN],
+            [M + 4 * D + 1260 * MIN, M + 6 * D + 1320 * MIN],
+        ], 'holiday day-band starts at Wed 00:00, not Tue 22:00');
+        // (b) NYSE + Wednesday holiday: Tue-close -> Thu-open is ONE fused band.
+        const nb = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ sessions: NYSE, holidays: [M + 2 * D] }), FILL);
+        assert.deepEqual(flat(nb), [
+            [M, M + 810 * MIN],
+            [M + 1200 * MIN, M + D + 810 * MIN],
+            [M + D + 1200 * MIN, M + 3 * D + 810 * MIN],   // FUSED Tue 20:00 -> Thu 13:30
+            [M + 3 * D + 1200 * MIN, M + 4 * D + 810 * MIN],
+            [M + 4 * D + 1200 * MIN, M + 7 * D],
+        ], 'fused band spans the holiday');
+        const nc = _sessionBands(M, M + 7 * D, _normalizeSessionSpec({ sessions: NYSE }), FILL);
+        assert.equal(nc.length, 6, 'without the holiday the same week has 6 bands');
+        // Chart-level integration: the resolve pipeline sees the same 5 bands.
+        const c = createTimeLineChart({
+            data: [{ x: M, y: 1 }, { x: M + 7 * D, y: 2 }],
+            shading: { sessions: GLOBEX, holidays: [M + 2 * D] },
+            schedule: (fn) => fn(),
+        });
+        c.mount(createMockCanvas(800, 400));
+        assert.equal(c._internal.annotations.count, 5, 'chart-level band count');
+        c.destroy();
+    });
+
+    // -- OH6: holidays without sessions == weekends + holiday ----------------
+    it('OH6: holidays-only shading rides the synthesized Mon-Fri calendar', () => {
+        const bands = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ holidays: [M + 2 * D] }), FILL);
+        assert.deepEqual(flat(bands), [[M + 2 * D, M + 3 * D], [M + 5 * D, M + 7 * D]],
+            'the holiday day + the weekend, nothing else');
+        assert.ok(bands.every((b) => b.fill === FILL), 'weekend default fill preserved');
+        // Clipped-equivalence with the weekend walker (which does NOT clip):
+        const wk = _weekendBandsClipped(M, M + 7 * D);
+        assert.deepEqual(flat(bands).filter((b) => b[0] !== M + 2 * D), wk,
+            'minus the holiday band, identical to the clipped weekend walker');
+    });
+    const _weekendBandsClipped = (xMin, xMax) => _testHelpers._weekendBands(xMin, xMax, FILL)
+        .map((b) => [Math.max(b.from, xMin), Math.min(b.to, xMax)]);
+
+    // -- OH7: validator fail-closed matrix -----------------------------------
+    it('OH7: junk holidays throw at construction; null is absence, not epoch 0', () => {
+        const mkc = (holidays) => () => createTimeLineChart({
+            data: [{ x: M, y: 1 }, { x: M + 7 * D, y: 2 }],
+            shading: { holidays }, schedule: (fn) => fn(),
+        });
+        assert.throws(mkc([]), /non-empty array/, 'empty holidays array');
+        assert.throws(mkc({}), /non-empty array/, 'non-array holidays');
+        assert.throws(mkc(0), /non-empty array/, 'holidays: 0 is junk, not absence');
+        assert.throws(mkc(false), /non-empty array/, 'holidays: false is junk, not absence');
+        assert.throws(mkc([null]), /null is not epoch 0/, 'the null gate fires FIRST');
+        assert.throws(mkc([undefined]), /null is not epoch 0/);
+        assert.throws(mkc([NaN]), /integer epoch ms/);
+        assert.throws(mkc([1.5]), /integer epoch ms/);
+        assert.throws(mkc([Infinity]), /integer epoch ms/);
+        assert.throws(mkc(['1609718400000']), /integer epoch ms/, 'strings throw, no coercion');
+        assert.throws(mkc([new Date(M)]), /integer epoch ms/, 'Date objects throw -- pass Date.UTC values');
+        assert.equal(_normalizeSessionSpec({ holidays: null }), null,
+            'holidays: null -> absence (the != null convention)');
+        assert.equal(_normalizeSessionSpec({ sessions: null, holidays: null }), null);
+    });
+
+    // -- OH8: overnight validity edges + pre-1970 truncation -----------------
+    it('OH8: 24h and 1-minute overnight edges normalize; pre-1970 holidays floor correctly', () => {
+        const full = _normalizeSessionSpec({ sessions: [{ openMinutes: 0, closeMinutes: 1440 }] });
+        assert.equal(full.sessions.length, 1, '24h session is the normal path, not a split');
+        const tiny = _normalizeSessionSpec({ sessions: [{ openMinutes: 1439, closeMinutes: 1 }] });
+        assert.deepEqual(tiny.sessions,
+            [{ open: 0, close: 1, dayMask: 124 }, { open: 1439, close: 1440, dayMask: 62 }],
+            'the 2-minute overnight splits into two 1-minute halves');
+        assert.throws(
+            () => _normalizeSessionSpec({ sessions: [{ openMinutes: 570, closeMinutes: 570 }] }),
+            /zero width/, 'close === open still throws (a 24h session is {0, 1440})');
+        // Saturday-opening overnight: bit 6 must WRAP to bit 0 (Sunday). This is
+        // the only case where the rotate's `| (dayMask >> 6)` term is observable
+        // -- a wrap-less `<< 1` would put the morning half on NO days (mask 0)
+        // and silently unshade Sunday morning (fail-open by omission).
+        const sat = _normalizeSessionSpec({ sessions: [{ openMinutes: 1320, closeMinutes: 240, days: [6] }] });
+        assert.deepEqual(sat.sessions,
+            [{ open: 0, close: 240, dayMask: 1 }, { open: 1320, close: 1440, dayMask: 64 }],
+            'Sat 22:00 -> Sun 04:00: morning half wraps onto Sunday (mask 1)');
+        // Math.floor truncation, not % subtraction: -1 ms is 1969-12-31 UTC.
+        const pre = _normalizeSessionSpec({ sessions: NYSE, holidays: [-1] });
+        assert.ok(pre.holidays.has(-D), 'pre-1970 holiday floors to the correct UTC day');
+        assert.ok(!pre.holidays.has(0), 'and NOT to epoch day 0');
+    });
+
+    // -- OH9: retention with overnight + holidays active ---------------------
+    it('OH9: repeated mount+destroy with overnight sessions + holidays retains nothing', () => {
+        const holidays = [];
+        for (let k = 0; k < 12; k++) holidays.push(M + k * 30 * D);
+        const before = stats().activeNodes;
+        for (let i = 0; i < 50; i++) {
+            const c = createTimeLineChart({
+                data: [{ x: M, y: 1 }, { x: M + 7 * D, y: 2 }],
+                shading: { sessions: GLOBEX, holidays },
+                schedule: (fn) => fn(),
+            });
+            c.mount(createMockCanvas(800, 400));
+            c.destroy();
+        }
+        assert.equal(stats().activeNodes - before, 0, 'no reactive-node retention');
     });
 });
 

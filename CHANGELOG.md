@@ -5,6 +5,60 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] -- 2026-09
+
+Overnight sessions and a holiday calendar for `createTimeLineChart` shading.
+Both ride the v1.11.0 session machinery; a chart using neither is unchanged
+(no-overnight/no-holiday specs produce identical band lists, asserted by test).
+
+### Added
+
+- **Overnight sessions.** `shading.sessions` entries with
+  `closeMinutes < openMinutes` are now legal: the session is split at the UTC
+  midnight seam into an evening half `[open, 1440]` on the original day mask
+  and a morning half `[0, close]` on the mask rotated one weekday forward, so
+  the single-cursor complement sweep is structurally unchanged and the seam
+  cannot emit a band (the gap at the boundary is zero-width and the emit test
+  is strict). `days` names the UTC weekday the session OPENS; a default
+  Mon-Fri overnight spec has its morning halves on Tue-Sat.
+- **`shading.holidays: number[]`.** Epoch-ms timestamps, each truncated to
+  its UTC day start (`Math.floor` division, so pre-1970 dates floor to the
+  correct day). A holiday day contributes no open intervals, so the whole UTC
+  day is shaded and fuses with the adjacent gaps into one band. Holidays
+  without `sessions` synthesize a full-day Mon-Fri calendar internally
+  (complement = weekends + holidays) through the same validation loop.
+
+### Changed
+
+- `shading.sessions` with `closeMinutes < openMinutes` no longer throws
+  (v1.11.0-v1.12.0 rejected it as unsupported). `closeMinutes === openMinutes`
+  still throws; a 24-hour session is `{ openMinutes: 0, closeMinutes: 1440 }`.
+
+### Design
+
+- No per-holiday fill: distinct fills would prevent fusing a holiday with its
+  neighboring gaps into one band. Overlay an `annotations` range for a
+  visually distinct holiday.
+- Whole-UTC-day closure: the holiday closes exactly its own UTC day. A real
+  exchange usually also skips the prior evening's open before a holiday --
+  early-close support is out of scope for this release.
+- `_weekendBands`, `_shadingAnnotationsAcc`, and `createTimeLineChart` are
+  byte-identical to v1.12.0 (the weekend generator is SHA-pinned in the
+  suite); every edit lands in `_normalizeSessionSpec` (construction) and
+  `_sessionBands` (cold band generator).
+
+### Coverage
+
+- 453 tests (9 new), each of the four load-bearing mechanisms proven by
+  measured reversion: dropping the rotate's wrap term (only observable for a
+  Saturday-opening session -- fixture added for exactly that), removing the
+  midnight split, deleting the holiday day-skip, and swapping the floor
+  truncation for `%`-subtraction each turn their assertions red and nothing
+  else.
+- New torture case A19: overnight + 12-holiday band-regeneration storm over
+  200 data-signal changes; 0 major GC, 0 new signal-graph nodes, bands
+  regenerate on data change only.
+
 ## [1.12.0] -- 2026-09
 
 Opt-in legend virtualization: a legend with hundreds of series can hand its row

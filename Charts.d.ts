@@ -580,6 +580,8 @@ export function createLineChart(config: LineChartConfig): Chart;
 // session calendar (shading.sessions): supply trading windows and the chart
 // shades the NON-trading time (the complement of the open-interval union), so
 // weekends and after-hours merge into one band per gap. See SessionSpec.
+// v1.13.0 adds overnight sessions (closeMinutes < openMinutes cross midnight) and
+// an optional holiday calendar (shading.holidays) of fully-closed UTC days.
 
 /**
  * One market-trading window, in UTC minutes-from-midnight. The chart shades the
@@ -589,9 +591,13 @@ export interface SessionSpec {
     /** Session open, UTC minutes from midnight. Integer 0..1439. */
     openMinutes: number;
     /**
-     * Session close, UTC minutes from midnight. Integer 1..1440, MUST be greater
-     * than openMinutes. Overnight sessions (close < open) are not supported in
-     * v1.11.0 and throw at construction.
+     * Session close, UTC minutes from midnight. Integer 1..1440. v1.13.0: overnight
+     * sessions (`closeMinutes < openMinutes`) are now legal -- the session crosses
+     * midnight into the NEXT UTC day (e.g. open 22:00, close 21:00 next day). The
+     * `days` field names the weekday the session OPENS, so a default-days (Mon-Fri)
+     * overnight spec spills its morning half onto Tue-Sat (a Saturday-morning
+     * band). `closeMinutes === openMinutes` (zero width) still throws at
+     * construction; spell a 24h session `{ openMinutes: 0, closeMinutes: 1440 }`.
      */
     closeMinutes: number;
     /**
@@ -621,6 +627,19 @@ export interface TimeShadingConfig {
      * the weekend default when neither is set). Any Canvas2D fillStyle string.
      */
     sessionFill?: string;
+    /**
+     * v1.13.0 -- holiday calendar: epoch-ms timestamps, each truncated to its UTC
+     * day start. The whole UTC day is treated as closed and FUSES with adjacent gap
+     * bands into one range (the day before a holiday's close runs into the day
+     * after's open as a single band). There is no per-holiday fill -- distinct
+     * fills cannot fuse, so use a user annotation for that. Present without
+     * `sessions`, a full-day Mon-Fri calendar is synthesized (complement = weekends
+     * + holidays). Validated at construction: non-empty array of integer epoch ms;
+     * `null`, NaN, non-integers, and Date objects throw -- pass `Date.UTC(...)`
+     * values. Warning: `new Date(y, m, d).getTime()` is LOCAL midnight and can land
+     * on the wrong UTC day.
+     */
+    holidays?: number[];
 }
 
 export interface TimeLineChartConfig extends LineChartConfig {
@@ -635,7 +654,8 @@ export interface TimeLineChartConfig extends LineChartConfig {
      * 'weekends' shades every Sat 00:00 -> Mon 00:00 UTC span within the data
      * domain with the default fill; an object overrides the fill. Supply
      * `sessions` (v1.11.0) for a market-hours calendar that shades non-trading
-     * time instead. Bands compose with any `annotations` you supply (bands first).
+     * time instead; v1.13.0 adds overnight sessions and a `holidays` calendar.
+     * Bands compose with any `annotations` you supply (bands first).
      */
     shading?: boolean | 'weekends' | TimeShadingConfig;
 }

@@ -834,6 +834,7 @@
         "@zakkster/lite-scene":  "https://cdn.jsdelivr.net/npm/@zakkster/lite-scene@1.0.0/Scene.js",
         "@zakkster/lite-axis":   "https://cdn.jsdelivr.net/npm/@zakkster/lite-axis@1.0.1/Axis.js",
         "@zakkster/lite-virtual": "https://cdn.jsdelivr.net/npm/@zakkster/lite-virtual@1.1.0/Virtual.js",
+        "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.1.0/Delaunay.js",
         "@zakkster/lite-charts": "../Charts.js"
     }
 }
@@ -1115,24 +1116,26 @@
     <section>
         <div class="section-head">
             <div class="titles">
-                <span class="eyebrow">// dense bubble -- new in v1.2-alpha</span>
-                <h2>2000 bubbles, O(log n) hit-test.</h2>
+                <span class="eyebrow">// dense bubble -- spatialIndex x lite-delaunay 1.1.0</span>
+                <h2>2000 bubbles, indexed hit-test.</h2>
                 <p>
                     Past about a thousand points the linear-scan hit-test
-                    starts to feel slow. v1.2.0-alpha.0 lands a pluggable
-                    spatial-index layer: pass any function matching
+                    starts to feel slow. The pluggable spatial-index layer
+                    takes any function matching
                     <span class="mono">SpatialIndexFactory</span> as the
                     <span class="mono">spatialIndex</span> config option,
                     and lite-charts builds an index lazily on the first
                     hit-test, caches it across queries, disposes on data
-                    change. <span class="mono">@zakkster/lite-delaunay</span>
-                    is the intended default (Voronoi-dual nearest-neighbor
-                    walk); k-d tree, uniform-grid, or any custom index works
-                    too. This demo ships a tiny reference implementation
-                    inline so the integration runs without an extra
-                    dependency. Below the threshold (default 1000 points)
-                    the chart stays on the linear-scan path -- on small
-                    clouds, the build cost would dwarf the query savings.
+                    change. This page wires the real default:
+                    <span class="mono">@zakkster/lite-delaunay</span> 1.1.0's
+                    <span class="mono">createSpatialIndex</span> -- a pooled,
+                    zero-allocation-per-query uniform-grid k-NN index that
+                    matches the contract directly, no adapter. One factory
+                    serves this chart AND the scatter below (pooled slots,
+                    independent dispose). Below the threshold (default 1000
+                    points) the chart stays on the linear-scan path -- on
+                    small clouds, the build cost would dwarf the query
+                    savings.
                 </p>
             </div>
         </div>
@@ -1821,6 +1824,10 @@
     // import happens HERE, at the consumer, and is injected via
     // legend.virtualize. Same dependency direction as spatialIndex above.
     import {mountList} from '@zakkster/lite-virtual';
+    // The dense-bubble/scatter sections' spatial index. Same injection
+    // pattern: lite-charts has ZERO references to lite-delaunay -- the
+    // consumer imports the factory and passes it as `spatialIndex`.
+    import {createSpatialIndex} from '@zakkster/lite-delaunay';
 
     // ---------------------------------------------------------------------
     // Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
@@ -2493,15 +2500,16 @@
     // ---------------------------------------------------------------------
     //
     // 2000 bubbles. Above the default threshold of 1000, lite-charts switches
-    // from O(n) linear-scan hit-test to O(log n) via a pluggable spatial
+    // from O(n) linear-scan hit-test to an indexed one via a pluggable spatial
     // index. The integration is interface-driven: lite-charts defines the
     // `SpatialIndex` / `SpatialIndexFactory` contract, the consumer supplies
-    // the implementation. In production you'd pass `@zakkster/lite-delaunay`
-    // (Voronoi-dual nearest-neighbor walk); the demo below ships a small
-    // reference linear-scan implementation just to prove the integration
-    // wiring without adding a build dependency.
+    // the implementation. This page supplies the real default:
+    // @zakkster/lite-delaunay 1.1.0's createSpatialIndex -- a pooled
+    // uniform-grid k-NN index that matches the contract directly (an earlier
+    // revision of this demo shipped an inline linear-scan stand-in; retired
+    // now that the real dependency exists).
     //
-    // Key design points:
+    // Key contract points, all honored by createSpatialIndex:
     //   - findNearest writes into CALLER-OWNED Int32Array / Float32Array
     //     output buffers -- zero allocation per query
     //   - k > 1 candidates returned so the renderer can post-filter for
@@ -2509,49 +2517,13 @@
     //     "visually-topmost wins on overlap" semantics)
     //   - Index built lazily on the first hit-test after extract, cached
     //     until the next data/scale change invalidates it
-    //   - dispose() called on data change AND chart unmount
+    //   - dispose() called on data change AND chart unmount; the pool
+    //     recycles the slot, so ONE factory serves this chart and the
+    //     scatter below with two concurrently live handles
 
-    // Reference SpatialIndex implementation. NOT a real Delaunay -- it's a
-    // linear scan that satisfies the interface so the demo can run without
-    // pulling in @zakkster/lite-delaunay. Production users plug in the real
-    // thing; lite-charts doesn't care which.
-    const makeReferenceSpatialIndex = (pxs, pys, n) => {
-        // Snapshot so callers can mutate pxs/pys without affecting the index.
-        const snapPxs = new Float32Array(n);
-        const snapPys = new Float32Array(n);
-        for (let i = 0; i < n; i++) {
-            snapPxs[i] = pxs[i];
-            snapPys[i] = pys[i];
-        }
-        const snapN = n;
-        return {
-            findNearest(qx, qy, k, maxDistSq, outIndices, outDistSq) {
-                let count = 0;
-                for (let i = 0; i < snapN; i++) {
-                    const dx = qx - snapPxs[i];
-                    const dy = qy - snapPys[i];
-                    const d = dx * dx + dy * dy;
-                    if (d > maxDistSq) continue;
-                    // Insertion sort into the bounded k-sized output buffer.
-                    let at = count;
-                    while (at > 0 && outDistSq[at - 1] > d) at--;
-                    if (at < k) {
-                        const limit = count < k ? count : k - 1;
-                        for (let s = limit; s > at; s--) {
-                            outIndices[s] = outIndices[s - 1];
-                            outDistSq[s] = outDistSq[s - 1];
-                        }
-                        outIndices[at] = i;
-                        outDistSq[at] = d;
-                        if (count < k) count++;
-                    }
-                }
-                return count;
-            },
-            dispose() { /* nothing to free in this reference impl */
-            },
-        };
-    };
+    // maxPoints must cover the largest series this factory will ever index:
+    // dense bubble n = 2000, scatter n = 800.
+    const chartSpatialIndex = createSpatialIndex(2000);
 
     // 2000-point dataset: imagine "session events" plotted by time-of-day vs
     // session-length, sized by interaction count.
@@ -2576,7 +2548,7 @@
         fillOpacity: 0.45,
         stroke: '--bg-card',
         strokeWidth: 0.75,
-        spatialIndex: makeReferenceSpatialIndex,
+        spatialIndex: chartSpatialIndex,
         spatialIndexThreshold: 500,    // demo: lower so we hit the indexed path
         width: responsiveWidth('dense-bubble-chart', 800),
         height: 380,
@@ -2628,7 +2600,7 @@
         fillOpacity: 0.55,
         stroke: null,
         strokeWidth: 0,
-        spatialIndex: makeReferenceSpatialIndex,   // reuse from dense-bubble
+        spatialIndex: chartSpatialIndex,   // same pooled factory as dense-bubble
         spatialIndexThreshold: 200,
         width: responsiveWidth('scatter-chart', 800),
         height: 380,

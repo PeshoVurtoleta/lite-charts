@@ -17,14 +17,29 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.12.0 -- legend virtualization (minor). `legend.virtualize` hands
-the legend's row windowing to a caller-supplied adapter (e.g. over
-`@zakkster/lite-virtual`'s `mountList` -- YOUR import; lite-charts never
-imports a windowing library), so a 500-series legend keeps a bounded set of DOM
-rows, one shared visibility effect, and one delegated click listener instead of
-500 of each. Explicit opt-in, vertical (`left`/`right`) only; the eager legend
-path is byte-identical and every invalid config throws at construction.
-**444/444 tests pass** plus a torture/stress gate (`npm run torture`).
+**Status:** v1.13.0 -- overnight sessions + holiday calendar (minor).
+`shading.sessions` now accepts overnight sessions (`closeMinutes <
+openMinutes` crossing UTC midnight -- split internally at the seam, the band
+sweep unchanged) and a `shading.holidays` calendar (epoch-ms dates; each
+closes its whole UTC day and fuses with the adjacent gaps into one band).
+Holidays work without sessions too (weekends + holidays). Every malformed
+field still throws at construction.
+**453/453 tests pass** plus a torture/stress gate (`npm run torture`).
+
+**New in v1.13.0:**
+- **Overnight sessions.** `{ openMinutes: 1320, closeMinutes: 1260, days:
+  [0,1,2,3,4] }` (Globex-style, opens Sun-Thu 22:00 UTC) now works: the
+  session is split at the UTC midnight seam into an evening + next-day
+  morning half, so the single-cursor band sweep is structurally unchanged
+  and the seam never shades a sliver inside the open span. `days` is the
+  weekday the session OPENS. `close === open` still throws (a 24h session
+  is `{ 0, 1440 }`).
+- **`shading.holidays`.** Epoch-ms dates, each truncated to its UTC day
+  start; the whole day is closed and fuses with adjacent gap bands into one
+  range. Works with or without `sessions`. Fail-closed: `[]`, `null`
+  entries (null is not epoch 0), non-integers, strings, and `Date` objects
+  all throw -- pass `Date.UTC(...)` values.
+- See "Overnight sessions + holidays" under the Time-series section.
 
 **New in v1.12.0:**
 - **`legend.virtualize`.** `(host, opts) => ({ dispose })` -- the adapter owns
@@ -188,7 +203,8 @@ path is byte-identical and every invalid config throws at construction.
   domain across visible series (alpha.2).
 - Pluggable spatial-index (`SpatialIndex` / `SpatialIndexFactory`)
   for O(log n) hit-test on dense point clouds (alpha.0).
-  `@zakkster/lite-delaunay` is the intended default but optional.
+  `@zakkster/lite-delaunay` 1.1.0+ ships a conforming
+  `createSpatialIndex` -- see "Spatial-index hit-testing" below.
 
 **Inherited from v1.1.0:** bar layout polish -- stacked bars,
 rounded corners, per-bar hover tint. All opt-in.
@@ -941,6 +957,44 @@ createDonutChart({
   positioned against the chart container); a plain donut without
   `centerLabel` still mounts anywhere.
 
+## Spatial-index hit-testing (v1.2.0)
+
+Past roughly a thousand points, the linear-scan hover hit-test on bubble and
+scatter charts starts to cost real time per pointer move. The `spatialIndex`
+config option accepts a factory matching the `SpatialIndexFactory` contract;
+**lite-charts never imports a spatial library** -- you pass the factory, same
+dependency direction as `legend.virtualize`. `@zakkster/lite-delaunay` 1.1.0+
+exports `createSpatialIndex`, which matches the contract directly -- no
+adapter needed:
+
+```javascript
+import { createBubbleChart } from '@zakkster/lite-charts';
+import { createSpatialIndex } from '@zakkster/lite-delaunay'; // YOUR import, not ours
+
+createBubbleChart({
+    data: denseRows,                          // thousands of points
+    // One factory per chart; maxPoints >= your largest series point count.
+    spatialIndex: createSpatialIndex(20_000),
+    spatialIndexThreshold: 1000,              // default; linear scan below it
+});
+```
+
+The factory is `(pxs, pys, n) => index`, called lazily at the first hit-test
+once a series crosses `spatialIndexThreshold` points, cached across queries,
+and disposed on every data change and on unmount. The index it returns:
+
+| Member | Contract |
+|---|---|
+| `findNearest(qx, qy, k, maxDistSq, outIndices, outDistSq)` | Write up to `k` nearest original indices (by squared pixel distance, filtered to `<= maxDistSq`) into the caller-owned buffers; return the count written (`0..k`). Zero allocation per query. |
+| `dispose()` | Free/recycle whatever the build acquired. |
+
+lite-charts queries with `k = 8` and post-filters by disc containment plus
+smallest-radius tie-break, so overlapping bubbles resolve to the visually
+topmost point -- identical semantics to the linear-scan path. `NaN` points
+(log-scale projections, missing data) never come back from a conforming
+index, and a chart below the threshold, or with no factory configured, stays
+on the byte-identical linear-scan path.
+
 ## Performance
 
 All numbers are from `bench/line-100k.mjs` running on Node 22 against a
@@ -1340,15 +1394,49 @@ const chart = createTimeLineChart({
   `sessions: [{ openMinutes: 570, closeMinutes: 690 }, { openMinutes: 750,
   closeMinutes: 960 }]` shades the lunch gap too.
 - **Data-driven and UTC.** `openMinutes` / `closeMinutes` are UTC
-  minutes-from-midnight (`open` 0..1439, `close` 1..1440, `close > open`);
-  `days` is UTC weekday ints 0-6, default `[1,2,3,4,5]`. No exchange,
-  timezone, or holiday table is built in -- pre-convert local session times to
-  UTC, and overlay holidays with your own `annotations` ranges.
+  minutes-from-midnight (`open` 0..1439, `close` 1..1440); since v1.13.0
+  `close < open` means an overnight session crossing midnight (see below).
+  `days` is UTC weekday ints 0-6, default `[1,2,3,4,5]` -- the weekday the
+  session OPENS. No exchange or timezone table is built in: pre-convert local
+  session times to UTC.
 - **Fail-closed validation.** Every malformed field throws at construction:
   a `null` minute bound (null is not midnight), non-integers, out-of-range
-  minutes, zero-width sessions, empty `sessions`/`days`, day values outside
-  0-6 -- and overnight sessions (`close < open`) throw with a message naming
-  them unsupported (a follow-up, not a silent wrong answer).
+  minutes, zero-width sessions (`close === open` -- a 24h session is
+  `{ openMinutes: 0, closeMinutes: 1440 }`), empty `sessions`/`days`, day
+  values outside 0-6.
+
+### Overnight sessions + holidays (v1.13.0)
+
+```js
+const chart = createTimeLineChart({
+  data: ticks,
+  shading: {
+    // Globex-style: opens Sun-Thu 22:00 UTC, closes 21:00 UTC the NEXT day.
+    sessions: [{ openMinutes: 1320, closeMinutes: 1260, days: [0, 1, 2, 3, 4] }],
+    holidays: [Date.UTC(2026, 11, 25), Date.UTC(2027, 0, 1)],
+  },
+});
+```
+
+- **Overnight (`close < open`).** The session is split internally at the UTC
+  midnight seam into an evening half and a next-day morning half, so the
+  band generator's single-pass sweep is unchanged and the seam never shades
+  a sliver inside the open span. `days` names the weekday the session OPENS
+  -- a default Mon-Fri overnight spec therefore has its morning halves on
+  Tue-Sat.
+- **`holidays`.** Epoch-ms timestamps, each truncated to its UTC day start;
+  the whole UTC day is treated as closed and FUSES with the adjacent gaps
+  into one band (Tue-close -> Thu-open around a Wednesday holiday is a
+  single range). Pass `Date.UTC(...)` values: `new Date(y, m, d).getTime()`
+  is LOCAL midnight and can land on the wrong UTC day. `Date` objects,
+  strings, `null`, and non-integers throw at construction. `holidays`
+  without `sessions` works too -- it shades weekends + holidays.
+- **One fill for all gap bands.** There is deliberately no per-holiday fill:
+  distinct fills would break the fusion into one band. Want a visually
+  distinct holiday? Overlay a user `annotations` range.
+- **Whole-UTC-day approximation.** A real exchange usually also skips the
+  PRIOR evening's open before a holiday; that is early-close territory and
+  out of scope here -- the holiday closes exactly its own UTC day.
 
 ### Live "now" line with lite-time
 
@@ -1628,8 +1716,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.9.0** | Horizontal-bar `brush`. A shift-drag on `createBarChart({ orientation: 'horizontal', brush: true })` selects a value range (screen-X) crossed with a band set (screen-Y), emitting a distinct `{ valueMin, valueMax, bandMin, bandMax, bands, ids }` payload; the vertical brush keeps `{ xMin, xMax, yMin, yMax, ids }`. Every branch is a `swapAxes ? ...` selection at a brush call site, so `_normalizeBrushRect` / `_brushPxToData` / `_computeBrushIds` / `makeBandScale` stay byte-identical and the vertical path is unchanged; the overlay draw stays 0 B. Fail-closed: an empty-category chart commits `null` (no undefined band), `setBrush` rejects a `null` bound instead of coercing it to 0, and a `log` value axis still throws. 413 tests (7 new: value-range + band-set mapping, full-plot select, click-to-clear, facade validation, a vertical-brush regression guard, band-edge overlay alignment, empty-category fail-close -- HB1/HB3/HB5/HB7 proven load-bearing by reversion) + a 0-B horizontal-brush torture case. |
 | **v1.10.0** | `createTimeLineChart` + weekend shading. A time-series line preset over `createLineChart`: forces `xScale.type: 'time'`, defaults `panBounds: 'data'`, and adds opt-in `shading: true | 'weekends' | { fill? }` -- one `{ type: 'range', axis: 'x' }` band per Sat -> Mon UTC span in the data domain. Bands ride the v1.7.0 annotation layer (0 B per frame; re-clipped by the existing project effect) and are derived from the series data extent, not `scaleVersion`, so they regenerate on a data change but not per pan/zoom frame; SoA `{ xs, ys }` data is shaded like AoS. New factory + new config field only; every existing factory and the shared kernel are byte-unchanged, and the shading helpers tree-shake out of a `createLineChart`-only bundle. Fail-closed: a `null`/non-finite extent bound emits no bands (never epoch 0), a per-row `x: null` is gated before coercion (one missing timestamp cannot collapse the extent to 1970), `shading: false` opts out like absent, an invalid `shading` throws. 427 tests (14 new: weekend-walk boundaries, null/non-finite fail-close, SoA regression, forced time scale, count integration, opt-in null handle, config validation, tree-shake confinement, retention, false opt-out, row-level null guard -- TS2/TS5/TS13/TS14 proven load-bearing by reversion) + a 0-B weekend-shading torture case (A16). |
 | **v1.11.0** | Market-hours session shading. `shading: { sessions: [{ openMinutes, closeMinutes, days? }], sessionFill? }` shades non-trading time as the complement of the open-interval union over the data domain: one band per overnight gap, ONE merged Fri-close -> Mon-open band per weekend (weekends subsumed, no double paint), lunch-break midday gaps free. Single-cursor sweep, no sort at generation (ordering is a validator invariant: open-ascending sort + `close <= 1440`); `_weekendBands` and the extent scan byte-identical -- the accessor changed by one generator-selection line. Fail-closed: overnight (`close < open`), zero-width, `null`/non-integer/out-of-range minutes, bad `days` all throw at construction; explicit conflicting `xScale.type` now throws instead of silent override. 435 tests (8 new: exact 11-band fixture, subsumption 11-vs-2, 21-band lunch-break, validator matrix, per-row null reuse, tree-shake confinement, retention, exact-bounds union invariants -- TS18/TS22 proven load-bearing by reversion) + a 0-B session-shading torture case (A17). |
-| **v1.12.0** (this) | Legend virtualization. `legend.virtualize: (host, opts) => ({ dispose })` windows the legend rows through a caller-supplied adapter (wire it to `@zakkster/lite-virtual`'s `mountList` -- your import; `Charts.js` contains zero references to it, asserted by test). A 200-series legend holds <= 14 DOM rows, ONE shared visibility effect, and ONE delegated click listener regardless of series count; `renderRow` re-reads swatch colour + visibility per bind so recycled rows never carry stale state. Explicit opt-in, vertical (`left`/`right`) only; the eager path `buildLegendDOM`..`installLegend` is byte-identical (SHA-pinned in the suite). Fail-closed: non-function `virtualize`, horizontal position, missing/`null` `height` (null is not 0), invalid `itemHeight`/`overscan`, and a dispose-less factory handle all throw with nothing attached. 444 tests (9 new: bounded window, scroll rebind, recycled-click signal index, asymmetric-recycle dimmed-state, byte-identity + confinement, validation matrix, handle validation, 50x retention, O(1) listeners -- V3/V4/V6 proven load-bearing by reversion) + a 50k-op scroll-storm torture case (A18: 1.02 B/op vs 0.85 control, zero new signal-graph nodes). |
-| v1.12.x / v1.13.0 (candidates) | overnight session support (midnight-split open intervals); holiday-calendar convenience; horizontal legend virtualization; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
+| **v1.12.0** | Legend virtualization. `legend.virtualize: (host, opts) => ({ dispose })` windows the legend rows through a caller-supplied adapter (wire it to `@zakkster/lite-virtual`'s `mountList` -- your import; `Charts.js` contains zero references to it, asserted by test). A 200-series legend holds <= 14 DOM rows, ONE shared visibility effect, and ONE delegated click listener regardless of series count; `renderRow` re-reads swatch colour + visibility per bind so recycled rows never carry stale state. Explicit opt-in, vertical (`left`/`right`) only; the eager path `buildLegendDOM`..`installLegend` is byte-identical (SHA-pinned in the suite). Fail-closed: non-function `virtualize`, horizontal position, missing/`null` `height` (null is not 0), invalid `itemHeight`/`overscan`, and a dispose-less factory handle all throw with nothing attached. 444 tests (9 new: bounded window, scroll rebind, recycled-click signal index, asymmetric-recycle dimmed-state, byte-identity + confinement, validation matrix, handle validation, 50x retention, O(1) listeners -- V3/V4/V6 proven load-bearing by reversion) + a 50k-op scroll-storm torture case (A18: 1.02 B/op vs 0.85 control, zero new signal-graph nodes). |
+| **v1.13.0** (this) | Overnight sessions + holiday calendar. `shading.sessions` accepts `closeMinutes < openMinutes`: the session is split at the UTC midnight seam into an evening half + a next-day morning half (weekday bits rotated), so the single-cursor complement sweep is structurally unchanged and the seam never emits a band; `days` names the weekday the session opens. `shading.holidays: number[]` (epoch ms, truncated to UTC day starts) closes each whole UTC day and fuses it with the adjacent gaps into ONE band; holidays without sessions ride a synthesized full-day Mon-Fri calendar (weekends + holidays), validated identically. One fill for all gap bands (per-holiday fills would break the fusion -- use an `annotations` range). Fail-closed: zero-width sessions, `[]`, `null`/non-integer/`Date`/string holiday entries all throw at construction; pre-1970 dates floor to the correct UTC day. `_weekendBands` byte-identical (SHA-pinned). 453 tests (9 new: v1.11.0 behavioral identity, confinement pin, seam-never-emits, exact Globex 5-band fixture, holiday-fusion exact bounds + chart-level count, holidays-only equivalence, validator matrix, overnight edges + Saturday-wrap rotate + pre-1970 floor, 50x retention -- four reversions proven load-bearing: rotate wrap-drop, split removal, day-skip deletion, floor->% truncation) + a band-regeneration torture case (A19). |
+| v1.13.x / v1.14.0 (candidates) | horizontal legend virtualization; early-close (half-day) calendar entries; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
 
 ## Ecosystem
 
@@ -1639,8 +1728,9 @@ Part of the `@zakkster/*` zero-GC stack:
 - `@zakkster/lite-scene` -- Canvas2D scene graph (peer)
 - `@zakkster/lite-axis` -- tick generation (peer)
 - `@zakkster/lite-canvas-graph` -- the decimation kernel was lifted from here
-- `@zakkster/lite-bvh` / `lite-aabb` -- spatial tooltip backend for v1.2 scatter
-- `@zakkster/lite-virtual` -- legend virtualization for v1.2
+- `@zakkster/lite-delaunay` -- spatial-index hit-testing (optional peer;
+  `createSpatialIndex` since 1.1.0)
+- `@zakkster/lite-virtual` -- legend virtualization (optional peer; v1.12.0)
 
 ## License
 
