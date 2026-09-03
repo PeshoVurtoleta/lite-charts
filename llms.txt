@@ -10,7 +10,45 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.14.0 (current): fat hover + injected Voronoi cell layer for createScatterChart
+> v1.15.0 (current): horizontal legend virtualization + early-close holidays
+> + an earlier fail-closed point for bad legend config. A chart using none of
+> these is byte-identical. A virtualized legend at position top/bottom now
+> windows a single non-wrapping row scrolling along X: supply legend.width
+> (viewport) and legend.itemWidth (fixed row width, positive integers) and the
+> adapter receives { count, itemWidth, width, overscan, renderRow,
+> horizontal: true }. Size keys are orientation-EXCLUSIVE -- height/itemHeight on
+> top/bottom, or width/itemWidth on left/right, throw at construction (no silent
+> reinterpretation). Left/right virtualization is unchanged (adapter opts + DOM
+> path byte-identical). shading.holidays entries may now be { ts, closeMinutes }
+> (an early close) as well as a whole-day epoch-ms number: on that UTC day every
+> session clamps to close at closeMinutes (1..1439) and the trailing closed time
+> fuses forward like a whole-day holiday's band. Doors (all throw at
+> construction): object without ts; ts failing the epoch-ms rules; closeMinutes
+> null/non-integer/outside 1..1439; duplicate UTC day across ALL entries; early
+> close on a weekday with no open session; early close on a day carrying an
+> overnight evening session. Whole-day (number) entries stay byte-identical to
+> v1.14.0. The early-close clamp is one cold-path line in _sessionBands
+> (c = c0 < cutMs ? c0 : cutMs; if (o >= c) continue;), cutMs = Infinity on
+> non-early days so bands are byte-identical; session masks (openMask/eveMask)
+> that back the doors are built once at construction, never per draw. Bad legend
+> config now throws with ZERO owned signals: legend position/container validation
+> and virtualize normalization are hoisted above the first _own(signal(...)) in
+> createBaseAxisChart. When BOTH chart-type options and legend are invalid, the
+> initOpts error wins (runs one line earlier) -- same precedence as the v1.14.0
+> hoist. 10 new tests (463->473): exact six-key horizontal adapter contract +
+> scrollLeft windowing + recycle-fresh a11y (HL1), 11-door orientation matrix at
+> zero node delta (HL2), one listener / 50-cycle retention (HL3), factory
+> contract at mount (HL4), initOpts throw precedence (HL5); exact band lists for
+> mid-session/before-open/at-open/between-sessions/mid-second/after-close cuts,
+> mixed entry forms, and the synthesized holidays-only calendar (EC1-5) with a
+> 13-door construction matrix at zero node delta (EC3). Torture A21: 50k-step
+> horizontal scroll storm <=1.5 B/op, maxMajor:0, 0 new graph nodes, <=0.5 B/op
+> vs a VERTICAL virtualized storm driving the identical workload (branch-parity
+> control; measured horizontal-vs-vertical delta 0.000 B/op). Five reversion
+> proofs: o>=c guard, cutMs clamp (the entire early-close mechanism; v1.11-13
+> suites stay green without it failing), horizontal:true, the top+height door,
+> the eveMask refusal.
+> v1.14.0: fat hover + injected Voronoi cell layer for createScatterChart
 > (a scatter using neither is byte-identical; both gate behind their opts).
 > hitTolerance: 'nearest' (scatter only) snaps the hover to the closest point
 > regardless of distance -- the whole plot is the point's Voronoi hit region,

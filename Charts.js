@@ -2781,8 +2781,47 @@ const _normalizeLegendVirtualization = (legendConfigObj, legendPosition) => {
         const t = v === null ? 'null' : (Array.isArray(v) ? 'array' : typeof v);
         throw new Error('lite-charts: legend.virtualize must be a function or absent, got ' + t);
     }
+    let overscan = 2;
+    const os = legendConfigObj.overscan;
+    if (os != null) {
+        if (!Number.isInteger(os) || os < 0) {
+            throw new Error('lite-charts: legend.overscan must be a non-negative integer, got ' + os);
+        }
+        overscan = os;
+    }
+    // v1.15.0: top/bottom virtualize horizontally (width + itemWidth); left/right
+    // vertically (height + itemHeight). The size keys are orientation-EXCLUSIVE:
+    // a key belonging to the other axis is a config error (silent reinterpretation
+    // would scroll the wrong way), so it THROWS -- no default, no coercion. null is
+    // not zero: every == null gate is BEFORE any unary +.
     if (legendPosition === 'top' || legendPosition === 'bottom') {
-        throw new Error("lite-charts: virtualized legend requires position 'left' or 'right', got '" + legendPosition + "'");
+        if (legendConfigObj.height != null) {
+            throw new Error("lite-charts: legend.height is for position 'left'/'right'; a top/bottom legend uses legend.width");
+        }
+        if (legendConfigObj.itemHeight != null) {
+            throw new Error("lite-charts: legend.itemHeight is for position 'left'/'right'; a top/bottom legend uses legend.itemWidth");
+        }
+        const w = legendConfigObj.width;
+        if (w == null) {
+            throw new Error('lite-charts: virtualized top/bottom legend requires a numeric legend.width');
+        }
+        if (!Number.isInteger(w) || w <= 0) {
+            throw new Error('lite-charts: legend.width must be a positive integer, got ' + w);
+        }
+        const iw = legendConfigObj.itemWidth;
+        if (iw == null) {
+            throw new Error('lite-charts: virtualized top/bottom legend requires a numeric legend.itemWidth');
+        }
+        if (!Number.isInteger(iw) || iw <= 0) {
+            throw new Error('lite-charts: legend.itemWidth must be a positive integer, got ' + iw);
+        }
+        return { orientation: 'horizontal', itemWidth: iw, width: w, overscan, factory: v };
+    }
+    if (legendConfigObj.width != null) {
+        throw new Error("lite-charts: legend.width is for position 'top'/'bottom'; a left/right legend uses legend.height");
+    }
+    if (legendConfigObj.itemWidth != null) {
+        throw new Error("lite-charts: legend.itemWidth is for position 'top'/'bottom'; a left/right legend uses legend.itemHeight");
     }
     // Height is REQUIRED (the scroll viewport needs a fixed box). null is not
     // zero: gate == null BEFORE any unary + so `height: null` cannot become 0.
@@ -2801,15 +2840,7 @@ const _normalizeLegendVirtualization = (legendConfigObj, legendPosition) => {
         }
         itemHeight = ih;
     }
-    let overscan = 2;
-    const os = legendConfigObj.overscan;
-    if (os != null) {
-        if (!Number.isInteger(os) || os < 0) {
-            throw new Error('lite-charts: legend.overscan must be a non-negative integer, got ' + os);
-        }
-        overscan = os;
-    }
-    return { itemHeight, height: h, overscan, factory: v };
+    return { orientation: 'vertical', itemHeight, height: h, overscan, factory: v };
 };
 
 // Builds the virtualized legend host + wires the adapter. Returns
@@ -2827,15 +2858,29 @@ const buildVirtualLegendDOM = (legendOpts, vspec, normalized, seriesVisibility, 
 
     const legendEl = document.createElement('div');
     legendEl.className = 'lite-charts-legend lite-charts-legend-virtual';
-    legendEl.style.display = 'block';
-    legendEl.style.overflowY = 'auto';
-    legendEl.style.overflowX = 'hidden';
-    legendEl.style.height = vspec.height + 'px';
-    legendEl.style.position = 'relative';
-    legendEl.style.padding = '8px 0';
-    legendEl.style.font = font;
-    legendEl.style.color = labelColor;
-    legendEl.style.lineHeight = '1.4';
+    if (vspec.orientation === 'horizontal') {
+        // Top/bottom: scroll along X, single non-wrapping row of items, fixed width.
+        legendEl.style.display = 'block';
+        legendEl.style.overflowX = 'auto';
+        legendEl.style.overflowY = 'hidden';
+        legendEl.style.whiteSpace = 'nowrap';
+        legendEl.style.width = vspec.width + 'px';
+        legendEl.style.position = 'relative';
+        legendEl.style.padding = '0 8px';
+        legendEl.style.font = font;
+        legendEl.style.color = labelColor;
+        legendEl.style.lineHeight = '1.4';
+    } else {
+        legendEl.style.display = 'block';
+        legendEl.style.overflowY = 'auto';
+        legendEl.style.overflowX = 'hidden';
+        legendEl.style.height = vspec.height + 'px';
+        legendEl.style.position = 'relative';
+        legendEl.style.padding = '8px 0';
+        legendEl.style.font = font;
+        legendEl.style.color = labelColor;
+        legendEl.style.lineHeight = '1.4';
+    }
 
     // Bounded set of currently-rendered rows. The adapter recycles pooled
     // elements, so this length tracks the window (+overscan), never the series
@@ -2915,13 +2960,15 @@ const buildVirtualLegendDOM = (legendOpts, vspec, normalized, seriesVisibility, 
         repaint();
     });
 
-    const optsObj = {
-        count: normalized.length,
-        itemHeight: vspec.itemHeight,
-        height: vspec.height,
-        overscan: vspec.overscan,
-        renderRow: _paintRow,
-    };
+    const optsObj = vspec.orientation === 'horizontal'
+        ? { count: normalized.length, itemWidth: vspec.itemWidth, width: vspec.width, overscan: vspec.overscan, renderRow: _paintRow, horizontal: true }
+        : {
+            count: normalized.length,
+            itemHeight: vspec.itemHeight,
+            height: vspec.height,
+            overscan: vspec.overscan,
+            renderRow: _paintRow,
+        };
     let handle;
     try {
         handle = vspec.factory(legendEl, optsObj);
@@ -4895,6 +4942,36 @@ const createBaseAxisChart = (config, renderer) => {
     // `config`; chartOpts is first used at the horizontal+log check below.
     const chartOpts = renderer.initOpts ? renderer.initOpts(config) : null;
 
+    // -- Legend config --
+    // `legend: false` disables. `legend: 'top'|'bottom'|'left'|'right'` is
+    // a shorthand for `{position}`. `legend: {position?, container?}` is the
+    // full form. Default: bottom.
+    //
+    // v1.15.0: hoisted ABOVE the first `_own(signal(...))` below so a bad legend
+    // config (virtualize junk, orientation-exclusive size key) throws with ZERO
+    // owned signals allocated -- same fail-closed discipline as chartOpts above.
+    // Precedence is deliberate: `renderer.initOpts` (chartOpts, one line up) runs
+    // FIRST, so when BOTH the chart-type options and the legend are invalid the
+    // initOpts error wins -- matching the v1.14.0 hoist precedent.
+    let legendEnabled = config.legend !== false;
+    let legendPosition = DEFAULT_LEGEND_POSITION;
+    let legendContainer = null;
+    if (typeof config.legend === 'string') {
+        if (VALID_LEGEND_POSITIONS[config.legend]) {
+            legendPosition = config.legend;
+        }
+    } else if (config.legend && typeof config.legend === 'object') {
+        if (config.legend.position && VALID_LEGEND_POSITIONS[config.legend.position]) {
+            legendPosition = config.legend.position;
+        }
+        if (config.legend.container) {
+            legendContainer = config.legend.container;
+        }
+    }
+    // v1.12.0: opt-in legend virtualization. Cold validator; every junk config
+    // THROWS here (before any signal alloc), null (absent/false) -> eager path.
+    const legendVSpec = _normalizeLegendVirtualization(config.legend, legendPosition);
+
     const widthAutoSig = widthExplicit ? null : _own(signal(800));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthAcc = widthExplicit ? asAccessor(config.width) : widthAutoSig;
@@ -5072,29 +5149,6 @@ const createBaseAxisChart = (config, renderer) => {
         if (config.grid.color) gridColorSpec = config.grid.color;
     }
     const gridColorRef = { value: gridColorSpec };
-
-    // -- Legend config --
-    // `legend: false` disables. `legend: 'top'|'bottom'|'left'|'right'` is
-    // a shorthand for `{position}`. `legend: {position?, container?}` is the
-    // full form. Default: bottom.
-    let legendEnabled = config.legend !== false;
-    let legendPosition = DEFAULT_LEGEND_POSITION;
-    let legendContainer = null;
-    if (typeof config.legend === 'string') {
-        if (VALID_LEGEND_POSITIONS[config.legend]) {
-            legendPosition = config.legend;
-        }
-    } else if (config.legend && typeof config.legend === 'object') {
-        if (config.legend.position && VALID_LEGEND_POSITIONS[config.legend.position]) {
-            legendPosition = config.legend.position;
-        }
-        if (config.legend.container) {
-            legendContainer = config.legend.container;
-        }
-    }
-    // v1.12.0: opt-in legend virtualization. Cold validator; every junk config
-    // THROWS here (before any signal alloc), null (absent/false) -> eager path.
-    const legendVSpec = _normalizeLegendVirtualization(config.legend, legendPosition);
 
     // -- Crosshair / tooltip config --
     // Defaults (true) are alpha.1 milestones. Disable with `crosshair: false`
@@ -8801,6 +8855,13 @@ const _normalizeSessionSpec = (shading) => {
         throw new Error('lite-charts: createTimeLineChart `shading.sessions` must be a non-empty array');
     }
     const sessions = [];
+    // v1.15.0: masks over UTC weekdays (bit d = weekday d), consumed ONLY by the
+    // early-close holiday doors below. openMask = any weekday that opens a session
+    // (regular, overnight evening OR overnight morning half); eveMask = weekdays
+    // carrying an overnight EVENING half (which runs to next-day 00:00, so an
+    // early close on that day is a contradiction, not a configuration).
+    let openMask = 0;
+    let eveMask = 0;
     for (let i = 0; i < raw.length; i++) {
         const s = raw[i];
         if (typeof s !== 'object' || s === null || Array.isArray(s)) {
@@ -8846,10 +8907,14 @@ const _normalizeSessionSpec = (shading) => {
             // ends within its own day) survives. The seam emits NO band: the evening
             // half closes at exactly next-day 00:00 and the morning half opens at 0
             // (sorts first within its day), so `o > cursor` is strict -- no sliver.
+            const morningMask = ((dayMask << 1) | (dayMask >> 6)) & 127;
             sessions.push({ open, close: 1440, dayMask });
-            sessions.push({ open: 0, close, dayMask: ((dayMask << 1) | (dayMask >> 6)) & 127 });
+            sessions.push({ open: 0, close, dayMask: morningMask });
+            eveMask |= dayMask;
+            openMask |= dayMask | morningMask;
         } else {
             sessions.push({ open, close, dayMask });
+            openMask |= dayMask;
         }
     }
     // Ascending by open: the single-cursor sweep in _sessionBands relies on this
@@ -8860,25 +8925,70 @@ const _normalizeSessionSpec = (shading) => {
     // zero and lands pre-1970 dates on the wrong UTC day). null is not epoch 0, so
     // the `== null` gate is BEFORE Number.isInteger (which also rejects Date, NaN,
     // Infinity, strings, 1.5). _sessionBands closes each holiday's whole UTC day.
+    // A holiday entry is EITHER a number (whole-day close, byte-identical to
+    // v1.14.0) OR an object { ts, closeMinutes } (v1.15.0 early close). Foreign
+    // objects (Date, {}, []) carry neither `ts` nor `closeMinutes`, so they land
+    // on the scalar path and throw the same 'integer epoch ms' rule as v1.14.0.
+    // `seen` rejects a duplicate truncated UTC day across ALL entries (both forms).
     let hol = null;
+    let early = null;
     if (shading.holidays != null) {
         const rawHol = shading.holidays;
         if (!Array.isArray(rawHol) || rawHol.length === 0) {
             throw new Error('lite-charts: createTimeLineChart `shading.holidays` must be a non-empty array');
         }
         hol = new Set();
+        const seen = new Set();
         for (let i = 0; i < rawHol.length; i++) {
             const h = rawHol[i];
             if (h == null) {
                 throw new Error('lite-charts: createTimeLineChart `shading.holidays` entries must be numeric epoch ms (null is not epoch 0)');
             }
-            if (!Number.isInteger(h)) {
-                throw new Error('lite-charts: createTimeLineChart `shading.holidays` entries must be integer epoch ms');
+            // Early-close object form: recognized only when it carries `ts` or
+            // `closeMinutes`. null is not zero -- gate == null BEFORE any unary +.
+            if (typeof h === 'object' && (h.ts != null || h.closeMinutes != null)) {
+                const ts = h.ts;
+                if (ts == null) {
+                    throw new Error('lite-charts: createTimeLineChart early-close holiday requires numeric `ts` (null is not epoch 0)');
+                }
+                if (!Number.isInteger(ts)) {
+                    throw new Error('lite-charts: createTimeLineChart `shading.holidays` entries must be integer epoch ms');
+                }
+                const cm = h.closeMinutes;
+                if (cm == null) {
+                    throw new Error('lite-charts: createTimeLineChart early-close holiday requires numeric `closeMinutes` (null is not zero)');
+                }
+                if (!Number.isInteger(cm) || cm < 1 || cm > 1439) {
+                    throw new Error('lite-charts: createTimeLineChart early-close holiday `closeMinutes` must be an integer in 1..1439');
+                }
+                const dayStart = Math.floor(ts / _DAY_MS) * _DAY_MS;
+                if (seen.has(dayStart)) {
+                    throw new Error('lite-charts: createTimeLineChart `shading.holidays` has a duplicate UTC day');
+                }
+                seen.add(dayStart);
+                const dow = new Date(dayStart).getUTCDay();
+                if (!(openMask & (1 << dow))) {
+                    throw new Error('lite-charts: createTimeLineChart early-close holiday falls on a UTC weekday with no open session');
+                }
+                if (eveMask & (1 << dow)) {
+                    throw new Error('lite-charts: createTimeLineChart early-close holiday falls on a UTC weekday carrying an overnight evening session');
+                }
+                if (early === null) early = new Map();
+                early.set(dayStart, cm);
+            } else {
+                if (!Number.isInteger(h)) {
+                    throw new Error('lite-charts: createTimeLineChart `shading.holidays` entries must be integer epoch ms');
+                }
+                const dayStart = Math.floor(h / _DAY_MS) * _DAY_MS;
+                if (seen.has(dayStart)) {
+                    throw new Error('lite-charts: createTimeLineChart `shading.holidays` has a duplicate UTC day');
+                }
+                seen.add(dayStart);
+                hol.add(dayStart);
             }
-            hol.add(Math.floor(h / _DAY_MS) * _DAY_MS);
         }
     }
-    return { fill: shading.sessionFill != null ? shading.sessionFill : null, sessions, holidays: hol };
+    return { fill: shading.sessionFill != null ? shading.sessionFill : null, sessions, holidays: hol, earlyClose: early };
 };
 
 // v1.11.0 -- COLD session-band generator, sibling of _weekendBands. Runs ONLY
@@ -8898,6 +9008,7 @@ const _sessionBands = (xMinRaw, xMaxRaw, spec, fill) => {
     if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !(xMax > xMin)) return out;
     const f = spec.fill != null ? spec.fill : fill;
     const hol = spec.holidays;
+    const early = spec.earlyClose;
     let cursor = xMin;
     const d = new Date(xMin);
     const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
@@ -8912,12 +9023,23 @@ const _sessionBands = (xMinRaw, xMaxRaw, spec, fill) => {
         // (seeded from Date.UTC parts, stepped by _DAY_MS -- UTC has no DST), so it
         // matches the Set keys. The cursor advances over the whole closed day.
         if (hol !== null && hol.has(day)) continue;
+        // Early close: clamp every session's close to dayStart + closeMinutes so
+        // the trailing gap fuses forward exactly like a whole-day holiday's band.
+        // Whole-day (number) holidays and non-early days keep cutMs = Infinity, so
+        // c === c0 and the band output stays byte-identical to v1.14.0.
+        let cutMs = Infinity;
+        if (early !== null) {
+            const cm = early.get(day);
+            if (cm !== undefined) cutMs = day + cm * 60000;
+        }
         const dow = new Date(day).getUTCDay();
         for (let j = 0; j < spec.sessions.length; j++) {
             const s = spec.sessions[j];
             if (!(s.dayMask & (1 << dow))) continue;
             const o = day + s.open * 60000;
-            const c = day + s.close * 60000;
+            const c0 = day + s.close * 60000;
+            const c = c0 < cutMs ? c0 : cutMs;
+            if (o >= c) continue;
             if (o > cursor && cursor < xMax) out.push({ type: 'range', axis: 'x', from: cursor, to: o < xMax ? o : xMax, fill: f });
             if (c > cursor) cursor = c;
         }

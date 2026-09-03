@@ -834,7 +834,7 @@
         "@zakkster/lite-scene":  "https://cdn.jsdelivr.net/npm/@zakkster/lite-scene@1.0.0/Scene.js",
         "@zakkster/lite-axis":   "https://cdn.jsdelivr.net/npm/@zakkster/lite-axis@1.0.1/Axis.js",
         "@zakkster/lite-virtual": "https://cdn.jsdelivr.net/npm/@zakkster/lite-virtual@1.1.0/Virtual.js",
-        "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.1.0/Delaunay.js",
+        "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.2.0/Delaunay.js",
         "@zakkster/lite-charts": "../Charts.js"
     }
 }
@@ -1167,6 +1167,37 @@
         </div>
         <div class="card dashboard-card">
             <div class="chart-area" id="scatter-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Voronoi cell scatter (v1.14.0 -- cells + fat hover)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// voronoi cells -- cells x lite-delaunay 1.2.0</span>
+                <h2>Every point owns a region.</h2>
+                <p>
+                    The same scatter, tessellated. Pass
+                    <span class="mono">cells: { index: createCellIndex(N) }</span>
+                    and each primary-series point owns a bbox-clipped Voronoi
+                    polygon drawn UNDER the markers -- geometry from the REAL
+                    published <span class="mono">@zakkster/lite-delaunay</span>
+                    1.2.0 <span class="mono">createCellIndex</span>, injected
+                    exactly like <span class="mono">spatialIndex</span>
+                    (lite-charts imports no implementation). A per-point
+                    <span class="mono">colorKey</span> tints each cell by its
+                    cluster, and <span class="mono">hitTolerance: 'nearest'</span>
+                    makes the whole plot each point's hit region -- the hover
+                    highlight strokes exactly the cell you are inside. Cells are
+                    pixel-space and rebuilt with the projection, so pan/zoom
+                    never serves a stale polygon.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="cell-scatter-chart"></div>
         </div>
     </section>
 
@@ -1827,7 +1858,7 @@
     // The dense-bubble/scatter sections' spatial index. Same injection
     // pattern: lite-charts has ZERO references to lite-delaunay -- the
     // consumer imports the factory and passes it as `spatialIndex`.
-    import {createSpatialIndex} from '@zakkster/lite-delaunay';
+    import {createSpatialIndex, createCellIndex} from '@zakkster/lite-delaunay';
 
     // ---------------------------------------------------------------------
     // Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
@@ -2617,6 +2648,57 @@
     });
     scatterChart.mount(document.getElementById('scatter-chart'));
     ALL_CHARTS.push(scatterChart);
+
+    // ---------------------------------------------------------------------
+    // VORONOI CELL SCATTER -- v1.14.0 (cells + fat hover)
+    // ---------------------------------------------------------------------
+    //
+    // The same two-cluster cloud, tessellated. `cells.index` is the REAL
+    // published lite-delaunay 1.2.0 createCellIndex -- injected exactly like
+    // spatialIndex; Charts.js contains no reference to it. A per-point
+    // `colorKey` ('tone') tints each cell by its cluster, and
+    // hitTolerance: 'nearest' turns the whole plot into each point's hit
+    // region so the hover highlight strokes the cell under the cursor.
+
+    const cellScatterData = (() => {
+        const out = [];
+        for (let i = 0; i < 60; i++) {
+            out.push({x: 3 + (Math.random() - 0.5) * 3, y: 7 + (Math.random() - 0.5) * 3, tone: '--c-primary'});
+        }
+        for (let i = 0; i < 60; i++) {
+            out.push({x: 8 + (Math.random() - 0.5) * 3, y: 3 + (Math.random() - 0.5) * 3, tone: '--c-emerald'});
+        }
+        return out;
+    })();
+
+    const cellScatterChart = createScatterChart({
+        data: cellScatterData,
+        markerSize: 3,
+        hitTolerance: 'nearest',
+        colorKey: 'tone',
+        fillOpacity: 0.9,
+        stroke: '--bg-card',
+        strokeWidth: 1,
+        cells: {
+            index: createCellIndex(cellScatterData.length),
+            colorKey: 'tone',
+            fillOpacity: 0.22,
+            stroke: '--bg-card',
+            strokeWidth: 1,
+        },
+        width: responsiveWidth('cell-scatter-chart', 800),
+        height: 380,
+        ...SHARED_OPTS,
+        grid: {x: true, y: true},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+            format: (info) => ({header: 'cell ' + info.snapIdx}),
+        },
+        legend: false,
+    });
+    cellScatterChart.mount(document.getElementById('cell-scatter-chart'));
+    ALL_CHARTS.push(cellScatterChart);
 
     // ---------------------------------------------------------------------
     // MULTI-SERIES BUBBLE -- v1.2.0-alpha.2 (global size domain)

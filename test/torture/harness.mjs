@@ -18,6 +18,13 @@
  *   - The recording mock context grows an unbounded `calls` array; hot loops set
  *     `ctx.recordingEnabled = false` (see `quietCanvas`) so recording never
  *     pollutes a zero-alloc measurement.
+ *   - Retained plain-object heap is INVISIBLE to RULES: Node delivers 'gc'
+ *     PerformanceObserver entries ASYNCHRONOUSLY, so measureOps' synchronous
+ *     `gc.major` read can be 0 on an undelivered window and a loop retaining
+ *     plain (non-ArrayBuffer) objects slips past maxMajor/maxArrayBuffersGrowth.
+ *     measureAllocs' surviving-bytes channel (min-over-batches, each batch
+ *     bracketed by a forced collection) is the binding retention gate --
+ *     `runAllocsGate` below wires it to ALLOC_RULES for the zero-claim tiers.
  *
  * SCOPE LIMIT (inherited from the bench's disclaimer, stated here too): these
  * gates measure the LIBRARY's allocations -- scale kernels, decimation, pointer
@@ -30,7 +37,7 @@
  * @license MIT
  */
 
-import { measureOps, checkNoGc } from '@zakkster/lite-gc-profiler';
+import { measureOps, checkNoGc, measureAllocs, checkAllocs } from '@zakkster/lite-gc-profiler';
 import { createRegistry, setDefaultRegistry, stats } from '@zakkster/lite-signal';
 import { createMockContext } from '../harness.js';
 
@@ -95,6 +102,73 @@ export function runOpsGate(fn, opts) {
         stabilize: 'deep',
     });
     return { report: checkNoGc(res.summary, RULES), summary: res.summary, bytesPerOp: res.bytesPerOp };
+}
+
+// ---------------------------------------------------------------------------
+// Zero-RETENTION gate (profiler-native)
+// ---------------------------------------------------------------------------
+//
+// runOpsGate sees ArrayBuffer pool growth and asynchronously-delivered GC, but
+// NOT a loop that retains plain (non-ArrayBuffer) objects on the V8 heap: the
+// 'gc' entries arrive after the synchronous window closes, so `gc.major` can
+// read 0 on a window that really allocated-and-kept. measureAllocs closes that
+// channel: it brackets each batch with a forced collection and reports the
+// per-call bytes that SURVIVED, taken as the MIN across batches (ambient noise
+// only ever adds, so the min strips it).
+
+/**
+ * Smallest object V8 can place on the heap. One retained allocation per call
+ * therefore costs AT LEAST this many bytes/call -- the floor of any real
+ * regression. The gate's budget sits far below it, so a single retained object
+ * per call is a hard fail; Control 9(c) pins that ordering.
+ */
+export const MIN_HEAP_OBJECT_BYTES = 16;
+
+/**
+ * The zero-RETENTION rule shared by the T6 gates and their T9 control, so the
+ * control can never drift from the gate it proves. `maxBytesPerCall` counts the
+ * per-call bytes surviving a forced collection (min-over-batches).
+ *
+ * It SHIPS at 0: the discrimination pre-check in Control 9 passes at 0 in the
+ * real multi-tier run -- 9(b)'s section-1-shaped NON-retaining body settles with
+ * ok===true at maxBytesPerCall:0, while 9(a)'s retaining body fails. Charts'
+ * gated bodies (the kernel closure, chart.redraw) write into pre-sized pools and
+ * retain nothing, so the min-over-batches floor reaches a clean 0 here; there is
+ * no environmental floor to accommodate, so 0 is a true gate, not a widening.
+ */
+export const ALLOC_RULES = { maxBytesPerCall: 0 };
+
+/**
+ * Measure per-call RETAINED allocation (bytes surviving a forced collection,
+ * min-over-batches) and gate it against ALLOC_RULES. Requires --expose-gc.
+ * Returns { report, result, bytesPerCall, ok }. An inconclusive verdict OR an
+ * unsettled batch set is a FAIL, never a skip: `ok` is true only on a settled
+ * "pass".
+ * @param {(i:number)=>void} fn   Sync hot body.
+ * @param {{iterations:number, batches?:number, warmup?:number}} opts
+ */
+export function runAllocsGate(fn, opts) {
+    const result = measureAllocs(fn, {
+        iterations: opts.iterations,
+        batches: opts.batches === undefined ? 8 : opts.batches,
+        warmup: opts.warmup === undefined ? opts.iterations : opts.warmup,
+    });
+    const report = checkAllocs(result, ALLOC_RULES);
+    return {
+        report,
+        result,
+        bytesPerCall: result.bytesPerCall,
+        ok: report.verdict === 'pass' && result.settled === true,
+    };
+}
+
+/** One-line diagnostic for a rejected retention window. */
+export function allocsFailMsg(tag, r) {
+    const viol = (r.report.violations || []).map((v) => v.reason).join('; ');
+    return tag + ' retention gate rejected -- verdict=' + r.report.verdict +
+        ' settled=' + r.result.settled +
+        ' bytesPerCall=' + (r.bytesPerCall != null ? r.bytesPerCall.toFixed(6) : '?') +
+        (viol ? ' violations=[' + viol + ']' : '');
 }
 
 /** One-line diagnostic for a rejected alloc window. */

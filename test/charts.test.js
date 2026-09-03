@@ -8912,9 +8912,11 @@ describe('v1.12.0 -- legend virtualization', () => {
         assert.throws(mk({ position: 'right', virtualize: 'x', height: 240 }), /got string/);
         assert.throws(mk({ position: 'right', virtualize: {}, height: 240 }), /got object/);
         assert.throws(mk({ position: 'right', virtualize: [], height: 240 }), /got array/);
-        // position must be left/right
-        assert.throws(mk({ position: 'top', virtualize: fn, height: 240 }), /'left' or 'right'/);
-        assert.throws(mk({ position: 'bottom', virtualize: fn, height: 240 }), /'left' or 'right'/);
+        // v1.15.0: top/bottom now virtualize horizontally. height/itemHeight are
+        // orientation-exclusive to left/right, so supplying them for a top/bottom
+        // legend throws (no silent reinterpretation).
+        assert.throws(mk({ position: 'top', virtualize: fn, height: 240 }), /legend\.height is for position/);
+        assert.throws(mk({ position: 'bottom', virtualize: fn, height: 240 }), /legend\.height is for position/);
         // height required and must be a positive integer -- null is NOT zero
         assert.throws(mk({ position: 'right', virtualize: fn }), /legend\.height/);
         assert.throws(mk({ position: 'right', virtualize: fn, height: null }), /legend\.height/);
@@ -9441,5 +9443,370 @@ describe('v1.14.0 -- fat hover + voronoi cell layer', () => {
         assert.equal((src.match(/const makeScatterCellDrawFn =/g) || []).length, 1);
         assert.equal((src.match(/makeScatterCellDrawFn\(/g) || []).length, 1,
             'makeScatterCellDrawFn: exactly 1 call site');
+    });
+});
+
+describe('v1.15.0 -- horizontal legend virtualization + early-close holidays', () => {
+    const { _sessionBands, _normalizeSessionSpec } = _testHelpers;
+    const M = Date.UTC(2021, 0, 4);   // Monday
+    const D = 86400000;
+    const MIN = 60000;
+    const FILL = 'rgba(0,0,0,0.05)';
+    const NYSE = [{ openMinutes: 810, closeMinutes: 1200 }];
+    const GLOBEX = [{ openMinutes: 1320, closeMinutes: 1260, days: [0, 1, 2, 3, 4] }];
+    const LUNCH = [{ openMinutes: 570, closeMinutes: 690 }, { openMinutes: 750, closeMinutes: 960 }];
+    const flat = (bands) => bands.map((b) => [b.from, b.to]);
+
+    // -- DOM mock: the v1.12.0 suite's element plus the horizontal scroll axis --
+    const mkVEl = (tag) => ({
+        tagName: (tag || 'div').toUpperCase(),
+        childNodes: [], parentNode: null, parentElement: null,
+        style: {}, className: '', textContent: '',
+        dataset: {}, _attrs: {}, _listeners: {},
+        scrollTop: 0, clientHeight: 0, scrollLeft: 0, clientWidth: 0,
+        setAttribute(k, v) { this._attrs[k] = String(v); },
+        getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; },
+        addEventListener(type, fn) { (this._listeners[type] || (this._listeners[type] = [])).push(fn); },
+        removeEventListener(type, fn) {
+            const a = this._listeners[type]; if (!a) return;
+            const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+        },
+        _listenerCount(type) { const a = this._listeners[type]; return a ? a.length : 0; },
+        _fire(type, ev) {
+            const a = this._listeners[type]; if (!a) return;
+            for (let i = 0; i < a.length; i++) a[i].call(this, ev);
+        },
+        appendChild(c) {
+            if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c);
+            this.childNodes.push(c); c.parentNode = this; c.parentElement = this; return c;
+        },
+        removeChild(c) {
+            const i = this.childNodes.indexOf(c);
+            if (i >= 0) this.childNodes.splice(i, 1);
+            c.parentNode = null; c.parentElement = null; return c;
+        },
+        querySelectorAll() { return []; },
+    });
+    const withDOM = (fn) => {
+        const prev = globalThis.document;
+        globalThis.document = { createElement: (tag) => mkVEl(tag) };
+        try { return fn(); } finally { globalThis.document = prev; }
+    };
+
+    // Horizontal windowing adapter: the fakeVirtualizer's mirror on the X axis.
+    // Captures the opts object it received so HL1 can assert the exact contract.
+    let lastHOpts = null;
+    const fakeHVirtualizer = (host, opts) => {
+        lastHOpts = opts;
+        const count = opts.count;
+        const itemWidth = opts.itemWidth;
+        const full = Math.ceil(opts.width / itemWidth) + opts.overscan * 2;
+        const win = count < full ? count : full;
+        const pool = [];
+        for (let i = 0; i < win; i++) {
+            const row = document.createElement('div');
+            row.style.display = 'inline-block';
+            row.style.width = itemWidth + 'px';
+            host.appendChild(row);
+            pool.push(row);
+        }
+        let firstBound = -1;
+        const paint = () => {
+            let first = (host.scrollLeft | 0) / itemWidth | 0;
+            const maxFirst = count - win < 0 ? 0 : count - win;
+            if (first > maxFirst) first = maxFirst;
+            if (first < 0) first = 0;
+            if (first === firstBound) return;
+            firstBound = first;
+            for (let s = 0; s < pool.length; s++) {
+                const idx = first + s;
+                if (idx >= count) continue;
+                opts.renderRow(pool[s], idx);
+            }
+        };
+        paint();
+        const onScroll = () => paint();
+        host.addEventListener('scroll', onScroll);
+        return {
+            dispose() {
+                host.removeEventListener('scroll', onScroll);
+                for (let i = 0; i < pool.length; i++) {
+                    if (pool[i].parentNode) pool[i].parentNode.removeChild(pool[i]);
+                }
+                pool.length = 0;
+            },
+        };
+    };
+
+    const mkSeries = (n) => {
+        const s = new Array(n);
+        for (let i = 0; i < n; i++) s[i] = { name: 'S' + i, data: [{ x: 0, y: i }, { x: 1, y: i + 1 }] };
+        return s;
+    };
+    const boundRows = (host) => host.childNodes.filter((n) => n.dataset && n.dataset.lcIdx != null);
+    const rowByIdx = (host, idx) => host.childNodes.find((n) => n.dataset && n.dataset.lcIdx != null && (+n.dataset.lcIdx) === idx);
+    const hscrollTo = (host, left) => { host.scrollLeft = left; host._fire('scroll'); };
+    const mkChart = (legendCfg, n) => createLineChart({
+        series: mkSeries(n == null ? 200 : n),
+        crosshair: false, tooltip: false, schedule: (fn) => fn(),
+        legend: legendCfg,
+    });
+
+    // -- HL1: positive horizontal path -- exact adapter contract + behavior ----
+    it('HL1: top-position virtualized legend passes the horizontal opts contract and windows on scrollLeft', () => {
+        withDOM(() => {
+            lastHOpts = null;
+            const container = mkVEl('div');
+            const chart = mkChart({ position: 'top', container, virtualize: fakeHVirtualizer, width: 480, itemWidth: 24, overscan: 2 }, 200);
+            chart.mount(createMockCanvas(800, 400));
+
+            // The opts literal is EXACTLY the six-key horizontal contract.
+            assert.ok(lastHOpts, 'factory received opts');
+            assert.deepEqual(Object.keys(lastHOpts).sort(),
+                ['count', 'horizontal', 'itemWidth', 'overscan', 'renderRow', 'width'],
+                'horizontal opts carry width/itemWidth/horizontal and NO height keys');
+            assert.equal(lastHOpts.horizontal, true);
+            assert.equal(lastHOpts.count, 200);
+            assert.equal(lastHOpts.itemWidth, 24);
+            assert.equal(lastHOpts.width, 480);
+            assert.equal(lastHOpts.overscan, 2);
+            assert.equal(typeof lastHOpts.renderRow, 'function');
+
+            // Host styling scrolls along X, single non-wrapping row.
+            const host = chart.legend;
+            assert.equal(host.style.overflowX, 'auto');
+            assert.equal(host.style.overflowY, 'hidden');
+            assert.equal(host.style.whiteSpace, 'nowrap');
+            assert.equal(host.style.width, '480px');
+
+            // Bounded window (ceil(480/24) + 2*2 = 24 rows), not one per series.
+            const b0 = boundRows(host);
+            assert.ok(b0.length >= 20 && b0.length <= 24, 'bounded window: ' + b0.length);
+
+            // Distant scroll rebinds the pool; content + a11y are recycle-fresh.
+            hscrollTo(host, 2400); // idx 100 region
+            const r100 = rowByIdx(host, 100);
+            assert.ok(r100, 'row 100 present after horizontal scroll');
+            assert.equal(r100.childNodes[1].textContent, 'S100');
+            assert.equal(r100.getAttribute('role'), 'button');
+            assert.equal(r100.getAttribute('tabindex'), '0');
+            assert.equal(r100.getAttribute('aria-pressed'), 'true');
+
+            // Delegated click toggles exactly that series; repaint updates the row.
+            host._fire('click', { target: r100 });
+            assert.equal(chart.seriesVisibility[100].peek(), false, 'click toggled series 100');
+            assert.equal(r100.getAttribute('aria-pressed'), 'false', 'effect repainted the bound row');
+            assert.equal(r100.style.opacity, '0.4');
+            chart.destroy();
+        });
+    });
+
+    // -- HL2: orientation-exclusive door matrix, zero nodes leaked --------------
+    it('HL2: size keys are orientation-exclusive and every bad config throws before any signal alloc', () => {
+        withDOM(() => {
+            const before = stats().activeNodes;
+            const cases = [
+                [{ position: 'top', virtualize: fakeHVirtualizer, height: 240, width: 480, itemWidth: 24 }, /legend\.height is for position/],
+                [{ position: 'bottom', virtualize: fakeHVirtualizer, itemHeight: 24, width: 480, itemWidth: 24 }, /legend\.itemHeight is for position/],
+                [{ position: 'top', virtualize: fakeHVirtualizer, itemWidth: 24 }, /requires a numeric legend\.width/],
+                [{ position: 'top', virtualize: fakeHVirtualizer, width: null, itemWidth: 24 }, /requires a numeric legend\.width/],
+                [{ position: 'top', virtualize: fakeHVirtualizer, width: 0, itemWidth: 24 }, /legend\.width must be a positive integer/],
+                [{ position: 'top', virtualize: fakeHVirtualizer, width: '480', itemWidth: 24 }, /legend\.width must be a positive integer/],
+                [{ position: 'top', virtualize: fakeHVirtualizer, width: 480 }, /requires a numeric legend\.itemWidth/],
+                [{ position: 'top', virtualize: fakeHVirtualizer, width: 480, itemWidth: null }, /requires a numeric legend\.itemWidth/],
+                [{ position: 'bottom', virtualize: fakeHVirtualizer, width: 480, itemWidth: 24.5 }, /legend\.itemWidth must be a positive integer/],
+                [{ position: 'right', virtualize: fakeHVirtualizer, width: 480, height: 240 }, /legend\.width is for position 'top'\/'bottom'/],
+                [{ position: 'left', virtualize: fakeHVirtualizer, itemWidth: 24, height: 240 }, /legend\.itemWidth is for position 'top'\/'bottom'/],
+            ];
+            for (const [cfg, re] of cases) {
+                cfg.container = mkVEl('div');
+                assert.throws(() => mkChart(cfg, 5), re, JSON.stringify(cfg.position) + ' door');
+            }
+            assert.equal(stats().activeNodes - before, 0,
+                'construction throws leak zero reactive nodes (auto-size signals not yet allocated)');
+        });
+    });
+
+    // -- HL3: invariants -- one listener; 50x mount/destroy retention ----------
+    it('HL3: one delegated listener at 200 series; 50 mount/destroy cycles dispose every adapter, retain nothing', () => {
+        withDOM(() => {
+            const c1 = mkVEl('div');
+            const chart = mkChart({ position: 'top', container: c1, virtualize: fakeHVirtualizer, width: 480, itemWidth: 24 }, 200);
+            chart.mount(createMockCanvas(800, 400));
+            assert.equal(chart.legend._listenerCount('click'), 1, 'exactly one delegated click listener');
+            chart.destroy();
+
+            let disposes = 0;
+            const countingFactory = (host, opts) => {
+                const h = fakeHVirtualizer(host, opts);
+                return { dispose() { disposes++; h.dispose(); } };
+            };
+            const before = stats().activeNodes;
+            for (let i = 0; i < 50; i++) {
+                const c = mkVEl('div');
+                const ch = mkChart({ position: 'bottom', container: c, virtualize: countingFactory, width: 480, itemWidth: 24 }, 200);
+                ch.mount(createMockCanvas(800, 400));
+                ch.destroy();
+            }
+            assert.equal(disposes, 50, 'every adapter handle disposed');
+            assert.equal(stats().activeNodes - before, 0, 'no reactive-node retention');
+        });
+    });
+
+    // -- HL4: factory contract at mount (horizontal path) ----------------------
+    it('HL4: a factory that returns no dispose() throws at mount; nothing attaches; legend stays null', () => {
+        withDOM(() => {
+            const container = mkVEl('div');
+            const chart = mkChart({ position: 'top', container, virtualize: () => ({}), width: 480, itemWidth: 24 }, 5);
+            assert.throws(() => chart.mount(createMockCanvas(800, 400)),
+                /legend\.virtualize factory must return \{ dispose: function \}/);
+            assert.equal(container.childNodes.length, 0, 'nothing attached to the legend container');
+            assert.equal(chart.legend, null, 'chart.legend stays null');
+            chart.destroy(); // must not throw after the failed mount
+        });
+    });
+
+    // -- HL5: throw precedence -- initOpts wins over the hoisted legend door ---
+    it('HL5: when chart-type opts AND legend config are both bad, the initOpts error wins', () => {
+        withDOM(() => {
+            const container = mkVEl('div');
+            assert.throws(() => createScatterChart({
+                series: [{ name: 's', data: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }],
+                hitTolerance: 'near',
+                legend: { position: 'top', container, virtualize: fakeHVirtualizer, height: 240 },
+                schedule: (fn) => fn(),
+            }), /hitTolerance/, 'initOpts throws first (v1.14.0 hoist precedent)');
+        });
+    });
+
+    // -- EC1: mid-session early close -- exact band list + fusion --------------
+    it('EC1: an early close inside the session emits the exact clamped band list; before-open equals a whole-day holiday', () => {
+        // NYSE week, Wednesday early close at 17:00 UTC (cut inside 13:30-20:00).
+        const spec = _normalizeSessionSpec({ sessions: NYSE, holidays: [{ ts: M + 2 * D, closeMinutes: 1020 }] });
+        const bands = _sessionBands(M, M + 7 * D, spec, FILL);
+        assert.deepEqual(flat(bands), [
+            [M, M + 810 * MIN],
+            [M + 1200 * MIN, M + D + 810 * MIN],
+            [M + D + 1200 * MIN, M + 2 * D + 810 * MIN],
+            [M + 2 * D + 1020 * MIN, M + 3 * D + 810 * MIN],  // 17:00 cut fuses into Thursday open
+            [M + 3 * D + 1200 * MIN, M + 4 * D + 810 * MIN],
+            [M + 4 * D + 1200 * MIN, M + 7 * D],
+        ], 'six bands; Wednesday band starts at the early close, not the session close');
+
+        // A cut BEFORE the open (13:00 < 13:30) suppresses the whole session --
+        // band list must equal the plain whole-day holiday form.
+        const cutBefore = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ sessions: NYSE, holidays: [{ ts: M + 2 * D, closeMinutes: 780 }] }), FILL);
+        const wholeDay = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ sessions: NYSE, holidays: [M + 2 * D] }), FILL);
+        assert.deepEqual(flat(cutBefore), flat(wholeDay), 'cut-before-open degenerates to the whole-day closure');
+    });
+
+    // -- EC2: mixed entry forms in one array; duplicate day across forms -------
+    it('EC2: number and object entries mix in one array; a duplicate truncated day across forms throws', () => {
+        const spec = _normalizeSessionSpec({
+            sessions: NYSE,
+            holidays: [M + D, { ts: M + 3 * D + 5 * 3600000, closeMinutes: 1020 }], // Tue whole, Thu early (mid-day ts)
+        });
+        const bands = _sessionBands(M, M + 7 * D, spec, FILL);
+        assert.deepEqual(flat(bands), [
+            [M, M + 810 * MIN],
+            [M + 1200 * MIN, M + 2 * D + 810 * MIN],          // fused across the Tuesday holiday
+            [M + 2 * D + 1200 * MIN, M + 3 * D + 810 * MIN],
+            [M + 3 * D + 1020 * MIN, M + 4 * D + 810 * MIN],  // Thursday early close (ts truncated to day start)
+            [M + 4 * D + 1200 * MIN, M + 7 * D],
+        ]);
+        assert.throws(() => _normalizeSessionSpec({
+            sessions: NYSE,
+            holidays: [M + 2 * D, { ts: M + 2 * D + 3600000, closeMinutes: 700 }],
+        }), /duplicate UTC day/, 'same truncated day via number + object forms');
+    });
+
+    // -- EC3: construction door matrix, chart-level, zero nodes leaked ---------
+    it('EC3: every malformed early-close entry throws at construction with zero reactive nodes allocated', () => {
+        const mkTime = (holidays) => createTimeLineChart({
+            series: [{ name: 't', data: [{ x: M, y: 1 }, { x: M + 7 * D, y: 2 }] }],
+            crosshair: false, tooltip: false, schedule: (fn) => fn(),
+            shading: { sessions: NYSE, holidays },
+        });
+        const before = stats().activeNodes;
+        const cases = [
+            [[{ ts: null, closeMinutes: 780 }], /requires numeric `ts`/],
+            [[{ closeMinutes: 780 }], /requires numeric `ts`/],
+            [[{ ts: NaN, closeMinutes: 780 }], /integer epoch ms/],
+            [[{ ts: M + 2 * D, closeMinutes: null }], /requires numeric `closeMinutes`/],
+            [[{ ts: M + 2 * D, closeMinutes: 0 }], /closeMinutes` must be an integer in 1\.\.1439/],
+            [[{ ts: M + 2 * D, closeMinutes: 1440 }], /closeMinutes` must be an integer in 1\.\.1439/],
+            [[{ ts: M + 2 * D, closeMinutes: 779.5 }], /closeMinutes` must be an integer in 1\.\.1439/],
+            [[{ ts: M + 2 * D, closeMinutes: '780' }], /closeMinutes` must be an integer in 1\.\.1439/],
+            [[new Date(M)], /integer epoch ms/],
+            [[{}], /integer epoch ms/],
+            [[{ ts: M + 5 * D, closeMinutes: 780 }], /no open session/],           // Saturday, NYSE Mon-Fri
+            [[M + 2 * D, { ts: M + 2 * D + 3600000, closeMinutes: 700 }], /duplicate UTC day/],
+        ];
+        for (const [holidays, re] of cases) {
+            assert.throws(() => mkTime(holidays), re);
+        }
+        // Overnight evening-half contradiction: Globex evening opens Mon-Fri...
+        // an early close on such a day is refused (the evening half runs to 00:00).
+        assert.throws(() => createTimeLineChart({
+            series: [{ name: 't', data: [{ x: M, y: 1 }, { x: M + 7 * D, y: 2 }] }],
+            crosshair: false, tooltip: false, schedule: (fn) => fn(),
+            shading: { sessions: GLOBEX, holidays: [{ ts: M, closeMinutes: 600 }] },
+        }), /overnight evening session/);
+        assert.equal(stats().activeNodes - before, 0,
+            'all doors fire before any owned signal alloc');
+    });
+
+    // -- EC4: clamp boundary edges ---------------------------------------------
+    it('EC4: cut at open closes the day; between-sessions cut kills only the later session; late cut is a no-op', () => {
+        // (a) cut exactly at open (o >= c) -- degenerates to the whole-day form.
+        const atOpen = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ sessions: NYSE, holidays: [{ ts: M + 2 * D, closeMinutes: 810 }] }), FILL);
+        const wholeDay = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ sessions: NYSE, holidays: [M + 2 * D] }), FILL);
+        assert.deepEqual(flat(atOpen), flat(wholeDay), 'cut === open closes the whole day, no zero-width band');
+
+        // (b) lunch-break market, cut at 12:00 BETWEEN the sessions: the morning
+        // session survives untouched, the afternoon session never opens, and the
+        // band fuses from morning close -- no band boundary at the cut minute.
+        const between = _sessionBands(M + 2 * D, M + 4 * D,
+            _normalizeSessionSpec({ sessions: LUNCH, holidays: [{ ts: M + 2 * D, closeMinutes: 720 }] }), FILL);
+        assert.deepEqual(flat(between), [
+            [M + 2 * D, M + 2 * D + 570 * MIN],               // extent start (midnight) -> morning open
+            [M + 2 * D + 690 * MIN, M + 3 * D + 570 * MIN],   // morning close fused to Thu open
+            [M + 3 * D + 690 * MIN, M + 3 * D + 750 * MIN],   // Thursday lunch gap, untouched
+            [M + 3 * D + 960 * MIN, M + 4 * D],
+        ], 'no boundary at the cut; afternoon session suppressed');
+        for (const [from, to] of flat(between)) assert.ok(to > from, 'positive width everywhere');
+
+        // (c) cut MID-second-session (15:00): morning + lunch gap untouched,
+        // afternoon clamps at the cut.
+        const midSecond = _sessionBands(M + 2 * D, M + 4 * D,
+            _normalizeSessionSpec({ sessions: LUNCH, holidays: [{ ts: M + 2 * D, closeMinutes: 900 }] }), FILL);
+        assert.deepEqual(flat(midSecond), [
+            [M + 2 * D, M + 2 * D + 570 * MIN],               // extent start (midnight) -> morning open
+            [M + 2 * D + 690 * MIN, M + 2 * D + 750 * MIN],   // lunch gap survives
+            [M + 2 * D + 900 * MIN, M + 3 * D + 570 * MIN],   // afternoon clamped at 15:00
+            [M + 3 * D + 690 * MIN, M + 3 * D + 750 * MIN],
+            [M + 3 * D + 960 * MIN, M + 4 * D],
+        ]);
+
+        // (d) cut AFTER the session close (23:59 > 20:00) -- a documented no-op:
+        // the band list is identical to no early close at all.
+        const late = _sessionBands(M, M + 7 * D,
+            _normalizeSessionSpec({ sessions: NYSE, holidays: [{ ts: M + 2 * D, closeMinutes: 1439 }] }), FILL);
+        const plain = _sessionBands(M, M + 7 * D, _normalizeSessionSpec({ sessions: NYSE }), FILL);
+        assert.deepEqual(flat(late), flat(plain), 'cut after close changes nothing');
+    });
+
+    // -- EC5: early close on the synthesized holidays-only calendar ------------
+    it('EC5: holidays-only spec accepts an early-close entry against the synthesized Mon-Fri full-day calendar', () => {
+        const spec = _normalizeSessionSpec({ holidays: [{ ts: M + 2 * D + 5 * 3600000, closeMinutes: 720 }] });
+        const bands = _sessionBands(M, M + 7 * D, spec, FILL);
+        assert.deepEqual(flat(bands), [
+            [M + 2 * D + 720 * MIN, M + 3 * D],   // Wed 12:00 -> Thu 00:00
+            [M + 5 * D, M + 7 * D],               // the weekend
+        ], 'synth calendar early close shades from noon; ts truncated to the UTC day');
     });
 });

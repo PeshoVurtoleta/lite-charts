@@ -4,9 +4,13 @@ Local working scratch. **Not shipped** -- `briefs/` is absent from
 package.json `files[]`, so nothing here reaches npm. Each brief is a
 self-contained plan for one future `cd LiteCharts && claude` session.
 
-Current shipped state: **v1.14.0** (fat hover + injected Voronoi cell layer
+Current shipped state: **v1.15.0** (horizontal legend virtualization --
+top/bottom + virtualize with orientation-exclusive width/itemWidth keys;
+early-close holiday entries { ts, closeMinutes } clamping the session sweep;
+no brief -- executed straight from the ROADMAP candidates queue). Prior:
+v1.14.0 (fat hover + injected Voronoi cell layer
 on scatter, vs published lite-delaunay 1.2.0; postProject renderer seam;
-construction throws before any signal alloc). Prior: v1.13.0 (overnight
+construction throws before any signal alloc); v1.13.0 (overnight
 sessions via midnight-split
 normalization + holiday calendar via UTC-day-skip, riding the v1.11.0
 session machinery; legend virtualization via caller-injected
@@ -48,6 +52,61 @@ candidate future triggers, none committed -- TIN/contour rendering (their
 half-edge mesh), natural-neighbor heatmap interpolation, a mesh-edges layer,
 or a charts-gl mesh/Voronoi layer (1.0-lane there, after brief #11). A new
 consumer-contract brief here triggers 1.3.0, exactly as #10 did for 1.2.0.
+UPDATE 2026-09-03 (later same day): the user greenlit delaunay 1.3.0
+DIRECTLY in the delaunay session (their ROADMAP mesh-interpolation lane:
+locate + barycentric weights + sampleField rasterizing scattered fields),
+bypassing the brief trigger. Charts supplied grounding input read-only:
+corrected their premise (createHeatmap consumes long-form AoS rows with
+string categories, NOT a grid array -- no verbatim outGrid feed exists),
+recommended outGrid = caller-allocated Float32Array, row-major, +y-up,
+cell-center sampling, NaN = missing (flows through our NaN->missing
+extract), reserved config key `field` (next rung after spatialIndex /
+cells), and asked locate to expose the three site indices zero-alloc for
+a future contour/TIN walker. Charts-side consumption still arrives via a
+future consumer-contract brief here (candidate: field-raster layer over
+the grid kernel, or a new field chart).
+CONTRACT LOCKED same day (their planner, incorporating all charts input):
+`createFieldIndex(maxPoints) -> (pxs, pys, n) -> { locate(qx,qy) -> t|-1;
+barycentric(t, qx, qy, outW3) -> bool; triangleVertices(t, outI3)` (writes
+the 3 ORIGINAL site indices)`; triangleCount(); interpolate(zs, qx, qy) ->
+number; sampleField(zs, gridW, gridH, bx0, by0, bx1, by1, outGrid) ->
+finite-cell count; dispose() }` -- pooling/facade/SoA-NaN identical to
+createSpatialIndex/createCellIndex. Grid contract: outGrid Float32Array or
+Float64Array, length >= gridW*gridH, row-major row*gridW+col, col 0 = bx0
+= xMin, row 0 = by0 = yMin (+y-up mathematical; the charts bridge flips
+rows and derives presentMask in one cold pass), cell-center sampling, NaN
+for outside-hull/degenerate/non-finite (never 0). zs per-call,
+ORIGINAL-indexed, Float32Array | Float64Array | number[], length >= n or
+throw. Contour/TIN walkers compose zero-alloc via triangleCount +
+triangleVertices + barycentric (no 1.4.0 surface change needed).
+BUILT + GATED same day, exactly to the locked contract (their report:
+127/0 tests incl. 30 FieldIndex cases -- planar exactness 5000/5000,
+locate-vs-brute 15000/0, grid-orientation proof row 0 = yMin, NaN-z
+confinement, outGrid-aliases-zs adversarial case; torture 200k walks +
+256 rasterizations major=0). Their docs label `field: { index }` as
+reserved-not-consumed. PUBLISHED + VERIFIED live 2026-09-03 (npm view:
+1.3.0 = latest). Dormancy RE-ARMED for delaunay 1.4.0 (notice sent same
+day): no charts trigger exists; candidates, none committed -- needs
+surfaced while executing the future field-raster consumer brief here
+(likely none), a charts-gl mesh/field layer (1.0-lane, post brief #11),
+or their own ROADMAP lanes with charts grounding input. Also same day:
+lite-charts v1.15.0 released (horizontal legend virt + early-close
+calendar; 473/473 + A21; no delaunay surface involved).
+PERF GROUNDING for the future field-raster/contour brief (their
+bench/bench.js on shipped 1.3.0, Node 22, Apple-Silicon-class, 1000x1000
+domain; medians, steady-state, heap deltas ~0): sampleField 64x64 ~0.55
+ms/grid at 100k pts (7.5 Mcells/s; 29.4 at 10k, 67.2 at 1k, serpentine
+coherence holds); interpolate coherent-drift 10.8 Mq/s at 100k (23.2 at
+10k, 32.7 at 1k); interpolate RANDOM jumps 0.11 Mq/s at 100k -- the
+O(sqrt T) walk cost, so the brief MUST batch queries coherently; warm
+field rebuild 33.3 ms at 100k / 2.6 ms at 10k / 0.19 ms at 1k (first
+build pays the arena, per the pool contract). Implication: a per-frame
+64x64 raster refresh is affordable at <=10k points; at 100k the rebuild
+(33 ms) dictates a cold data-change-only refresh, sampleField itself
+stays sub-ms. Cell sanity: avg 6.0 verts/cell on random clouds, matching
+Voronoi theory. Their side dormant; ledgers agreed on all four points
+(1.3.0 shipped end-to-end + carded, field brief-driven, 1.4.0 no
+trigger, NN behind their fence).
 lite-delaunay 1.1.0 SHIPPED 2026-09-02 (user session; createSpatialIndex,
 uniform-grid impl) and conformance-verified against the charts contract
 (true-kNN exact; indexed hit-test identical to linear scan at realistic

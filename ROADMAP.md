@@ -5,7 +5,42 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.14.0 (current)
+## v1.15.0 (current)
+
+Horizontal legend virtualization + early-close holidays + an earlier
+fail-closed point for bad legend config. A chart using none of these is
+byte-identical.
+
+- **Horizontal legend virtualization.** A virtualized legend at
+  `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling
+  along X. Supply `legend.width` (viewport) + `legend.itemWidth` (fixed row
+  width, both positive integers); the adapter receives `{ count, itemWidth,
+  width, overscan, renderRow, horizontal: true }`. The size keys are
+  orientation-EXCLUSIVE -- `height`/`itemHeight` on a top/bottom legend, or
+  `width`/`itemWidth` on a left/right legend, throw at construction (no silent
+  reinterpretation). Left/right virtualization is unchanged; its adapter opts
+  literal and DOM path stay byte-identical.
+- **Early-close holidays.** `shading.holidays` entries may be
+  `{ ts, closeMinutes }` alongside the whole-day epoch-ms number. On that UTC
+  day every session clamps to close at `closeMinutes` (1..1439) instead of its
+  normal close, and the trailing closed time fuses forward like a whole-day
+  holiday's band. Doors (all throw at construction): object without `ts`; `ts`
+  failing the epoch-ms rules; `closeMinutes` null/non-integer/outside 1..1439;
+  a duplicate UTC day across ALL entries; an early close on a weekday with no
+  open session; an early close on a day carrying an overnight evening session.
+  Whole-day (number) entries stay byte-identical to v1.14.0. The clamp is one
+  cold-path line in `_sessionBands` (`c = c0 < cutMs ? c0 : cutMs; if (o >= c)
+  continue;`), `cutMs = Infinity` on non-early days so bands are byte-identical;
+  the session masks (`openMask`/`eveMask`) backing the doors are built once at
+  construction.
+- **Earlier fail-closed legend validation.** Legend position/container
+  validation and `virtualize` normalization are hoisted above the first
+  `_own(signal(...))` in `createBaseAxisChart`, so bad legend config throws with
+  ZERO owned signals allocated. When BOTH the chart-type options and the legend
+  are invalid, the `initOpts` error wins (it runs one line earlier) -- the same
+  precedence as the v1.14.0 hoist.
+
+## v1.14.0
 
 Fat hover + injected Voronoi cell layer on `createScatterChart` (brief #10,
 the lite-delaunay v1.2.0 trigger -- consumer contract carried in

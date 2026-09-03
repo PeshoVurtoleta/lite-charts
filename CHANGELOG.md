@@ -5,6 +5,98 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Testing
+
+- **Retained-allocation gate in the torture harness.** T6's headline zero-alloc
+  claims (section 1 pure kernel, section 2 mounted redraw) now also run through a
+  profiler-native zero-RETENTION gate (`runAllocsGate` -> `measureAllocs` /
+  `checkAllocs`, `ALLOC_RULES = { maxBytesPerCall: 0 }`). `runOpsGate` sees
+  ArrayBuffer pool growth and asynchronously-delivered GC, but a loop retaining
+  plain (non-ArrayBuffer) objects can slip past `maxMajor` because Node delivers
+  'gc' PerformanceObserver entries after the synchronous window closes; the
+  surviving-bytes channel (min-over-batches, each batch bracketed by a forced
+  collection) is the binding retention gate. Section 2 additionally pins the
+  signal-graph node and link deltas at exactly 0 across the redraw window. T9
+  Control 9 proves the gate both ways: a retaining body (`keep[k++] = { n: i }`)
+  fails, a section-1-shaped non-retaining slot-write body passes settled, and a
+  drift guard pins `maxBytesPerCall` strictly below `MIN_HEAP_OBJECT_BYTES` (16).
+  Test-only; the shipped module is byte-identical.
+
+## [1.15.0] -- 2026-09
+
+Horizontal legend virtualization for top/bottom legends, early-close holidays
+for the market-hours session calendar, and an earlier fail-closed point for bad
+legend config. A chart using none of these is byte-identical.
+
+### Added
+
+- **Horizontal legend virtualization.** A virtualized legend at
+  `position: 'top' | 'bottom'` now windows a single non-wrapping row that
+  scrolls along X. Supply `legend.width` (viewport) and `legend.itemWidth`
+  (fixed row width, both positive integers); the adapter receives
+  `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. The
+  size keys are orientation-EXCLUSIVE: `height` / `itemHeight` on a top/bottom
+  legend, or `width` / `itemWidth` on a left/right legend, throw at construction
+  (no silent reinterpretation). Left/right virtualization is unchanged and its
+  adapter opts + DOM path are byte-identical.
+- **Early-close holidays.** `shading.holidays` entries may now be
+  `{ ts, closeMinutes }` (in addition to a whole-day epoch-ms number). On that
+  UTC day every session is clamped to close at `closeMinutes` (1..1439) instead
+  of its normal close, and the trailing closed time fuses forward like a
+  whole-day holiday's band. Doors that throw at construction: an object without
+  `ts`; a `ts` that fails the epoch-ms rules; a `closeMinutes` that is null,
+  non-integer, or outside 1..1439; a duplicate UTC day across ALL entries; an
+  early close on a UTC weekday with no open session; and an early close on a day
+  carrying an overnight evening session. Whole-day (number) entries are
+  byte-identical to v1.14.0.
+
+### Design
+
+- Bad legend config now throws with ZERO owned signals allocated: the legend
+  position/container validation and `virtualize` normalization are hoisted above
+  the first `_own(signal(...))` in `createBaseAxisChart`, matching the
+  construction-time fail-closed discipline already used for `renderer.initOpts`.
+  When BOTH the chart-type options and the legend are invalid, the `initOpts`
+  error wins (it runs one line earlier) -- the same precedence as the v1.14.0
+  hoist.
+- The early-close clamp is a single cold-path addition to `_sessionBands`
+  (`c = c0 < cutMs ? c0 : cutMs; if (o >= c) continue;`); non-early days keep
+  `cutMs = Infinity`, so `c === c0` and the emitted bands are byte-identical to
+  v1.14.0. Session masks (`openMask` / `eveMask`) that back the early-close doors
+  are built once at construction, never on any draw path.
+
+### Coverage
+
+- 10 new tests (463 -> 473). HL1 pins the exact six-key horizontal adapter
+  contract (`{ count, itemWidth, width, overscan, renderRow, horizontal: true }`,
+  no height keys), host styling, bounded windowing on `scrollLeft`, recycle-fresh
+  a11y/content, and the delegated click + effect repaint. HL2 walks the
+  11-case orientation-exclusive door matrix with a zero reactive-node delta.
+  HL3 proves one delegated listener at 200 series and 50 mount/destroy cycles
+  disposing every adapter with zero retention. HL4 pins the factory-without-
+  dispose mount throw (nothing attached, `chart.legend` null, destroy safe).
+  HL5 pins the throw precedence (initOpts wins when both configs are bad).
+  EC1-EC5 pin exact band lists for a mid-session cut, cut-before-open ==
+  whole-day closure, mixed number/object arrays, cut-at-open, a between-sessions
+  cut on a lunch-break market (afternoon suppressed, no boundary at the cut),
+  a mid-second-session cut, cut-after-close as a no-op, and the synthesized
+  holidays-only calendar; EC3 walks the 13-door construction matrix (including
+  the openMask/eveMask refusals) at a zero node delta.
+- Torture A21: a 50000-step horizontal scroll storm (top position, 24px steps,
+  redraw interleaved) gated at <= 1.5 B/op absolute, maxMajor:0, zero new
+  signal-graph nodes, and <= 0.5 B/op against a VERTICAL virtualized storm
+  driving the identical workload -- a branch-parity control (per-process probes
+  put the true horizontal-vs-vertical delta at 0.000 B/op; a legend-absent
+  redraw control this late in the tier measures heap warm-up, not the branch).
+- Five mechanisms proven load-bearing by reversion, each turning an exact test
+  set red: the `o >= c` cursor guard (EC1+EC4), the `cutMs` clamp itself
+  (EC1/2/4/5, with v1.11-v1.13 suites staying green -- the clamp is the entire
+  early-close mechanism), `horizontal: true` in the adapter opts (HL1), the
+  top/bottom `height` door (HL2 + the retargeted V6), and the eveMask overnight
+  refusal (EC3).
+
 ## [1.14.0] -- 2026-09
 
 Fat hover and an injected Voronoi cell (tessellation) layer for

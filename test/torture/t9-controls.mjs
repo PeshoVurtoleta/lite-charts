@@ -13,6 +13,7 @@
 import { _testHelpers, createLineChart } from '../../Charts.js';
 import {
     createEventCanvas, installResizeObserver, runOpsGate, graphSnapshot, graphDelta, die,
+    runAllocsGate, ALLOC_RULES, MIN_HEAP_OBJECT_BYTES, check,
 } from './harness.mjs';
 
 const { decimateMinMax, updateLogScale, makeLogScale } = _testHelpers;
@@ -139,5 +140,35 @@ export function run() {
         } finally {
             ro.uninstall();
         }
+    }
+
+    // Control 9 -- the zero-RETENTION gate (runAllocsGate + ALLOC_RULES). It must
+    // be provably able to FAIL on a retaining body AND provably able to PASS on a
+    // non-retaining one; a gate that only ever fails is as blind as the false-PASS
+    // it replaces. All three checks run through the exported wrapper, so the
+    // control can never drift from the gate the T6 tiers actually use.
+    {
+        // (a) A body that RETAINS a fresh object per call MUST be rejected. This
+        // is the exact shape the old ops-gate false-PASSed (plain objects, not
+        // ArrayBuffers, delivered past an async 'gc' window).
+        const keep = [];
+        let k = 0;
+        const retaining = runAllocsGate((i) => { keep[k++] = { n: i }; }, { iterations: 20000, batches: 8 });
+        if (retaining.ok) die('T9 control 9(a): a retaining hot loop (keep[k++]={n:i}) passed the zero-retention gate -- bytesPerCall=' + retaining.bytesPerCall);
+
+        // (b) Vacuity guard: a section-1-shaped body that writes into a
+        // preallocated slot and retains NOTHING MUST pass (settled + verdict
+        // pass). If this fails at the shipped budget, the floor is environmental,
+        // not the code -- and the gate would be a coin flip.
+        const slot = new Float32Array(1);
+        const clean = runAllocsGate((i) => { slot[0] = i; }, { iterations: 20000, batches: 8 });
+        if (!clean.ok) die('T9 control 9(b): a non-retaining slot-write body FAILED the zero-retention gate (verdict=' + clean.report.verdict + ' settled=' + clean.result.settled + ' bytesPerCall=' + clean.bytesPerCall + ') -- the budget floor is environmental, not the code');
+
+        // (c) Drift guard: the budget must stay strictly below one heap object, so
+        // a single retained object per call can never be mistaken for noise.
+        check(ALLOC_RULES.maxBytesPerCall < MIN_HEAP_OBJECT_BYTES,
+            () => 'T9 control 9(c): ALLOC_RULES.maxBytesPerCall ' + ALLOC_RULES.maxBytesPerCall + ' >= MIN_HEAP_OBJECT_BYTES ' + MIN_HEAP_OBJECT_BYTES + ' -- budget drifted up to one-object-per-call, a real leak could pass');
+
+        keep.length = 0;
     }
 }

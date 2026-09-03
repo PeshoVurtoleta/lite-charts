@@ -33,6 +33,7 @@ import { signal } from '@zakkster/lite-signal';
 import { createCellIndex } from '@zakkster/lite-delaunay';
 import {
     createEventCanvas, quietCanvas, fireShared, runOpsGate, allocFailMsg,
+    runAllocsGate, allocsFailMsg, graphDelta,
     installCenterLabelDOM, graphSnapshot, BREAK, check, die,
 } from './harness.mjs';
 
@@ -77,6 +78,11 @@ export function run() {
         }
         // In BREAK mode the gate was SUPPOSED to reject; reaching here is a fault.
         if (BREAK) die('T6: CHARTS_TORTURE_BREAK injected allocations but the kernel gate passed');
+        // Zero-RETENTION gate over the SAME `hot` kernel closure. runOpsGate sees
+        // pool growth and async GC; this sees plain-object survivors that a
+        // retaining kernel would leave on the heap (invisible to maxMajor alone).
+        const kg = runAllocsGate(hot, { iterations: 20000, batches: 8 });
+        if (!kg.ok) die(allocsFailMsg('T6.kernel', kg));
     }
 
     // --- 2. redraw: a mounted chart re-issuing its draw effects ----------------
@@ -89,6 +95,16 @@ export function run() {
         check(chart._internal.seriesStates[0].pxs.buffer.byteLength === poolBefore,
             () => `T6.redraw: pixel pool grew ${poolBefore} -> ${chart._internal.seriesStates[0].pxs.buffer.byteLength}`);
         if (!report.ok) die(allocFailMsg('T6.redraw', report, summary));
+        // Zero-RETENTION gate over the SAME redraw, wrapped in a signal-graph
+        // snapshot: a redraw that leaked a reactive node/link per frame would
+        // slip past the async-GC ops gate but climb here (heap survivors) and in
+        // the node/link deltas (which must be EXACTLY 0 across the window).
+        const rdBefore = graphSnapshot();
+        const rg = runAllocsGate(() => { chart.redraw(); }, { iterations: 2000, batches: 6 });
+        const rdDelta = graphDelta(rdBefore);
+        if (!rg.ok) die(allocsFailMsg('T6.redraw', rg));
+        check(rdDelta.nodes === 0 && rdDelta.links === 0,
+            () => `T6.redraw: signal graph grew across redraw window -- nodes ${rdDelta.nodes}, links ${rdDelta.links}`);
         void canvas;
         chart.destroy();
     }
@@ -740,5 +756,126 @@ export function run() {
         ctrl.destroy();
         c.destroy();
         check(disposes === builds, () => `A20: ${builds - disposes} cell index(es) never disposed`);
+    }
+
+    // --- 15. HORIZONTAL legend scroll-storm budget (A21, v1.15.0) --------------
+    // v1.15.0 opens the top/bottom door on legend.virtualize: the adapter windows
+    // on scrollLeft with itemWidth/width, and Charts.js hands it the six-key
+    // horizontal opts literal ({..., horizontal: true}). The chart-side hot path
+    // is the SAME _paintRow/repaint machinery as A18 (peek() reads, pooled DOM
+    // writes), so the claim this gate pins is BRANCH PARITY: a top-position
+    // scroll storm must cost what the A18-shaped right-position storm costs.
+    // The control is therefore a VERTICAL virtualized legend (A18's exact
+    // config) driving the identical 50000-step 24px storm interleaved with
+    // redraw -- NOT a legend-absent chart (that isolation is A18's job; a
+    // redraw-only control also sits in a differently-warmed measurement context
+    // this late in the tier, which is noise, not signal -- per-process probes
+    // put the true horizontal-vs-vertical delta at 0.000 B/op). Pins: <=1.5
+    // B/op absolute, <=0.5 B/op differential vs the vertical storm, and ZERO
+    // new signal-graph nodes across BOTH storms (peek() never subscribes).
+    {
+        const mkVEl = (tag) => ({
+            tagName: (tag || 'div').toUpperCase(),
+            childNodes: [], parentNode: null, parentElement: null,
+            style: {}, className: '', textContent: '',
+            dataset: {}, _attrs: {}, _listeners: {},
+            scrollTop: 0, clientHeight: 0, scrollLeft: 0, clientWidth: 0,
+            setAttribute(k, v) { this._attrs[k] = v; },
+            getAttribute(k) { return Object.prototype.hasOwnProperty.call(this._attrs, k) ? this._attrs[k] : null; },
+            addEventListener(t, fn) { (this._listeners[t] || (this._listeners[t] = [])).push(fn); },
+            removeEventListener(t, fn) { const a = this._listeners[t]; if (!a) return; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); },
+            _fire(t) { const a = this._listeners[t]; if (!a) return; for (let i = 0; i < a.length; i++) a[i].call(this); },
+            appendChild(c) { if (c.parentNode && c.parentNode.removeChild) c.parentNode.removeChild(c); this.childNodes.push(c); c.parentNode = this; c.parentElement = this; return c; },
+            removeChild(c) { const i = this.childNodes.indexOf(c); if (i >= 0) this.childNodes.splice(i, 1); c.parentNode = null; c.parentElement = null; return c; },
+            querySelectorAll() { return []; },
+        });
+        const fakeHVirtualizer = (host, opts) => {
+            const count = opts.count, itemWidth = opts.itemWidth;
+            const full = Math.ceil(opts.width / itemWidth) + opts.overscan * 2;
+            const win = count < full ? count : full;
+            const pool = [];
+            for (let i = 0; i < win; i++) { const r = document.createElement('div'); host.appendChild(r); pool.push(r); }
+            let firstBound = -1;
+            const paint = () => {
+                let first = (host.scrollLeft | 0) / itemWidth | 0;
+                const maxFirst = count - win < 0 ? 0 : count - win;
+                if (first > maxFirst) first = maxFirst;
+                if (first < 0) first = 0;
+                if (first === firstBound) return;
+                firstBound = first;
+                for (let s = 0; s < pool.length; s++) { const idx = first + s; if (idx < count) opts.renderRow(pool[s], idx); }
+            };
+            paint();
+            const onScroll = () => paint();
+            host.addEventListener('scroll', onScroll);
+            return { dispose() { host.removeEventListener('scroll', onScroll); for (let i = 0; i < pool.length; i++) if (pool[i].parentNode) pool[i].parentNode.removeChild(pool[i]); pool.length = 0; } };
+        };
+        const prevDoc = globalThis.document;
+        globalThis.document = { createElement: (t) => mkVEl(t) };
+        try {
+            const mkSeries = (n) => { const s = new Array(n); for (let i = 0; i < n; i++) s[i] = { name: 'S' + i, data: [{ x: 0, y: i }, { x: 1, y: i + 1 }] }; return s; };
+            // Vertical control adapter: A18's exact windowing shape.
+            const fakeVVirtualizer = (host, opts) => {
+                const count = opts.count, itemHeight = opts.itemHeight;
+                const full = Math.ceil(opts.height / itemHeight) + opts.overscan * 2;
+                const win = count < full ? count : full;
+                const pool = [];
+                for (let i = 0; i < win; i++) { const r = document.createElement('div'); host.appendChild(r); pool.push(r); }
+                let firstBound = -1;
+                const paint = () => {
+                    let first = (host.scrollTop | 0) / itemHeight | 0;
+                    const maxFirst = count - win < 0 ? 0 : count - win;
+                    if (first > maxFirst) first = maxFirst;
+                    if (first < 0) first = 0;
+                    if (first === firstBound) return;
+                    firstBound = first;
+                    for (let s = 0; s < pool.length; s++) { const idx = first + s; if (idx < count) opts.renderRow(pool[s], idx); }
+                };
+                paint();
+                const onScroll = () => paint();
+                host.addEventListener('scroll', onScroll);
+                return { dispose() { host.removeEventListener('scroll', onScroll); for (let i = 0; i < pool.length; i++) if (pool[i].parentNode) pool[i].parentNode.removeChild(pool[i]); pool.length = 0; } };
+            };
+            const mk = (horizontal) => {
+                const cfg = { series: mkSeries(200), x: 'x', y: 'y', width: 800, height: 400, crosshair: false, tooltip: false, schedule: (fn) => fn() };
+                cfg.legend = horizontal
+                    ? { position: 'top', container: mkVEl('div'), virtualize: fakeHVirtualizer, width: 240, itemWidth: 24, overscan: 2 }
+                    : { position: 'right', container: mkVEl('div'), virtualize: fakeVVirtualizer, height: 240, itemHeight: 24, overscan: 2 };
+                const c = createLineChart(cfg);
+                const cv = createEventCanvas(800, 400);
+                c.mount(cv);
+                quietCanvas(cv);
+                return c;
+            };
+            const vc = mk(true);
+            const ctrl = mk(false);
+            const host = vc.legend;
+            const hostC = ctrl.legend;
+            // Sanity: bounded window (ceil(240/24) + 2*2 = 14) -- the SAME pool size
+            // as A18's vertical baseline, so the differential gate compares the
+            // horizontal BRANCH, not a larger window.
+            let bound = 0;
+            for (let i = 0; i < host.childNodes.length; i++) { const n = host.childNodes[i]; if (n.dataset && n.dataset.lcIdx != null) bound++; }
+            check(bound >= 10 && bound <= 14,
+                () => `A21: expected a bounded 10..14-row window, got ${bound}`);
+            const maxScroll = 200 * 24 - 240; // 4560px of scrollable range (matches A18)
+            const before = graphSnapshot();
+            const hotV = (i) => { host.scrollLeft = (i * 24) % maxScroll; host._fire('scroll'); vc.redraw(); };
+            const hotC = (i) => { hostC.scrollTop = (i * 24) % maxScroll; hostC._fire('scroll'); ctrl.redraw(); };
+            const gV = runOpsGate(hotV, { ops: 50000, warmup: 500 });
+            const gC = runOpsGate(hotC, { ops: 50000, warmup: 500 });
+            const after = graphSnapshot();
+            if (!gV.report.ok) die(allocFailMsg('A21.hlegend-scroll', gV.report, gV.summary));
+            check(after.nodes - before.nodes === 0,
+                () => `A21: ${after.nodes - before.nodes} new signal-graph nodes during the horizontal scroll storm (expected 0)`);
+            check(gV.bytesPerOp <= 1.5,
+                () => `A21: horizontal scroll storm allocated ${gV.bytesPerOp.toFixed(3)} B/op > 1.5`);
+            check(Math.abs(gV.bytesPerOp - gC.bytesPerOp) <= 0.5,
+                () => `A21: horizontal storm ${gV.bytesPerOp.toFixed(3)} B/op vs vertical storm ${gC.bytesPerOp.toFixed(3)} B/op (branch parity delta > 0.5)`);
+            vc.destroy();
+            ctrl.destroy();
+        } finally {
+            globalThis.document = prevDoc;
+        }
     }
 }

@@ -317,10 +317,16 @@ export type LegendPosition = 'top' | 'bottom' | 'left' | 'right';
 export interface LegendVirtualizerOpts {
     /** Total series count (>= 0); equals the normalized series length. */
     count: number;
-    /** Fixed row height in CSS px (> 0 integer). */
-    itemHeight: number;
-    /** Viewport height in CSS px (> 0 integer). */
-    height: number;
+    /** Fixed row height in CSS px (> 0 integer). Present for left/right legends. */
+    itemHeight?: number;
+    /** Viewport height in CSS px (> 0 integer). Present for left/right legends. */
+    height?: number;
+    /** Fixed row width in CSS px (> 0 integer). Present for top/bottom legends (v1.15.0). */
+    itemWidth?: number;
+    /** Viewport width in CSS px (> 0 integer). Present for top/bottom legends (v1.15.0). */
+    width?: number;
+    /** True for a top/bottom (horizontal-scrolling) legend; absent for left/right (v1.15.0). */
+    horizontal?: boolean;
     /** Extra rows rendered beyond the viewport on each edge (>= 0 integer). */
     overscan: number;
     /**
@@ -341,8 +347,10 @@ export interface LegendVirtualHandle {
  * User-supplied windowing adapter for a very tall legend. lite-charts NEVER
  * imports a windowing library; you pass the factory. It receives the scroll
  * host and the options above, and must return a `{ dispose }` handle (else
- * mount throws). Requires `position: 'left' | 'right'` and a numeric
- * `legend.height`.
+ * mount throws). For `position: 'left' | 'right'` supply a numeric
+ * `legend.height` (+ optional `itemHeight`); for `position: 'top' | 'bottom'`
+ * supply numeric `legend.width` and `legend.itemWidth` -- the adapter then
+ * receives `horizontal: true` and scrolls along X (v1.15.0).
  */
 export type LegendVirtualizer = (
     host: HTMLElement,
@@ -360,15 +368,21 @@ export interface LegendConfig {
     /**
      * Opt-in legend virtualization (v1.12.0). A factory that windows the row
      * list, so a legend with hundreds of series keeps only a bounded set of
-     * rows in layout. `false` (or absent) uses the eager path. Requires
-     * `position: 'left' | 'right'` and a numeric `height`. All invalid config
-     * throws at construction.
+     * rows in layout. `false` (or absent) uses the eager path. left/right
+     * virtualize vertically (`height` + optional `itemHeight`); top/bottom
+     * virtualize horizontally (`width` + `itemWidth`, v1.15.0). The size keys
+     * are orientation-EXCLUSIVE -- supplying the wrong-axis key throws. All
+     * invalid config throws at construction.
      */
     virtualize?: LegendVirtualizer | false;
-    /** Scroll-viewport height in CSS px. REQUIRED when `virtualize` is set. */
+    /** Scroll-viewport height in CSS px. REQUIRED for a virtualized left/right legend. */
     height?: number;
-    /** Fixed row height in CSS px. Default 28. Only used when virtualized. */
+    /** Fixed row height in CSS px. Default 28. Only used for a virtualized left/right legend. */
     itemHeight?: number;
+    /** Scroll-viewport width in CSS px. REQUIRED for a virtualized top/bottom legend (v1.15.0). */
+    width?: number;
+    /** Fixed row width in CSS px. REQUIRED for a virtualized top/bottom legend (v1.15.0). */
+    itemWidth?: number;
     /** Rows rendered beyond each viewport edge. Default 2. Only used when virtualized. */
     overscan?: number;
 }
@@ -628,18 +642,22 @@ export interface TimeShadingConfig {
      */
     sessionFill?: string;
     /**
-     * v1.13.0 -- holiday calendar: epoch-ms timestamps, each truncated to its UTC
-     * day start. The whole UTC day is treated as closed and FUSES with adjacent gap
-     * bands into one range (the day before a holiday's close runs into the day
-     * after's open as a single band). There is no per-holiday fill -- distinct
-     * fills cannot fuse, so use a user annotation for that. Present without
-     * `sessions`, a full-day Mon-Fri calendar is synthesized (complement = weekends
-     * + holidays). Validated at construction: non-empty array of integer epoch ms;
-     * `null`, NaN, non-integers, and Date objects throw -- pass `Date.UTC(...)`
-     * values. Warning: `new Date(y, m, d).getTime()` is LOCAL midnight and can land
-     * on the wrong UTC day.
+     * v1.13.0 -- holiday calendar. Each entry is EITHER a number (epoch-ms
+     * timestamp, whole UTC day closed) OR (v1.15.0) an object
+     * `{ ts, closeMinutes }` describing an EARLY CLOSE: `ts` truncates to its UTC
+     * day and every session that day is clamped to close at `closeMinutes`
+     * (1..1439) instead of its normal close. Either form's trailing closed time
+     * FUSES with adjacent gap bands into one range. There is no per-holiday fill
+     * -- distinct fills cannot fuse, so use a user annotation for that. Present
+     * without `sessions`, a full-day Mon-Fri calendar is synthesized (complement =
+     * weekends + holidays). Validated at construction: non-empty array; `null`,
+     * NaN, non-integers, and Date objects throw -- pass `Date.UTC(...)` values.
+     * An early close on a day with no open session, on a day carrying an overnight
+     * evening session, or a duplicate UTC day (either form) throws. Warning:
+     * `new Date(y, m, d).getTime()` is LOCAL midnight and can land on the wrong
+     * UTC day.
      */
-    holidays?: number[];
+    holidays?: (number | { ts: number; closeMinutes: number })[];
 }
 
 export interface TimeLineChartConfig extends LineChartConfig {
