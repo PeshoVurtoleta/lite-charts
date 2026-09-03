@@ -5,7 +5,33 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.13.0 (current)
+## v1.14.0 (current)
+
+Fat hover + injected Voronoi cell layer on `createScatterChart` (brief #10,
+the lite-delaunay v1.2.0 trigger -- consumer contract carried in
+`briefs/voronoi-cells.md`, executed against the published package).
+
+- **Fat hover.** `hitTolerance: 'nearest'`: snap to the closest point from
+  anywhere in the plot, capped per-query at the plot diagonal squared
+  (finite -- always terminates an injected index's grid walk). Linear and
+  indexed hit paths agree; numbers keep the disc behavior; other strings
+  throw at construction.
+- **Cell layer.** `cells: { index, colorKey?, fillOpacity?, stroke?,
+  strokeWidth? }`: pixel-space bbox-clipped Voronoi polygons from an
+  injected `CellIndexFactory` (optional peer `@zakkster/lite-delaunay`
+  `^1.2.0` ships `createCellIndex`). Rebuilt COLD at a new `postProject`
+  renderer seam (after projection -- extract-time would index the previous
+  frame's pixels); drawn under the markers at 0 B/frame; hover-cell
+  highlight rides the crosshair. Degenerate -> markers only; overflow /
+  index faults fail closed (mount-time door, later runs skip cells).
+- **Hardening.** Construction throws now fire BEFORE any owned signal is
+  allocated (initOpts hoisted; also covers the horizontal+log door).
+- 463 tests (10 new incl. an independent half-plane oracle + plot-tiling
+  invariant; five mechanisms reversion-proven) + torture A20 (view storm:
+  one rebuild per scale change, 0 new graph nodes, redraw within 2 B/op of
+  a no-cells control, vs the REAL published createCellIndex).
+
+## v1.13.0
 
 Overnight sessions + holiday calendar. Both ride the v1.11.0 session
 machinery; a chart using neither is band-for-band unchanged (asserted).

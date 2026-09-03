@@ -10,7 +10,42 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.13.0 (current): overnight sessions + holiday calendar for
+> v1.14.0 (current): fat hover + injected Voronoi cell layer for createScatterChart
+> (a scatter using neither is byte-identical; both gate behind their opts).
+> hitTolerance: 'nearest' (scatter only) snaps the hover to the closest point
+> regardless of distance -- the whole plot is the point's Voronoi hit region,
+> capped per-query at the plot diagonal squared (finite, always terminates the
+> spatial index's grid walk). Works on the linear AND indexed paths; numbers
+> keep today's disc; any other string throws at construction. cells: { index,
+> colorKey?, fillOpacity?, stroke?, strokeWidth? } tessellates the primary
+> series -- each point owns a bbox-clipped Voronoi polygon drawn UNDER the
+> markers inside the plot clip, with a free hover-cell highlight off the
+> crosshair snapIdx. Geometry comes from an injected CellIndexFactory (an
+> optional peer such as lite-delaunay's createCellIndex(N); Charts.js imports
+> NO implementation, mirroring the spatialIndex injection contract). Cells are
+> PIXEL-space, rebuilt cold with the projection through the same data/scale
+> lifecycle as the spatial index (anisotropic pan/zoom never serves a stale or
+> affine-wrong cell); the per-frame draw walks prebuilt packed arrays at 0 B.
+> Rebuild runs at a NEW postProject renderer seam (after projection, before
+> scaleVersion), not extract time (extract runs before pixels re-project).
+> Fail-closed: degenerate cloud (collinear/coincident) draws markers, no cells;
+> a cell overflowing the caller-owned scratch throws out of cell() in the cold
+> refresh only, caught + surfaced at mount, never mid-paint. Primary series
+> only (D6); bubble is out. peer @zakkster/lite-delaunay bumped to ^1.2.0
+> (stays optional). SVG export parity via the annotation-layer clip idiom.
+> Construction throws (bad cells/hitTolerance) fire BEFORE any owned signal
+> alloc (initOpts hoisted -- also hardens the horizontal+log door). 10 new
+> tests (453->463) incl. an independent half-plane oracle (per-cell vertex
+> sets + areas + an exact plot-tiling invariant), postProject freshness
+> (site-in-own-cell across zoom/data change), zero-node construction throws,
+> SVG parity, retention, source-scan confinement; five mechanisms proven by
+> reversion (nearest cap, postProject ordering, hover snapIdx, per-cell
+> beginPath, extract-time dispose). Torture A20: 208-write pan/zoom storm =
+> exactly one rebuild per scale change (209/208 builds/disposes, 0 new graph
+> nodes), cells redraw <=16 B/op maxMajor:0 within 2 B/op of no-cells,
+> 'nearest' hover within 2 B/op of numeric-tolerance, vs the REAL published
+> lite-delaunay createCellIndex end-to-end.
+> v1.13.0: overnight sessions + holiday calendar for
 > createTimeLineChart shading. shading.sessions now accepts closeMinutes <
 > openMinutes (overnight): the session splits at the UTC midnight seam into
 > an evening half [open, 1440] on the original day mask and a morning half

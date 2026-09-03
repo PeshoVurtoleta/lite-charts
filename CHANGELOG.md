@@ -5,6 +5,79 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] -- 2026-09
+
+Fat hover and an injected Voronoi cell (tessellation) layer for
+`createScatterChart`. A scatter using neither is byte-identical (both features
+gate behind their opts fields).
+
+### Added
+
+- **Fat hover.** `hitTolerance: 'nearest'` (scatter only) snaps the hover to
+  the closest point regardless of distance -- the whole plot becomes the
+  point's Voronoi hit region, ideal for sparse scatters. The query is capped
+  at the plot diagonal squared (a finite bound, re-read per query), so it is
+  semantically "everywhere" inside the plot yet always terminates the injected
+  spatial index's grid walk. Works identically on the linear and indexed
+  paths. Numbers keep today's disc behavior; any other string throws at
+  construction.
+- **Cell (Voronoi) layer.** `cells: { index, colorKey?, fillOpacity?, stroke?,
+  strokeWidth? }` on `createScatterChart`. Every primary-series point owns a
+  bbox-clipped Voronoi polygon, drawn UNDER the markers inside the plot clip,
+  with a free hover-cell highlight off the crosshair's `snapIdx`. The polygon
+  geometry comes from an injected `CellIndexFactory` (an optional peer such as
+  `@zakkster/lite-delaunay`'s `createCellIndex(N)`) -- lite-charts imports no
+  implementation, mirroring the `spatialIndex` injection contract. Cells are
+  PIXEL-space and rebuilt (cold) with the projection through the same
+  data/scale lifecycle as the spatial index, so anisotropic pan/zoom never
+  serves a stale or affine-wrong cell. The per-frame draw walks prebuilt
+  packed arrays at 0 B. SVG export parity via the annotation-layer clip idiom.
+
+### Changed
+
+- `@zakkster/lite-delaunay` peer bumped to `^1.2.0` (stays optional) -- the
+  version that ships `createCellIndex`.
+
+### Design
+
+- Cell geometry is rebuilt at a NEW `postProject` renderer seam (after the
+  projection loop, before `scaleVersion`), not at extract time: the extract
+  hook runs BEFORE pixels are re-projected, so it would index stale
+  coordinates. Dead for every other renderer, exactly like `postExtract`.
+- Fail closed: a degenerate cloud (collinear/coincident -> 0-vertex cells)
+  draws markers with no cells. A cell that overflows the caller-owned scratch
+  throws out of `cell()` during the cold refresh only; the refresh catches it,
+  zeroes the spans (markers draw), and surfaces the message at mount on the
+  first run (the `_logDomainError` fail-closed door), never mid-paint.
+- Primary series only (D6): a multi-series tessellation is ill-posed (whose
+  cell owns the pixel?). Bubble is out -- disc containment is the feature there.
+- A construction-time throw (bad `cells` or `hitTolerance`) now fires BEFORE
+  the auto-size signals are allocated: `renderer.initOpts` was hoisted above
+  the first owned `signal()`, so a rejected construction leaves zero reactive
+  nodes (this also hardens the pre-existing horizontal+log throw for free).
+
+### Coverage
+
+- 463 tests (453 -> 463): VC1-VC10 -- fat hover indexed/linear agreement +
+  numeric-tolerance control, cell geometry vs an independent half-plane
+  Sutherland-Hodgman oracle (per-cell vertex sets, areas, and an exact
+  plot-tiling invariant), degenerate fail-close, construction validation with
+  zero-node throws, hover-highlight cell identity, SVG parity (clipPath
+  isolated from content paths), 50x mount/destroy retention, postProject
+  freshness (site-in-own-cell containment across zoom + data change), index
+  fault doors (mount-time throw + later-run cells-skip), and source-scan
+  injection confinement. Five mechanisms proven load-bearing by measured
+  reversion: the nearest-cap ternary, the postProject-after-projection
+  ordering, the hover snapIdx coupling, the per-cell `beginPath()` (the
+  post-clip one is defensive -- proven NOT load-bearing and its comment
+  corrected), and the extract-time cell-index dispose.
+- Torture A20: 2000-point tessellation storm against the real
+  `@zakkster/lite-delaunay` `createCellIndex` -- 208-write pan/zoom storm
+  rebuilds exactly once per scale change (209 builds / 208 disposes, zero new
+  signal-graph nodes), cells redraw inside the standard <=16 B/op budget with
+  maxMajor:0 and within 2 B/op of a no-cells control, and `'nearest'` hover
+  within 2 B/op of a numeric-tolerance control over the same cursor storm.
+
 ## [1.13.0] -- 2026-09
 
 Overnight sessions and a holiday calendar for `createTimeLineChart` shading.

@@ -26,8 +26,11 @@
  * plain `npm run torture` already proves the gate bites.
  */
 
-import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, createBarChart } from '../../Charts.js';
+import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, createBarChart, createScatterChart } from '../../Charts.js';
 import { signal } from '@zakkster/lite-signal';
+// v1.14.0: the REAL published cell index (devDep) -- A20 gates the injected
+// tessellation end-to-end, not against a mock.
+import { createCellIndex } from '@zakkster/lite-delaunay';
 import {
     createEventCanvas, quietCanvas, fireShared, runOpsGate, allocFailMsg,
     installCenterLabelDOM, graphSnapshot, BREAK, check, die,
@@ -642,5 +645,100 @@ export function run() {
         check(gR.bytesPerOp <= 16.0,
             () => `A19: overnight+holiday redraw allocated ${gR.bytesPerOp.toFixed(3)} B/op > 16`);
         c.destroy();
+    }
+
+    // --- 14. voronoi cells + fat hover storm (A20, v1.14.0) --------------------
+    // v1.14.0 adds an injected cell layer (cells.index -> bbox-clipped Voronoi
+    // polygons rebuilt COLD in the postProject seam on every data/scale change)
+    // and hitTolerance:'nearest' (a per-query plot-diagonal cap, pure arithmetic
+    // on the existing hit path). Structural claims: (1) a pan/zoom storm rebuilds
+    // the index exactly once per scale change -- never per frame -- and adds zero
+    // signal-graph nodes; (2) the per-frame cell DRAW walks prebuilt packed
+    // arrays: redraw with 2000 live cells stays inside the standard <=16 B/op
+    // budget with maxMajor:0, within 2 B/op of a no-cells control; (3) fat hover
+    // adds nothing to the hit path (the pre-existing pointer-rate hit literal is
+    // the accepted cost, identical under 'nearest' and numeric tolerance).
+    {
+        const N = 2000;
+        const xs = new Float32Array(N), ys = new Float32Array(N);
+        let seed = 1234567;
+        const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+        for (let i = 0; i < N; i++) { xs[i] = rnd() * 1000; ys[i] = rnd() * 500; }
+        let builds = 0, disposes = 0;
+        const inner = createCellIndex(N);
+        const counting = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                cell: (i, a, b, c2, d, o) => h.cell(i, a, b, c2, d, o),
+                dispose() { disposes++; h.dispose(); },
+            };
+        };
+        const mkScatter = (cells) => {
+            const c = createScatterChart({
+                data: { xs, ys },
+                zoom: true,
+                hitTolerance: 'nearest',
+                ...(cells ? { cells: { index: counting, fillOpacity: 0.3 } } : {}),
+                width: 800, height: 400, schedule: (fn) => fn(),
+            });
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return { c, cv };
+        };
+        const { c } = mkScatter(true);
+        check(builds === 1, () => `A20: expected 1 index build at mount, got ${builds}`);
+        // Pan/zoom storm: 200 alternating view writes. Every write re-runs the
+        // extract/project effect -> dispose + rebuild (cold), but must register
+        // ZERO new signal-graph nodes once warmed.
+        const vA = { xMin: 100, xMax: 900, yMin: null, yMax: null };
+        const vB = { xMin: 50, xMax: 950, yMin: null, yMax: null };
+        for (let i = 0; i < 8; i++) c.setView(i & 1 ? vA : vB);
+        const before = graphSnapshot();
+        for (let i = 0; i < 200; i++) c.setView(i & 1 ? vA : vB);
+        const after = graphSnapshot();
+        check(after.nodes - before.nodes === 0,
+            () => `A20: ${after.nodes - before.nodes} new signal-graph nodes across the view storm (expected 0)`);
+        check(builds === 209 && disposes === 208,
+            () => `A20: expected 209 builds / 208 disposes after 208 view writes, got ${builds}/${disposes}`);
+        // Per-frame draw: 2000 live cells, prebuilt geometry only. Standard
+        // redraw budget; the index must NOT rebuild at frame rate.
+        const buildsBeforeRedraw = builds;
+        const gCells = runOpsGate(() => { c.redraw(); }, { ops: 4000, warmup: 300 });
+        if (!gCells.report.ok) die(allocFailMsg('A20.cells-redraw', gCells.report, gCells.summary));
+        check(gCells.bytesPerOp <= 16.0,
+            () => `A20: cells redraw allocated ${gCells.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(builds === buildsBeforeRedraw,
+            () => `A20: redraw storm rebuilt the index (${builds - buildsBeforeRedraw} extra builds -- must be scale-rate, not frame-rate)`);
+        // Control: identical chart, no cells. The cell layer's own draw cost
+        // must sit within 2 B/op of the bare scatter.
+        const { c: ctrl } = mkScatter(false);
+        const gCtrl = runOpsGate(() => { ctrl.redraw(); }, { ops: 4000, warmup: 300 });
+        if (!gCtrl.report.ok) die(allocFailMsg('A20.control-redraw', gCtrl.report, gCtrl.summary));
+        check(Math.abs(gCells.bytesPerOp - gCtrl.bytesPerOp) <= 2.0,
+            () => `A20: cells redraw ${gCells.bytesPerOp.toFixed(3)} B/op vs no-cells control ${gCtrl.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        // Fat hover: 'nearest' vs numeric tolerance over the same alternating
+        // cursor pair (both positions hit -- the pointer-rate hit literal is
+        // identical on both paths, so the DELTA isolates the 'nearest' cap).
+        const ctrlHit = createScatterChart({
+            data: { xs, ys }, zoom: true, hitTolerance: 1e6,
+            width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        const cvH = createEventCanvas(800, 400);
+        ctrlHit.mount(cvH);
+        quietCanvas(cvH);
+        const gHoverN = runOpsGate((i) => { c.moveCrosshair(i & 1 ? 300 : 500, i & 1 ? 100 : 300); },
+            { ops: 20000, warmup: 1000 });
+        if (!gHoverN.report.ok) die(allocFailMsg('A20.hover-nearest', gHoverN.report, gHoverN.summary));
+        const gHoverT = runOpsGate((i) => { ctrlHit.moveCrosshair(i & 1 ? 300 : 500, i & 1 ? 100 : 300); },
+            { ops: 20000, warmup: 1000 });
+        if (!gHoverT.report.ok) die(allocFailMsg('A20.hover-tolerance', gHoverT.report, gHoverT.summary));
+        check(Math.abs(gHoverN.bytesPerOp - gHoverT.bytesPerOp) <= 2.0,
+            () => `A20: 'nearest' hover ${gHoverN.bytesPerOp.toFixed(3)} B/op vs numeric-tolerance ${gHoverT.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        ctrlHit.destroy();
+        ctrl.destroy();
+        c.destroy();
+        check(disposes === builds, () => `A20: ${builds - disposes} cell index(es) never disposed`);
     }
 }

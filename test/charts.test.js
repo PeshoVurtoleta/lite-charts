@@ -31,6 +31,9 @@ import { signal, createRegistry, setDefaultRegistry, stats, effect } from '@zakk
 // runs every chart variant back-to-back. Bump to 32k for headroom.
 setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
 import { createLineChart, createTimeLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, _testHelpers } from '../Charts.js';
+// v1.14.0: the REAL published cell index (devDep) -- the tessellation tests run
+// end-to-end against the actual consumer contract, not a mock.
+import { createCellIndex } from '@zakkster/lite-delaunay';
 import {
     createMockCanvas,
     countCalls,
@@ -8987,5 +8990,456 @@ describe('v1.12.0 -- legend virtualization', () => {
                 assert.equal(disposed, 1, 'adapter disposed once at n=' + n);
             }
         });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.14.0 -- fat hover (hitTolerance:'nearest') + injected Voronoi cell layer
+// ---------------------------------------------------------------------------
+
+describe('v1.14.0 -- fat hover + voronoi cell layer', () => {
+    // Independent geometric oracle: clip the plot rect by the perpendicular
+    // bisector half-plane of (site i, site j) for every j != i. This is the
+    // definition of a bbox-clipped Voronoi cell, computed with none of the
+    // library's machinery -- Sutherland-Hodgman on a flat [x0,y0,x1,y1,...]
+    // polygon. Test-side allocation is fine.
+    const bisectorClip = (poly, ax, ay, bx, by) => {
+        const mx = (ax + bx) / 2, my = (ay + by) / 2;
+        const dx = bx - ax, dy = by - ay;
+        const out = [];
+        const nP = poly.length / 2;
+        for (let i = 0; i < nP; i++) {
+            const x1 = poly[2 * i], y1 = poly[2 * i + 1];
+            const j = (i + 1) % nP;
+            const x2 = poly[2 * j], y2 = poly[2 * j + 1];
+            const d1 = (x1 - mx) * dx + (y1 - my) * dy;
+            const d2 = (x2 - mx) * dx + (y2 - my) * dy;
+            if (d1 <= 0) out.push(x1, y1);
+            if ((d1 < 0) !== (d2 < 0)) {
+                const t = d1 / (d1 - d2);
+                out.push(x1 + t * (x2 - x1), y1 + t * (y2 - y1));
+            }
+        }
+        return out;
+    };
+    const oracleCell = (pxs, pys, n, i, pb) => {
+        let poly = [pb.x, pb.y, pb.x + pb.w, pb.y, pb.x + pb.w, pb.y + pb.h, pb.x, pb.y + pb.h];
+        for (let j = 0; j < n; j++) {
+            if (j === i) continue;
+            poly = bisectorClip(poly, pxs[i], pys[i], pxs[j], pys[j]);
+            if (poly.length === 0) break;
+        }
+        return poly;
+    };
+    const shoelace = (flat, n) => {
+        let a = 0;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            a += flat[2 * i] * flat[2 * j + 1] - flat[2 * j] * flat[2 * i + 1];
+        }
+        return Math.abs(a) / 2;
+    };
+    const pointInPoly = (flat, n, px, py) => {
+        let inside = false;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            const xi = flat[2 * i], yi = flat[2 * i + 1];
+            const xj = flat[2 * j], yj = flat[2 * j + 1];
+            if (((yi > py) !== (yj > py)) &&
+                (px < ((xj - xi) * (py - yi)) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    };
+    // Linear-scan mock spatial index (contract-shaped) for forcing the indexed
+    // hit path deterministically -- same as the v1.2.0 scatter tests.
+    const makeMockSpatialIndex = (pxs, pys, n) => ({
+        findNearest(qx, qy, k, maxDsq, outIdx, outDist) {
+            let bI = -1, bD = maxDsq;
+            for (let i = 0; i < n; i++) {
+                const dx = qx - pxs[i], dy = qy - pys[i];
+                const d = dx * dx + dy * dy;
+                if (d < bD) { bD = d; bI = i; }
+            }
+            if (bI < 0) return 0;
+            outIdx[0] = bI; outDist[0] = bD;
+            return 1;
+        },
+        dispose() {},
+    });
+    // The 4-corners+center fixture: DATA-space square + center. The projection
+    // is anisotropic (x and y pixel scales differ), which is exactly why cells
+    // must be computed in PIXEL space (D3) -- the oracle runs on the projected
+    // pxs/pys, so it is exact regardless of the layout numbers.
+    const squareData = [
+        { x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 },
+        { x: 50, y: 50 },
+    ];
+
+    it('VC1: fat hover snaps to the nearest point from anywhere -- indexed and linear paths agree', () => {
+        const mk = (extra) => {
+            const chart = createScatterChart({
+                data: [{ x: 0, y: 0 }, { x: 1, y: 0.5 }, { x: 2, y: 1 }, { x: 3, y: 0.2 }, { x: 4, y: 0.8 }],
+                schedule: (fn) => fn(),
+                ...extra,
+            });
+            chart.mount(createMockCanvas(800, 400));
+            return chart;
+        };
+        const linear = mk({ hitTolerance: 'nearest' });
+        const indexed = mk({ hitTolerance: 'nearest', spatialIndex: makeMockSpatialIndex, spatialIndexThreshold: 1 });
+        const pb = linear._internal.plotBoundsBox;
+        // Cursor at the top-left plot corner, hundreds of px from every point.
+        const cx = pb.x + 2, cy = pb.y + 2;
+        // Expected: nearest projected point, computed independently.
+        const st = linear._internal.seriesStates[0];
+        let want = -1, wantD = Infinity;
+        for (let i = 0; i < st.n; i++) {
+            const dx = cx - st.pxs[i], dy = cy - st.pys[i];
+            const d = dx * dx + dy * dy;
+            if (d < wantD) { wantD = d; want = i; }
+        }
+        assert.ok(wantD > 64, 'fixture sanity: cursor is far outside the default 8px disc');
+        linear.moveCrosshair(cx, cy);
+        indexed.moveCrosshair(cx, cy);
+        const hl = linear.crosshair.peek();
+        const hi = indexed.crosshair.peek();
+        assert.equal(hl.visible, true, 'linear path snaps');
+        assert.equal(hi.visible, true, 'indexed path snaps');
+        assert.equal(hl.snapIdx, want, 'linear path snaps to the true nearest');
+        assert.equal(hi.snapIdx, want, 'indexed path agrees');
+        assert.equal(hl.snapPixelX, hi.snapPixelX, 'identical snap pixel');
+        linear.unmount();
+        indexed.unmount();
+        // Control: the same far cursor with a numeric tolerance misses on BOTH paths.
+        const cl = mk({ hitTolerance: 8 });
+        const ci = mk({ hitTolerance: 8, spatialIndex: makeMockSpatialIndex, spatialIndexThreshold: 1 });
+        cl.moveCrosshair(cx, cy);
+        ci.moveCrosshair(cx, cy);
+        assert.equal(cl.crosshair.peek().visible, false, 'numeric tolerance still misses (linear)');
+        assert.equal(ci.crosshair.peek().visible, false, 'numeric tolerance still misses (indexed)');
+        cl.unmount();
+        ci.unmount();
+    });
+
+    it('VC2: cell geometry matches the half-plane oracle and tiles the plot rect exactly', () => {
+        const chart = createScatterChart({
+            data: squareData,
+            cells: { index: createCellIndex(16) },
+            schedule: (fn) => fn(),
+        });
+        chart.mount(createMockCanvas(800, 400));
+        const st = chart._internal.seriesStates[0];
+        const pb = chart._internal.plotBoundsBox;
+        assert.equal(st.cellCount, 5, 'five cells');
+        const starts = st.cellStart;
+        const xy = st.cellXY;
+        let areaSum = 0;
+        for (let i = 0; i < 5; i++) {
+            const nV = (starts[i + 1] - starts[i]) / 2;
+            const oracle = oracleCell(st.pxs, st.pys, 5, i, pb);
+            const oV = oracle.length / 2;
+            assert.equal(nV, oV, `cell ${i}: vertex count matches oracle (${oV})`);
+            const got = xy.subarray(starts[i], starts[i + 1]);
+            const aGot = shoelace(got, nV);
+            const aWant = shoelace(oracle, oV);
+            assert.ok(Math.abs(aGot - aWant) <= Math.max(1e-3 * aWant, 0.01),
+                `cell ${i}: area ${aGot} vs oracle ${aWant}`);
+            // Every library vertex lies on the oracle polygon's vertex set.
+            for (let k = 0; k < nV; k++) {
+                let hit = false;
+                for (let m = 0; m < oV; m++) {
+                    if (Math.abs(got[2 * k] - oracle[2 * m]) < 0.05 &&
+                        Math.abs(got[2 * k + 1] - oracle[2 * m + 1]) < 0.05) { hit = true; break; }
+                }
+                assert.ok(hit, `cell ${i} vertex ${k} (${got[2 * k]},${got[2 * k + 1]}) is an oracle vertex`);
+            }
+            areaSum += aGot;
+        }
+        // The tiling invariant: bbox-clipped cells of every site partition the
+        // plot rect. Anything data-space, stale, or unclipped breaks this.
+        const plotArea = pb.w * pb.h;
+        assert.ok(Math.abs(areaSum - plotArea) <= 1e-4 * plotArea,
+            `cells tile the plot: ${areaSum} vs ${plotArea}`);
+        // NOTE the center cell is a HEXAGON here, not the data-space diamond:
+        // the projection is anisotropic and Voronoi is not affine-invariant --
+        // which is exactly why D3 computes cells in pixel space. The oracle
+        // (same pixel sites) proves the pixel-space cells are the right ones.
+        assert.equal((starts[5] - starts[4]) / 2, 6, 'center cell is the pixel-space hexagon');
+        chart.destroy();
+    });
+
+    it('VC3: degenerate input draws markers with NO cells -- fail closed', () => {
+        for (const data of [
+            [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }, { x: 4, y: 4 }], // collinear
+            [{ x: 1, y: 1 }, { x: 2, y: 2 }],                                                  // n = 2
+        ]) {
+            const canvas = createMockCanvas(800, 400);
+            const chart = createScatterChart({
+                data,
+                cells: { index: createCellIndex(16) },
+                schedule: (fn) => fn(),
+            });
+            chart.mount(canvas);
+            const st = chart._internal.seriesStates[0];
+            for (let i = 0; i < st.n; i++) {
+                assert.equal(st.cellStart[i + 1] - st.cellStart[i], 0,
+                    `degenerate cell ${i} is a zero-length span`);
+            }
+            const ctx = canvas.getContext('2d');
+            ctx.calls.length = 0;
+            chart.redraw();
+            assert.equal(countCalls(ctx, 'arc'), data.length, 'every marker still draws');
+            assert.equal(countCalls(ctx, 'fill'), data.length, 'marker fills only -- zero cell fills');
+            chart.destroy();
+        }
+    });
+
+    it('VC4: validation matrix throws at construction with nothing attached', () => {
+        const data = [{ x: 1, y: 1 }];
+        for (const [bad, re] of [
+            [{ cells: {} }, /cells\.index/],
+            [{ cells: { index: 'x' } }, /cells\.index/],
+            [{ cells: 7 }, /cells/],
+            [{ hitTolerance: 'near' }, /nearest/],
+        ]) {
+            const before = stats().activeNodes;
+            assert.throws(() => createScatterChart({ data, schedule: (fn) => fn(), ...bad }), re);
+            assert.equal(stats().activeNodes - before, 0,
+                'construction throw leaves zero reactive nodes: ' + JSON.stringify(bad));
+        }
+        // The one legal string.
+        const ok = createScatterChart({ data, hitTolerance: 'nearest', schedule: (fn) => fn() });
+        ok.mount(createMockCanvas(800, 400));
+        ok.destroy();
+    });
+
+    it('VC5: hover highlight strokes exactly the snapped cell', () => {
+        const canvas = createMockCanvas(800, 400);
+        const chart = createScatterChart({
+            data: squareData,
+            hitTolerance: 'nearest',
+            cells: { index: createCellIndex(16) },
+            schedule: (fn) => fn(),
+        });
+        chart.mount(canvas);
+        const st = chart._internal.seriesStates[0];
+        // Hover the CENTER point's own pixel -> snapIdx 4.
+        chart.moveCrosshair(st.pxs[4], st.pys[4]);
+        assert.equal(chart.crosshair.peek().snapIdx, 4, 'crosshair snapped to the center site');
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        // The hover pass is the only lineWidth=2 writer in this chart config
+        // (cells.strokeWidth defaults 0, scatter stroke defaults null).
+        const calls = ctx.calls;
+        let hoverStrokes = 0;
+        let moveX = NaN, moveY = NaN;
+        for (let i = 0; i < calls.length; i++) {
+            if (calls[i][0] === 'set:lineWidth' && calls[i][1][0] === 2) {
+                hoverStrokes++;
+                // The moveTo that opens the highlighted polygon precedes the
+                // style writes: scan back for it.
+                for (let k = i - 1; k >= 0; k--) {
+                    if (calls[k][0] === 'moveTo') { moveX = calls[k][1][0]; moveY = calls[k][1][1]; break; }
+                }
+            }
+        }
+        assert.equal(hoverStrokes, 1, 'exactly one hover-highlighted cell');
+        assert.ok(Math.abs(moveX - st.cellXY[st.cellStart[4]]) < 1e-3 &&
+                  Math.abs(moveY - st.cellXY[st.cellStart[4] + 1]) < 1e-3,
+            'the highlighted polygon IS the snapped cell (its first vertex opens the path)');
+        chart.destroy();
+    });
+
+    it('VC6: exportSVG emits one closed path per cell -- clip does not leak into the fills', () => {
+        const mk = (cells) => {
+            const chart = createScatterChart({
+                data: squareData,
+                ...(cells ? { cells: { index: createCellIndex(16) } } : {}),
+                schedule: (fn) => fn(),
+            });
+            chart.mount(createMockCanvas(800, 400));
+            chart.hideCrosshair();
+            const svg = chart.exportSVG();
+            chart.destroy();
+            return svg;
+        };
+        // Count CONTENT paths only: clip-definition rects live inside
+        // <clipPath> blocks (the cell layer adds one of its own) -- strip them
+        // so the count isolates the painted cell polygons.
+        const zPaths = (svg) => [...svg.replace(/<clipPath[\s\S]*?<\/clipPath>/g, '')
+            .matchAll(/<path\b[^>]*\bd="([^"]*Z\s*)"/g)].map((m) => m[1]);
+        const base = zPaths(mk(false));
+        const withCells = zPaths(mk(true));
+        assert.equal(withCells.length - base.length, 5, 'exactly five new closed paths -- the cells');
+        // Each cell path is ONE closed polygon: a single M, L segments, no
+        // rect-shorthand commands. A clip rect leaking into the first fill
+        // (the beginPath-after-clip caveat) would violate this.
+        const newPaths = withCells.filter((d) => !base.includes(d));
+        for (const d of newPaths) {
+            assert.equal((d.match(/M/g) || []).length, 1, 'single subpath per cell: ' + d.slice(0, 60));
+            assert.ok(!/[hvHV]/.test(d), 'no rect-shorthand leakage: ' + d.slice(0, 60));
+        }
+        // Base scatter content is arcs (markers) -- ZERO closed polygons -- so
+        // the five cells are the ONLY closed content paths in the export.
+        assert.equal(base.length, 0, 'no closed content paths without cells');
+        assert.equal(withCells.length, 5, 'the cells are the only closed content paths');
+    });
+
+    it('VC7: 50x mount/destroy with cells retains nothing', () => {
+        let builds = 0, disposes = 0;
+        const inner = createCellIndex(16);
+        const counting = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                cell: (i, a, b, c, d, o) => h.cell(i, a, b, c, d, o),
+                dispose() { disposes++; h.dispose(); },
+            };
+        };
+        const before = stats().activeNodes;
+        for (let k = 0; k < 50; k++) {
+            const chart = createScatterChart({
+                data: squareData,
+                hitTolerance: 'nearest',
+                cells: { index: counting },
+                schedule: (fn) => fn(),
+            });
+            chart.mount(createMockCanvas(800, 400));
+            chart.destroy();
+        }
+        assert.equal(stats().activeNodes - before, 0, 'zero reactive-node retention');
+        assert.equal(builds, 50, 'one index build per mount');
+        assert.equal(disposes, 50, 'every index disposed');
+    });
+
+    it('VC8: the index rebuilds from CURRENT pixels on every scale change (postProject ordering)', () => {
+        let builds = 0, disposes = 0;
+        const inner = createCellIndex(16);
+        const counting = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                cell: (i, a, b, c, d, o) => h.cell(i, a, b, c, d, o),
+                dispose() { disposes++; h.dispose(); },
+            };
+        };
+        const dataSig = signal(squareData);
+        const chart = createScatterChart({
+            data: dataSig,
+            zoom: true,
+            cells: { index: counting },
+            schedule: (fn) => fn(),
+        });
+        chart.mount(createMockCanvas(800, 400));
+        assert.equal(builds, 1, 'one build at mount');
+        const st = chart._internal.seriesStates[0];
+        const pb = chart._internal.plotBoundsBox;
+        // The freshness invariant, checked after every re-projection: each
+        // site sits INSIDE its own cell, and the cells tile the plot. A stale
+        // build (geometry from the previous frame's pixels) breaks containment
+        // the moment the view moves.
+        const checkFresh = (label) => {
+            let areaSum = 0;
+            for (let i = 0; i < st.n; i++) {
+                const s = st.cellStart[i], e = st.cellStart[i + 1];
+                const nV = (e - s) / 2;
+                if (nV === 0) continue;
+                areaSum += shoelace(st.cellXY.subarray(s, e), nV);
+                // Containment holds only for sites INSIDE the plot rect (a
+                // panned-out site's bbox-clipped cell cannot contain it), and
+                // sites on an exact plot edge are nudged toward the cell
+                // centroid to keep the ray-cast off the boundary. A STALE
+                // build (geometry from the previous frame's pixels) moves the
+                // whole polygon away from the site -- the nudge cannot save it.
+                const px = st.pxs[i], py = st.pys[i];
+                if (px < pb.x || px > pb.x + pb.w || py < pb.y || py > pb.y + pb.h) continue;
+                let cx = 0, cy = 0;
+                for (let k = 0; k < nV; k++) { cx += st.cellXY[s + 2 * k]; cy += st.cellXY[s + 2 * k + 1]; }
+                cx /= nV; cy /= nV;
+                const qx = px + (cx - px) * 1e-3, qy = py + (cy - py) * 1e-3;
+                assert.ok(pointInPoly(st.cellXY.subarray(s, e), nV, qx, qy),
+                    `${label}: site ${i} inside its own cell`);
+            }
+            const plotArea = pb.w * pb.h;
+            assert.ok(Math.abs(areaSum - plotArea) <= 1e-3 * plotArea,
+                `${label}: cells tile the plot (${areaSum} vs ${plotArea})`);
+        };
+        checkFresh('mount');
+        chart.setView({ xMin: 20, xMax: 90, yMin: null, yMax: null });
+        assert.equal(builds, 2, 'view change rebuilds the index');
+        assert.equal(disposes, 1, 'the stale index was disposed first');
+        checkFresh('zoomed');
+        dataSig.set(squareData.slice(0, 4)); // drop the center point
+        assert.equal(builds, 3, 'data change rebuilds');
+        assert.equal(st.cellCount, 4, 'four cells after the data change');
+        checkFresh('data-changed');
+        chart.destroy();
+        assert.equal(disposes, 3, 'all indices disposed at destroy');
+    });
+
+    it('VC9: index faults fail closed -- mount-time throws with nothing attached, later faults skip cells', () => {
+        const data = squareData;
+        // (a) A factory whose cell() throws on the FIRST refresh -> mount
+        // throws (the fail-closed door) and unwinds every disposer.
+        const before = stats().activeNodes;
+        const chart1 = createScatterChart({
+            data,
+            cells: { index: () => ({ cell() { throw new Error('boom-overflow'); }, dispose() {} }) },
+            schedule: (fn) => fn(),
+        });
+        assert.throws(() => chart1.mount(createMockCanvas(800, 400)), /boom-overflow/);
+        // The rejected mount unwinds its own effects; the chart object still
+        // holds its construction-time signals until destroy() -- the caller
+        // contract after a failed mount. destroy() must release everything.
+        chart1.destroy();
+        assert.equal(stats().activeNodes - before, 0, 'destroy after rejected mount leaks no reactive nodes');
+        // (b) A factory that goes bad on the SECOND build: mount succeeds,
+        // the later fault only zeroes the cells -- markers still draw, no throw.
+        let buildN = 0;
+        const inner = createCellIndex(16);
+        const flaky = (pxs, pys, n) => {
+            buildN++;
+            if (buildN >= 2) return { cell() { throw new Error('late-fault'); }, dispose() {} };
+            const h = inner(pxs, pys, n);
+            return { cell: (i, a, b, c, d, o) => h.cell(i, a, b, c, d, o), dispose() { h.dispose(); } };
+        };
+        const canvas = createMockCanvas(800, 400);
+        const chart2 = createScatterChart({
+            data, zoom: true,
+            cells: { index: flaky },
+            schedule: (fn) => fn(),
+        });
+        chart2.mount(canvas);
+        const st = chart2._internal.seriesStates[0];
+        assert.equal(st.cellCount, 5, 'first build healthy');
+        // A view write that keeps every site visible (panBounds 'data' clamps
+        // it back to the data domain) -- still re-runs the effect -> rebuild.
+        chart2.setView({ xMin: -1, xMax: 101, yMin: null, yMax: null }); // must NOT throw
+        assert.equal(st.cellCount, 0, 'faulted refresh zeroed the cells');
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart2.redraw();
+        assert.equal(countCalls(ctx, 'arc'), 5, 'markers still draw after the fault');
+        chart2.destroy();
+    });
+
+    it('VC10: injection confinement -- Charts.js never references the implementation', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        assert.equal((src.match(/delaunay/gi) || []).length, 0, 'zero "delaunay" occurrences');
+        assert.equal((src.match(/createCellIndex/g) || []).length, 0, 'zero "createCellIndex" occurrences');
+        // Exactly one definition + exactly one call/wiring site each --
+        // runtime-gated, not sprayed through the kernel. (Arrow definitions
+        // are `const name = (`, so `name(` matches CALL sites only.)
+        assert.equal((src.match(/const _normalizeCellsSpec =/g) || []).length, 1);
+        assert.equal((src.match(/_normalizeCellsSpec\(/g) || []).length, 1,
+            '_normalizeCellsSpec: exactly 1 call site');
+        assert.equal((src.match(/const _scatterPostProject =/g) || []).length, 1);
+        assert.equal((src.match(/_scatterPostProject\(/g) || []).length, 0,
+            '_scatterPostProject: never called directly (wired as a renderer property)');
+        assert.equal((src.match(/postProject: _scatterPostProject/g) || []).length, 1,
+            'exactly one renderer wires postProject');
+        assert.equal((src.match(/const makeScatterCellDrawFn =/g) || []).length, 1);
+        assert.equal((src.match(/makeScatterCellDrawFn\(/g) || []).length, 1,
+            'makeScatterCellDrawFn: exactly 1 call site');
     });
 });

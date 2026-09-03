@@ -1,10 +1,19 @@
 # Brief -- Voronoi cell layer: fat hover + tessellation (v1.14.0)
 
-Status: GROUNDED against v1.13.0 source (2026-09-02). THIS IS THE TRIGGER
-BRIEF for lite-delaunay v1.2.0 (the dormancy contract in briefs/README.md):
-section "The consumer contract" below is what the delaunay session builds
-against. Sequencing: delaunay v1.2.0 ships FIRST, then the charts session
-runs this brief against the published package.
+Status: EXECUTED 2026-09-03 (charts side release-pending as v1.14.0).
+lite-delaunay 1.2.0 published and consumed; full pipeline ran
+(planner -> coder -> reviewer APPROVED -> qa): VC1-VC10 + torture A20, five
+reversion proofs, 463/463. One planner correction to this brief's T3: the
+geometry refresh hooks a NEW postProject seam AFTER the projection loop, NOT
+_extractScatterData (extract runs before pixels re-project -- an extract-time
+build would index the previous frame). The dispose half stays at extract as
+written. Historical text below is the as-executed spec.
+
+Original status: GROUNDED against v1.13.0 source (2026-09-02). THIS IS THE
+TRIGGER BRIEF for lite-delaunay v1.2.0 (the dormancy contract in
+briefs/README.md): section "The consumer contract" below is what the delaunay
+session builds against. Sequencing: delaunay v1.2.0 ships FIRST, then the
+charts session runs this brief against the published package.
 
 ## Goal
 

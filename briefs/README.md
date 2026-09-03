@@ -4,7 +4,10 @@ Local working scratch. **Not shipped** -- `briefs/` is absent from
 package.json `files[]`, so nothing here reaches npm. Each brief is a
 self-contained plan for one future `cd LiteCharts && claude` session.
 
-Current shipped state: **v1.13.0** (overnight sessions via midnight-split
+Current shipped state: **v1.14.0** (fat hover + injected Voronoi cell layer
+on scatter, vs published lite-delaunay 1.2.0; postProject renderer seam;
+construction throws before any signal alloc). Prior: v1.13.0 (overnight
+sessions via midnight-split
 normalization + holiday calendar via UTC-day-skip, riding the v1.11.0
 session machinery; legend virtualization via caller-injected
 `virtualize` adapter; market-hours session shading v1.11.0; weekend shading
@@ -20,11 +23,12 @@ The forward plan in `../ROADMAP.md` points here.
 | ~~2~~ | ~~`annotation-layer.md`~~ | **SHIPPED v1.7.0** | M | Data-pinned line/range/point/text marks; zero per-frame alloc, fail-closed, exportSVG + theme aware. Range primitive now unblocks #4. Kept for reference. |
 | ~~3~~ | ~~`horizontal-bar-interactions.md`~~ | **SHIPPED v1.8.0** | M-L | pan/zoom/value-grid on horizontal bars; VALUE axis only, band pinned. brush + log-value still fail-closed (deferred). Kept for reference. |
 | ~~4~~ | ~~`time-series-variants.md`~~ | **SHIPPED v1.10.0** (weekend shading) | M | `createTimeLineChart` + weekend shading, riding the v1.7.0 annotation range primitive. Market-hours deferred to v1.10.x. Kept for reference. |
-| 6 | `lite-charts-gl-companion.md` | design, SEPARATE PACKAGE | XL | Own package; re-verify lite-gl 1.4.0 `PointHiSink` before planning. |
+| 6 | `lite-charts-gl-companion.md` | design, SEPARATE PACKAGE -- superseded in sequencing by #11 | XL | Own package. The 2026-07 alpha was built WITHOUT lite-gl (hand-rolled GLSL), contra this brief; #11 gates + publishes that alpha as 0.1.0 first, and THIS brief's on-lite-gl architecture (lite-gl is now 2.0.0 with the needed sinks) becomes the 1.0.0 decision gate recorded in the GL repo's ROADMAP. |
 | ~~new~~ | ~~horizontal-brush~~ | **SHIPPED v1.9.0** | S-M | Brush on a horizontal bar: value-range + band-set payload `{valueMin,valueMax,bandMin,bandMax,bands,ids}`, distinct from the vertical `{xMin,xMax,yMin,yMax,ids}`. Kept for reference. |
 | ~~7~~ | ~~`market-hours.md`~~ | **SHIPPED v1.11.0** | S-M | Caller-supplied session calendar, complement-of-open-union band generation over the v1.10.0 shading machinery (`_weekendBands` byte-identical). Overnight sessions still OUT (throw; v1.11.x candidate). Kept for reference. |
 | ~~5~~ | ~~`legend-virtualization.md`~~ | **SHIPPED v1.12.0** | S | Caller-supplied `virtualize` fn per the `spatialIndex` precedent (NO lite-virtual import), vertical-only, ONE shared visibility effect + ONE delegated click listener (the planner overturned the brief's bounded-pool-effects option -- a rebind inside a scroll callback cannot re-run an effect). Horizontal virtualization still throws (candidate). Kept for reference. |
-| 10 | `voronoi-cells.md` | feature, v1.14.0 -- TRIGGERS lite-delaunay v1.2.0 | M | Fat hover (`hitTolerance: 'nearest'` -- charts-side ONLY, rides the existing findNearest k=1) + injected Voronoi cell tessellation layer on scatter (`cells: { index }` per the spatialIndex precedent). Carries THE CONSUMER CONTRACT for delaunay's `createCellIndex` (bbox-clipped closed cells, pooled, zero-alloc). Sequencing: delaunay v1.2.0 ships first, then this. Grounded 2026-09-02. |
+| 11 | `charts-gl-rescue.md` | rescue, lite-charts-gl 0.1.0 -- EXECUTES IN LiteChartsGl | S-M | Gate the July orphan and publish: git init, reprove the 117 mock-GL tests, build the missing torture tiers (T0/T6/T7/T9 -- the one real engineering task; zero-GC claim currently UNPROVEN), fix the version lies (llms.txt "v1.0.0", stale sibling note, no VERSION const), blueprint README + missing ROADMAP.md + ASCII scrub. No feature work; the lite-gl-migration question is explicitly deferred to 1.0.0. Written 2026-09-03. |
+| 10 | `voronoi-cells.md` | feature, v1.14.0 -- EXECUTED 2026-09-03 (release-pending) | M | Fat hover (`hitTolerance: 'nearest'` -- charts-side ONLY, rides the existing findNearest k=1) + injected Voronoi cell tessellation layer on scatter (`cells: { index }` per the spatialIndex precedent). Carried THE CONSUMER CONTRACT for delaunay's `createCellIndex`; delaunay 1.2.0 published 2026-09-03, charts built + gated against it (463/463, A20, 5 reversion proofs). One as-executed deviation recorded in the brief: postProject seam, not extract-time. |
 | ~~9~~ | ~~`overnight-holidays.md`~~ | **SHIPPED v1.13.0** | S-M | Overnight sessions (midnight-split normalization -- the sweep survived byte-structurally unchanged, planner falsified the brief's synth site into _normalizeSessionSpec) + holiday calendar (UTC-day-skip, gap fusion). qa added the Saturday-wrap rotate fixture the planner fixtures missed; four reversions proven. 453 tests + A19. Kept for reference. |
 | ~~8~~ | ~~`demo-refresh.md`~~ | **DONE 2026-09-02** (demo-only, no release) | M | Demo v1.6.0 -> v1.12.0: annotations, time-series weekend+sessions shading, hbar pan/zoom/brush wired live, 200-series virtualized legend against REAL lite-virtual via a scope-bridge adapter. Found + fixed a README doc bug: the shipped adapter snippet called `mountList(host, opts)` but lite-virtual 1.1.0's real signature is `(host, scope, opts)` with viewport/render keys -- README now ships the working ~25-line bridge (rides the next release). Kept for reference. |
 
@@ -35,12 +39,15 @@ Remaining: item 6 (lite-charts-gl, a different package entirely) and the
 v1.13.x candidates in ../ROADMAP.md (horizontal legend virt -- charts-side
 only, lite-virtual already does horizontal:true; early-close calendar
 entries).
-Queued outside this repo: the lite-delaunay dormancy contract is now
-TRIGGERED -- brief #10 (`voronoi-cells.md`, written 2026-09-02) carries the
-consumer contract for delaunay v1.2.0's `createCellIndex` (bbox-clipped
-closed Voronoi cells, pooled per the createSpatialIndex model). The
-delaunay session builds v1.2.0 against that contract FIRST; charts v1.14.0
-then runs brief #10 against the published package.
+The lite-delaunay dormancy contract CLOSED THE LOOP 2026-09-03: brief #10
+carried the consumer contract, delaunay v1.2.0 shipped `createCellIndex`
+against it (published, verified), and charts consumed the real package
+end-to-end (tests + torture import it) in v1.14.0. Dormancy RE-ARMED for
+delaunay 1.3.0 (notice sent to their session 2026-09-03): no trigger exists;
+candidate future triggers, none committed -- TIN/contour rendering (their
+half-edge mesh), natural-neighbor heatmap interpolation, a mesh-edges layer,
+or a charts-gl mesh/Voronoi layer (1.0-lane there, after brief #11). A new
+consumer-contract brief here triggers 1.3.0, exactly as #10 did for 1.2.0.
 lite-delaunay 1.1.0 SHIPPED 2026-09-02 (user session; createSpatialIndex,
 uniform-grid impl) and conformance-verified against the charts contract
 (true-kNN exact; indexed hit-test identical to linear scan at realistic

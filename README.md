@@ -17,14 +17,28 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.13.0 -- overnight sessions + holiday calendar (minor).
-`shading.sessions` now accepts overnight sessions (`closeMinutes <
-openMinutes` crossing UTC midnight -- split internally at the seam, the band
-sweep unchanged) and a `shading.holidays` calendar (epoch-ms dates; each
-closes its whole UTC day and fuses with the adjacent gaps into one band).
-Holidays work without sessions too (weekends + holidays). Every malformed
-field still throws at construction.
-**453/453 tests pass** plus a torture/stress gate (`npm run torture`).
+**Status:** v1.14.0 -- fat hover + injected Voronoi cell layer (minor).
+`createScatterChart` gains `hitTolerance: 'nearest'` (hover snaps to the
+closest point from anywhere in the plot) and an injected `cells` tessellation
+layer -- every point owns a bbox-clipped Voronoi polygon drawn under the
+markers, geometry from an injected `CellIndexFactory` (e.g.
+`@zakkster/lite-delaunay`'s `createCellIndex`; lite-charts imports no
+implementation). A scatter using neither is byte-identical.
+**463/463 tests pass** plus a torture/stress gate (`npm run torture`).
+
+**New in v1.14.0:**
+- **Fat hover.** `hitTolerance: 'nearest'` (scatter only): the whole plot
+  becomes each point's hit region -- ideal for sparse scatters. Finite
+  per-query cap (plot diagonal), identical on the linear and indexed hit
+  paths; any other string throws at construction.
+- **Voronoi cell layer.** `cells: { index: createCellIndex(N), colorKey?,
+  fillOpacity?, stroke?, strokeWidth? }`: pixel-space bbox-clipped cells,
+  rebuilt with the projection through the spatial-index lifecycle (pan/zoom
+  never serves a stale or affine-wrong cell), drawn under the markers at
+  0 B/frame, with a free hover-cell highlight off the crosshair. Degenerate
+  clouds draw markers with no cells; construction validation throws before
+  any signal allocation. SVG export parity.
+- See "Fat hover + Voronoi cells" below for wiring.
 
 **New in v1.13.0:**
 - **Overnight sessions.** `{ openMinutes: 1320, closeMinutes: 1260, days:
@@ -995,6 +1009,76 @@ topmost point -- identical semantics to the linear-scan path. `NaN` points
 index, and a chart below the threshold, or with no factory configured, stays
 on the byte-identical linear-scan path.
 
+## Fat hover + Voronoi cells (v1.14.0)
+
+Two scatter-only features that share one idea: a point's Voronoi cell is the
+region of the plot closer to it than to any other point.
+
+**Fat hover** turns that region into the hit target. On a sparse scatter,
+pixel-perfect aim inside a small `hitTolerance` disc is fussy; `hitTolerance:
+'nearest'` instead snaps the hover to the closest point no matter how far the
+cursor is:
+
+```javascript
+import { createScatterChart } from '@zakkster/lite-charts';
+
+createScatterChart({
+    data: sparseRows,
+    hitTolerance: 'nearest',   // snap to the closest point, always
+});
+```
+
+The query is capped per-hover at the plot diagonal squared -- a finite bound
+that is semantically "everywhere inside the plot" yet always terminates the
+spatial index's grid walk (an unbounded `Infinity` is an untested input to a
+third-party grid). It works identically on the linear and indexed paths. A
+number keeps the classic disc behavior byte-for-byte; any other string throws
+at construction.
+
+**Cell tessellation** draws the cells themselves -- the classic
+station-map/coverage view where every point owns a colored polygon. Like
+`spatialIndex`, the polygon geometry comes from an injected factory;
+**lite-charts imports no tessellation library**. `@zakkster/lite-delaunay`
+1.2.0+ exports `createCellIndex`, which matches the `CellIndexFactory`
+contract directly:
+
+```javascript
+import { createScatterChart } from '@zakkster/lite-charts';
+import { createCellIndex } from '@zakkster/lite-delaunay'; // YOUR import, not ours
+
+createScatterChart({
+    data: stations,
+    hitTolerance: 'nearest',                  // fat hover pairs naturally
+    cells: {
+        index: createCellIndex(20_000),       // maxPoints >= largest series
+        colorKey: 'zone',                     // raw per-point fill (no coercion)
+        fillOpacity: 0.35,
+        stroke: '#ffffff', strokeWidth: 1,    // optional cell boundaries
+    },
+});
+```
+
+The cell layer is one scene node drawn UNDER the markers, inside the plot
+clip, with a free hover-cell highlight (the crosshair's `snapIdx` cell is
+stroked in its own color). The factory is `(pxs, pys, n) => index`; the index
+it returns:
+
+| Member | Contract |
+|---|---|
+| `cell(i, bx0, by0, bx1, by1, outXY)` | Write cell `i`'s polygon, clipped to the axis-aligned bbox, into the caller-owned `outXY` as interleaved `[x0,y0,x1,y1,...]`; return the vertex count (`0` => absent cell: NaN site, degenerate input, or no bbox intersection). Throws (never truncates) on overflow. Zero allocation per call. |
+| `dispose()` | Free/recycle whatever the build acquired. |
+
+Cells are **pixel-space** -- Voronoi is not affine-invariant under anisotropic
+x/y scaling, so data-space cells would be wrong hover regions. lite-charts
+hands the factory the same projected `pxs/pys` it hands `spatialIndex` and
+rebuilds the tessellation (cold) on every data or scale change, so pan and
+zoom can never serve a stale or distorted cell. The per-frame draw walks
+prebuilt packed arrays at **0 B/frame**. A degenerate cloud (all-collinear or
+coincident points) draws markers with no cells -- fail closed, never a wrong
+polygon. Cells are primary-series only (a multi-series tessellation is
+ill-posed) and scatter only; a scatter without `cells` and without
+`hitTolerance: 'nearest'` is byte-identical to before.
+
 ## Performance
 
 All numbers are from `bench/line-100k.mjs` running on Node 22 against a
@@ -1717,8 +1801,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.10.0** | `createTimeLineChart` + weekend shading. A time-series line preset over `createLineChart`: forces `xScale.type: 'time'`, defaults `panBounds: 'data'`, and adds opt-in `shading: true | 'weekends' | { fill? }` -- one `{ type: 'range', axis: 'x' }` band per Sat -> Mon UTC span in the data domain. Bands ride the v1.7.0 annotation layer (0 B per frame; re-clipped by the existing project effect) and are derived from the series data extent, not `scaleVersion`, so they regenerate on a data change but not per pan/zoom frame; SoA `{ xs, ys }` data is shaded like AoS. New factory + new config field only; every existing factory and the shared kernel are byte-unchanged, and the shading helpers tree-shake out of a `createLineChart`-only bundle. Fail-closed: a `null`/non-finite extent bound emits no bands (never epoch 0), a per-row `x: null` is gated before coercion (one missing timestamp cannot collapse the extent to 1970), `shading: false` opts out like absent, an invalid `shading` throws. 427 tests (14 new: weekend-walk boundaries, null/non-finite fail-close, SoA regression, forced time scale, count integration, opt-in null handle, config validation, tree-shake confinement, retention, false opt-out, row-level null guard -- TS2/TS5/TS13/TS14 proven load-bearing by reversion) + a 0-B weekend-shading torture case (A16). |
 | **v1.11.0** | Market-hours session shading. `shading: { sessions: [{ openMinutes, closeMinutes, days? }], sessionFill? }` shades non-trading time as the complement of the open-interval union over the data domain: one band per overnight gap, ONE merged Fri-close -> Mon-open band per weekend (weekends subsumed, no double paint), lunch-break midday gaps free. Single-cursor sweep, no sort at generation (ordering is a validator invariant: open-ascending sort + `close <= 1440`); `_weekendBands` and the extent scan byte-identical -- the accessor changed by one generator-selection line. Fail-closed: overnight (`close < open`), zero-width, `null`/non-integer/out-of-range minutes, bad `days` all throw at construction; explicit conflicting `xScale.type` now throws instead of silent override. 435 tests (8 new: exact 11-band fixture, subsumption 11-vs-2, 21-band lunch-break, validator matrix, per-row null reuse, tree-shake confinement, retention, exact-bounds union invariants -- TS18/TS22 proven load-bearing by reversion) + a 0-B session-shading torture case (A17). |
 | **v1.12.0** | Legend virtualization. `legend.virtualize: (host, opts) => ({ dispose })` windows the legend rows through a caller-supplied adapter (wire it to `@zakkster/lite-virtual`'s `mountList` -- your import; `Charts.js` contains zero references to it, asserted by test). A 200-series legend holds <= 14 DOM rows, ONE shared visibility effect, and ONE delegated click listener regardless of series count; `renderRow` re-reads swatch colour + visibility per bind so recycled rows never carry stale state. Explicit opt-in, vertical (`left`/`right`) only; the eager path `buildLegendDOM`..`installLegend` is byte-identical (SHA-pinned in the suite). Fail-closed: non-function `virtualize`, horizontal position, missing/`null` `height` (null is not 0), invalid `itemHeight`/`overscan`, and a dispose-less factory handle all throw with nothing attached. 444 tests (9 new: bounded window, scroll rebind, recycled-click signal index, asymmetric-recycle dimmed-state, byte-identity + confinement, validation matrix, handle validation, 50x retention, O(1) listeners -- V3/V4/V6 proven load-bearing by reversion) + a 50k-op scroll-storm torture case (A18: 1.02 B/op vs 0.85 control, zero new signal-graph nodes). |
-| **v1.13.0** (this) | Overnight sessions + holiday calendar. `shading.sessions` accepts `closeMinutes < openMinutes`: the session is split at the UTC midnight seam into an evening half + a next-day morning half (weekday bits rotated), so the single-cursor complement sweep is structurally unchanged and the seam never emits a band; `days` names the weekday the session opens. `shading.holidays: number[]` (epoch ms, truncated to UTC day starts) closes each whole UTC day and fuses it with the adjacent gaps into ONE band; holidays without sessions ride a synthesized full-day Mon-Fri calendar (weekends + holidays), validated identically. One fill for all gap bands (per-holiday fills would break the fusion -- use an `annotations` range). Fail-closed: zero-width sessions, `[]`, `null`/non-integer/`Date`/string holiday entries all throw at construction; pre-1970 dates floor to the correct UTC day. `_weekendBands` byte-identical (SHA-pinned). 453 tests (9 new: v1.11.0 behavioral identity, confinement pin, seam-never-emits, exact Globex 5-band fixture, holiday-fusion exact bounds + chart-level count, holidays-only equivalence, validator matrix, overnight edges + Saturday-wrap rotate + pre-1970 floor, 50x retention -- four reversions proven load-bearing: rotate wrap-drop, split removal, day-skip deletion, floor->% truncation) + a band-regeneration torture case (A19). |
-| v1.13.x / v1.14.0 (candidates) | horizontal legend virtualization; early-close (half-day) calendar entries; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
+| **v1.13.0** | Overnight sessions + holiday calendar. `shading.sessions` accepts `closeMinutes < openMinutes`: the session is split at the UTC midnight seam into an evening half + a next-day morning half (weekday bits rotated), so the single-cursor complement sweep is structurally unchanged and the seam never emits a band; `days` names the weekday the session opens. `shading.holidays: number[]` (epoch ms, truncated to UTC day starts) closes each whole UTC day and fuses it with the adjacent gaps into ONE band; holidays without sessions ride a synthesized full-day Mon-Fri calendar (weekends + holidays), validated identically. One fill for all gap bands (per-holiday fills would break the fusion -- use an `annotations` range). Fail-closed: zero-width sessions, `[]`, `null`/non-integer/`Date`/string holiday entries all throw at construction; pre-1970 dates floor to the correct UTC day. `_weekendBands` byte-identical (SHA-pinned). 453 tests (9 new: v1.11.0 behavioral identity, confinement pin, seam-never-emits, exact Globex 5-band fixture, holiday-fusion exact bounds + chart-level count, holidays-only equivalence, validator matrix, overnight edges + Saturday-wrap rotate + pre-1970 floor, 50x retention -- four reversions proven load-bearing: rotate wrap-drop, split removal, day-skip deletion, floor->% truncation) + a band-regeneration torture case (A19). |
+| **v1.14.0** (this) | Fat hover + injected Voronoi cell layer on `createScatterChart`. `hitTolerance: 'nearest'` snaps the hover to the closest point from anywhere in the plot (finite plot-diagonal cap, linear and indexed paths agree). `cells: { index, colorKey?, fillOpacity?, stroke?, strokeWidth? }` tessellates the primary series with pixel-space bbox-clipped Voronoi polygons from an injected `CellIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.2.0`), rebuilt cold at a new `postProject` renderer seam (after projection -- extract-time would index stale pixels), drawn under the markers at 0 B/frame with a hover-cell highlight off the crosshair. Degenerate clouds draw markers with no cells; index faults fail closed (mount-time door / later runs skip cells); construction throws fire before any owned signal is allocated. 463 tests (10 new: independent half-plane oracle + exact plot-tiling invariant, indexed/linear fat-hover agreement, SVG parity with clipPath isolation, zero-node construction throws, retention, source-scan confinement -- five mechanisms reversion-proven) + torture A20 (one rebuild per scale change over a 208-write view storm, redraw within 2 B/op of a no-cells control, vs the real published `createCellIndex`). |
+| v1.14.x / v1.15.0 (candidates) | horizontal legend virtualization; early-close (half-day) calendar entries; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
 
 ## Ecosystem
 

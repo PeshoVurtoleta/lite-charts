@@ -1157,12 +1157,20 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
     /** Pixel radius of every marker. Default 4. */
     markerSize?: number;
     /**
-     * Pixel radius around each marker that counts as a hit. Default
-     * `markerSize + 4`. Increase for easier targeting at small marker
-     * sizes, decrease for crowded plots where neighboring points should
-     * not steal hits.
+     * Pixel radius around each marker that counts as a hit, OR the string
+     * `'nearest'` for fat hover. Default `markerSize + 4`.
+     *
+     * A number increases (or decreases) the hit disc: larger for easier
+     * targeting at small marker sizes, smaller for crowded plots where
+     * neighboring points should not steal hits.
+     *
+     * `'nearest'` (v1.14.0) snaps to the closest point regardless of
+     * distance -- the whole plot becomes a Voronoi hit region, ideal for
+     * sparse scatters. The query is capped at the plot diagonal (a finite
+     * bound), so it works on both the linear and spatial-index paths. Any
+     * other string throws at construction.
      */
-    hitTolerance?: number;
+    hitTolerance?: number | 'nearest';
 
     color?: string;
     stroke?: string;
@@ -1194,9 +1202,69 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
     /** v1.2.0-alpha.0: same spatial-index integration as bubble. k = 1. */
     spatialIndex?: SpatialIndexFactory;
     spatialIndexThreshold?: number;
+
+    /**
+     * v1.14.0: Voronoi cell (tessellation) layer. All-or-nothing opt-in --
+     * every primary-series point owns a colored polygon (its bbox-clipped
+     * Voronoi cell), drawn UNDER the markers, with a free hover-cell
+     * highlight off the crosshair. Primary series only; scatter only.
+     *
+     * The polygon geometry comes from an injected {@link CellIndexFactory}
+     * (an optional peer such as `@zakkster/lite-delaunay`'s
+     * `createCellIndex(N)`) -- lite-charts imports nothing. Cells are
+     * PIXEL-space and rebuilt (cold) with the projection, so they stay
+     * correct under anisotropic pan/zoom. Degenerate input (collinear /
+     * coincident) draws markers with no cells; a `cells` object missing a
+     * function `index` throws at construction.
+     */
+    cells?: {
+        /** REQUIRED: the CellIndex factory (e.g. `createCellIndex(N)`). */
+        index: CellIndexFactory;
+        /** Raw per-point color accessor (key or index). No `+v` coercion. */
+        colorKey?: string | number;
+        /** Cell fill alpha. Default 0.35. */
+        fillOpacity?: number;
+        /** Cell boundary color. Omit (or strokeWidth 0) for no boundary. */
+        stroke?: string;
+        /** Cell boundary width in pixels. Default 0 (no stroke). */
+        strokeWidth?: number;
+    };
 }
 
 export function createScatterChart(config: ScatterChartConfig): Chart;
+
+/**
+ * v1.14.0: a Voronoi cell index over pixel-space points. Structurally
+ * identical to what `@zakkster/lite-delaunay`'s `createCellIndex` returns,
+ * declared here so lite-charts imports no implementation. Mirrors
+ * {@link SpatialIndex}: pooled factory-factory, SoA input, zero-alloc queries.
+ */
+export interface CellIndex {
+    /**
+     * Write cell `i`'s polygon, CLIPPED to the axis-aligned bbox
+     * `[bx0,by0,bx1,by1]`, into `outXY` as interleaved `[x0,y0,x1,y1,...]`.
+     * Returns the vertex count written (0 => absent cell: a NaN site,
+     * degenerate input, or no bbox intersection). THROWS if the clipped cell
+     * needs more room than `outXY` holds -- never truncates. Zero allocation.
+     */
+    cell(
+        i: number,
+        bx0: number, by0: number, bx1: number, by1: number,
+        outXY: Float32Array,
+    ): number;
+    dispose(): void;
+}
+
+/**
+ * Build a {@link CellIndex} over the given pixel-space coordinates. `n` is the
+ * count of valid entries in `pxs`/`pys` (NaN entries are legal and compacted
+ * out). Mirrors {@link SpatialIndexFactory}.
+ */
+export type CellIndexFactory = (
+    pxs: Float32Array,
+    pys: Float32Array,
+    n: number,
+) => CellIndex;
 
 // ---------------------------------------------------------------------------
 // createHeatmap (v1.2.0-alpha.3) -- fourth kernel

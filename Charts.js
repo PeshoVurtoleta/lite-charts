@@ -3858,9 +3858,9 @@ const _bisectHitTest_canvasY = null; // sentinel for grep -- see _bisectHitTest 
 // For charts with dense point clouds (bubble, future scatter / heatmap), the
 // linear-scan hit-test becomes the bottleneck once point counts pass ~1000.
 // lite-charts defines a small, allocation-free interface that any spatial
-// index can implement -- @zakkster/lite-delaunay, a k-d tree, a uniform
-// grid, etc. The interface stays in lite-charts (so the renderers depend on
-// nothing extra); the implementation is wired by the consumer via config.
+// index can implement -- an injected peer, a k-d tree, a uniform grid, etc.
+// The interface stays in lite-charts (so the renderers depend on nothing
+// extra); the implementation is wired by the consumer via config.
 //
 //   type SpatialIndexFactory = (pxs, pys, n) -> SpatialIndex
 //
@@ -3909,6 +3909,72 @@ const _disposeSpatialIndex = (state) => {
         }
         state.spatialIndex = null;
     }
+};
+
+// ---------------------------------------------------------------------------
+// Cell (Voronoi tessellation) layer integration (v1.14.0)
+// ---------------------------------------------------------------------------
+//
+// Scatter-only. Like the spatial index, the polygon geometry is produced by an
+// injected factory matching the CellIndex contract below -- lite-charts imports
+// nothing. Each primary-series point owns a bbox-clipped cell; the draw layer
+// walks the prebuilt packed geometry at 0 B/frame, and that geometry is rebuilt
+// (cold) on every data / scale change through the same lifecycle as the index.
+//
+//   type CellIndexFactory = (pxs, pys, n) -> CellIndex
+//
+//   interface CellIndex {
+//     // Write cell i's polygon, CLIPPED to the axis-aligned bbox, into outXY
+//     // as interleaved [x0,y0,x1,y1,...]; return the vertex count written.
+//     // 0 => absent cell (NaN site, degenerate / collinear input, or no bbox
+//     // intersection). THROWS if the clipped cell needs more room than outXY
+//     // holds -- never truncates. Zero allocation per call.
+//     cell(i, bx0, by0, bx1, by1, outXY) -> number
+//     dispose() -> void
+//   }
+//
+// A bbox-clipped cell has at most degree+4 vertices for an interior site and
+// degree+5 for a hull site; the 2 * 64-float scratch below covers every
+// non-adversarial cloud, and the throw is the loud escape (surfaced fail-closed
+// at mount by the cold refresh, never during paint).
+
+// Dispose helper -- mirrors _disposeSpatialIndex; defensive against a factory
+// whose facade omits dispose().
+const _disposeCellIndex = (state) => {
+    if (state.cellIndex) {
+        if (typeof state.cellIndex.dispose === 'function') {
+            state.cellIndex.dispose();
+        }
+        state.cellIndex = null;
+    }
+};
+
+// Construction-time validator + one-time scratch. Returns null when no cells
+// config was supplied (every downstream branch stays dead). Fails closed on a
+// non-object or a missing index factory.
+const _normalizeCellsSpec = (cells) => {
+    if (cells == null) return null;
+    if (typeof cells !== 'object') {
+        throw new Error('lite-charts: cells must be an object with an index factory');
+    }
+    if (typeof cells.index !== 'function') {
+        throw new Error('lite-charts: cells.index must be a CellIndex factory');
+    }
+    const colorKey = cells.colorKey != null ? cells.colorKey : null;
+    return {
+        index: cells.index,
+        // RAW accessor -- per-point color strings (`'#ff0000'`, `'--zone-a'`,
+        // `'oklch(...)'`) must not be `+v`-coerced to NaN (bubble colorKey
+        // precedent). Null when omitted -> the series-fill fallback path.
+        colorAccessor: colorKey != null ? buildRawAccessor(colorKey) : null,
+        fillOpacity: cells.fillOpacity != null ? +cells.fillOpacity : 0.35,
+        stroke: cells.stroke != null ? cells.stroke : null,
+        strokeWidth: cells.strokeWidth != null ? +cells.strokeWidth : 0,
+        // Caller-owned interleaved scratch, allocated ONCE here (construction,
+        // cold), owned by the opts object -- never per-frame or per-cell. 2 * 64
+        // floats = the documented degree+5 hull bound; cell() throws past it.
+        outXY: new Float32Array(128),
+    };
 };
 
 
@@ -4363,12 +4429,32 @@ const _initScatterOpts = (config) => {
     // hit-test radius beyond the marker for easier targeting; default is
     // markerSize + 4px (caller can override).
     const markerSize = config.markerSize != null ? +config.markerSize : 4;
-    const hitTolerance = config.hitTolerance != null
-        ? +config.hitTolerance
-        : markerSize + 4;
+    // v1.14.0: hitTolerance is a number (px radius) OR the string 'nearest'
+    // (fat hover -- snap to the closest point regardless of distance, capped
+    // per-query at the plot diagonal in _scatterHitTest). Gate == null first
+    // (+null === 0 is a finite radius, not "unset"); any other string throws.
+    let hitNearest = false;
+    let hitToleranceSq;
+    if (config.hitTolerance == null) {
+        const t = markerSize + 4;
+        hitToleranceSq = t * t;
+    } else if (typeof config.hitTolerance === 'string') {
+        if (config.hitTolerance !== 'nearest') {
+            throw new Error("lite-charts: hitTolerance must be a number or 'nearest'");
+        }
+        hitNearest = true;
+        hitToleranceSq = 0;
+    } else {
+        const t = +config.hitTolerance;
+        hitToleranceSq = t * t;
+    }
     return {
         markerSize,
-        hitToleranceSq: hitTolerance * hitTolerance,
+        hitNearest,
+        hitToleranceSq,
+        // v1.14.0: optional injected Voronoi cell layer (null when absent, so
+        // every downstream branch -- draw node, refresh, extract -- is dead).
+        cellsSpec: _normalizeCellsSpec(config.cells),
         strokeRef: { value: config.stroke != null ? config.stroke : null },
         strokeWidthRef: { value: config.strokeWidth != null ? +config.strokeWidth : 0 },
         fillOpacityRef: { value: config.fillOpacity != null ? +config.fillOpacity : 1 },
@@ -4390,6 +4476,27 @@ const _initScatterOpts = (config) => {
 const _extractScatterData = (state, data, xAcc, yAcc, ctx) => {
     extractSeriesData(state, data, xAcc, yAcc);
     _disposeSpatialIndex(state);
+    // v1.14.0: the cell index rides the identical data/scale lifecycle -- the
+    // kernel re-projects pxs/pys after this returns, so any prior tessellation
+    // is stale. _scatterPostProject rebuilds it (cold) on the same run.
+    _disposeCellIndex(state);
+
+    // v1.14.0: per-point cell colors. When cells.colorKey is set, resolve each
+    // primary-series row's color to a concrete CSS string so the cell draw can
+    // use it directly (mirrors bubble's per-point color path). Null preserves
+    // the series-fill fallback. Skip entirely when no colorAccessor.
+    const spec = ctx.opts && ctx.opts.cellsSpec;
+    if (spec && spec.colorAccessor && Array.isArray(data)) {
+        const n = state.n;
+        if (!state.cellColors || state.cellColors.length < n) state.cellColors = new Array(n);
+        const colorAcc = spec.colorAccessor;
+        for (let i = 0; i < n; i++) {
+            const raw = colorAcc(data[i], i);
+            state.cellColors[i] = raw != null ? resolveColor(raw) : null;
+        }
+    } else if (state.cellColors) {
+        state.cellColors = null;
+    }
 };
 
 const makeScatterDrawFn = (state, refs, plotBoundsBox, opts) => (ctx) => {
@@ -4430,6 +4537,158 @@ const makeScatterDrawFn = (state, refs, plotBoundsBox, opts) => (ctx) => {
     ctx.globalAlpha = prevAlpha;
 };
 
+// v1.14.0: cell (Voronoi) layer draw. One node per chart, UNDER the markers,
+// inside the plot clip. Walks prebuilt packed geometry (state.cellStart offsets
+// into state.cellXY) at 0 B/frame -- no allocation, no try/catch here (the
+// overflow escape lives in the cold refresh; this body only reads arrays).
+const makeScatterCellDrawFn = (state, refs, opts, ctx) => (c) => {
+    if (!refs.visibleRef.value) return;
+    const count = state.cellCount | 0;
+    if (count === 0) return;
+    const spec = opts.cellsSpec;
+    const starts = state.cellStart;
+    const xy = state.cellXY;
+    const colors = state.cellColors;
+    const pb = ctx.plotBoundsBox;
+    const plotL = pb.x, plotT = pb.y;
+    const plotR = pb.x + pb.w, plotB = pb.y + pb.h;
+
+    // Plot clip. Each cell fill below opens its OWN path (that per-cell
+    // beginPath is the load-bearing guard against the clip rect leaking into
+    // the first fill -- proven by reversion in VC6); the beginPath here is
+    // defensive only, so a future single-path batching of the fill loop
+    // cannot resurrect the annotation-layer D1 SVG caveat.
+    c.save();
+    c.beginPath();
+    c.rect(plotL, plotT, plotR - plotL, plotB - plotT);
+    c.clip();
+    c.beginPath();
+
+    // Fill pass. globalAlpha carries fill opacity; per-point color when a
+    // colorKey resolved one, else the series fill.
+    const prevAlpha = c.globalAlpha;
+    c.globalAlpha = spec.fillOpacity;
+    const fallback = refs.colorRef.value;
+    for (let i = 0; i < count; i++) {
+        const s = starts[i];
+        const e = starts[i + 1];
+        if (e - s < 6) continue;  // < 3 vertices: absent / degenerate cell
+        c.beginPath();
+        c.moveTo(xy[s], xy[s + 1]);
+        for (let k = s + 2; k < e; k += 2) c.lineTo(xy[k], xy[k + 1]);
+        c.closePath();
+        c.fillStyle = (colors && colors[i]) || fallback;
+        c.fill();
+    }
+    c.globalAlpha = prevAlpha;
+
+    // Optional boundary stroke pass (uniform color/width -- one style set).
+    const sw = spec.strokeWidth;
+    if (sw > 0 && spec.stroke) {
+        c.strokeStyle = spec.stroke;
+        c.lineWidth = sw;
+        for (let i = 0; i < count; i++) {
+            const s = starts[i];
+            const e = starts[i + 1];
+            if (e - s < 6) continue;
+            c.beginPath();
+            c.moveTo(xy[s], xy[s + 1]);
+            for (let k = s + 2; k < e; k += 2) c.lineTo(xy[k], xy[k + 1]);
+            c.closePath();
+            c.stroke();
+        }
+    }
+
+    // Hover highlight (D5): stroke the single cell whose index the crosshair
+    // snapped to, in its own color at 2px. Free -- the crosshair version signal
+    // already schedules the redraw.
+    const cd = ctx.crosshairDataRef;
+    if (cd && cd.visible) {
+        const hi = cd.snapIdx;
+        if (hi >= 0 && hi < count) {
+            const s = starts[hi];
+            const e = starts[hi + 1];
+            if (e - s >= 6) {
+                c.beginPath();
+                c.moveTo(xy[s], xy[s + 1]);
+                for (let k = s + 2; k < e; k += 2) c.lineTo(xy[k], xy[k + 1]);
+                c.closePath();
+                c.strokeStyle = (colors && colors[hi]) || fallback;
+                c.lineWidth = 2;
+                c.stroke();
+            }
+        }
+    }
+    c.restore();
+};
+
+// v1.14.0: cold cell-geometry refresh. Called from Effect 2 after projection
+// (postProject seam), so pxs/pys are current. Lazily builds the injected index
+// (extract disposed the prior one), then packs each point's bbox-clipped cell
+// into state.cellXY with state.cellStart prefix offsets (a 0-vertex return
+// writes a zero-length span -> markers, no cell). Overflow throws out of cell()
+// during this cold pass; caught here, it zeroes the spans (markers draw, no
+// cells -- bit-identical to the degenerate path) and records the message on ctx
+// for mount()-time fail-closed surfacing. Never re-throws from the effect.
+const _scatterPostProject = (states, ctx) => {
+    const opts = ctx.opts;
+    const spec = opts.cellsSpec;
+    if (spec == null) return;
+    ctx.cellError = null;
+    // D6: primary series only (a multi-series tessellation is ill-posed).
+    const primary = states[0];
+    if (primary == null || primary.n === 0) {
+        if (primary) primary.cellCount = 0;
+        return;
+    }
+    const n = primary.n;
+    const pxs = primary.pxs;
+    const pys = primary.pys;
+    if (pxs === null || pys === null) { primary.cellCount = 0; return; }
+
+    if (!primary.cellStart || primary.cellStart.length < n + 1) {
+        primary.cellStart = new Int32Array(n + 1);
+    }
+    if (!primary.cellXY) primary.cellXY = new Float32Array(2 * n * 8 || 64);
+
+    const pb = ctx.plotBoundsBox;
+    const bx0 = pb.x, by0 = pb.y, bx1 = pb.x + pb.w, by1 = pb.y + pb.h;
+    const out = spec.outXY;
+    const starts = primary.cellStart;
+    let off = 0;
+    try {
+        if (!primary.cellIndex) primary.cellIndex = spec.index(pxs, pys, n);
+        const idx = primary.cellIndex;
+        for (let i = 0; i < n; i++) {
+            starts[i] = off;
+            const floats = idx.cell(i, bx0, by0, bx1, by1, out) * 2;
+            if (floats > 0) {
+                let xy = primary.cellXY;
+                if (off + floats > xy.length) {
+                    // Cold grow-by-double; never on the paint path.
+                    let cap = xy.length || 64;
+                    while (cap < off + floats) cap = cap * 2;
+                    const grown = new Float32Array(cap);
+                    grown.set(xy);
+                    primary.cellXY = grown;
+                    xy = grown;
+                }
+                for (let k = 0; k < floats; k++) xy[off + k] = out[k];
+                off += floats;
+            }
+        }
+        starts[n] = off;
+        primary.cellCount = n;
+    } catch (err) {
+        // Overflow (cell() needed more than outXY holds) or any index fault:
+        // fail closed to markers-only and surface at mount.
+        primary.cellCount = 0;
+        ctx.cellError = err && err.message
+            ? err.message
+            : 'lite-charts: cell index refresh failed';
+    }
+};
+
 const _scatterHitTest = (canvasX, canvasY, primary, /*xScale*/_xs, ctx) => {
     const n = primary.n;
     if (n === 0) return null;
@@ -4437,7 +4696,11 @@ const _scatterHitTest = (canvasX, canvasY, primary, /*xScale*/_xs, ctx) => {
     const xs = primary.pxs;
     const ys = primary.pys;
     const opts = ctx.opts;
-    const toleranceSq = opts.hitToleranceSq;
+    // v1.14.0: fat hover ('nearest') caps the query at the plot diagonal
+    // squared -- a finite bound that is semantically "everywhere" inside the
+    // plot yet always terminates the injected index's grid walk.
+    const pb = ctx.plotBoundsBox;
+    const toleranceSq = opts.hitNearest ? (pb.w * pb.w + pb.h * pb.h) : opts.hitToleranceSq;
 
     // Spatial-index fast path -- k = 1 is enough since scatter has no
     // overlap semantics. The nearest point either is or isn't within the
@@ -4489,9 +4752,11 @@ const _makeScatterDraw = (state, refs, plotBoundsBox, /*seriesIdx*/_si, /*totalS
 
 const _scatterCleanup = (states) => {
     // Same as bubble -- dispose spatial indices on unmount. Defensively
-    // guards against indices that hold external resources.
+    // guards against indices that hold external resources. v1.14.0: cell
+    // indices ride the same disposal.
     for (let i = 0; i < states.length; i++) {
         _disposeSpatialIndex(states[i]);
+        _disposeCellIndex(states[i]);
     }
 };
 
@@ -4501,6 +4766,7 @@ const SCATTER_RENDERER = {
     createXScale: makeLinearScale,
     initOpts: _initScatterOpts,
     extractData: _extractScatterData,
+    postProject: _scatterPostProject,  // v1.14.0: cold cell-geometry refresh
     yDefaults: { nice: true },
     updateXScale: _updateXScaleLinear,
     projectToPixels: true,
@@ -4619,6 +4885,16 @@ const createBaseAxisChart = (config, renderer) => {
     // and NEVER pushed here.
     const _ownedSignals = [];
     const _own = (s) => { _ownedSignals.push(s); return s; };
+
+    // Chart-type-specific options bag. `null` for line; structured config for
+    // area / bar / scatter / future renderers. Resolved HERE -- before the first
+    // `_own(signal(...))` below -- so a construction-time validation throw (bad
+    // `cells` / `hitTolerance`, etc.) fires with NOTHING attached: no owned
+    // signal exists yet, so a failed construction leaks no arena slots (the
+    // caller gets no chart object to destroy). Every initOpts reads only
+    // `config`; chartOpts is first used at the horizontal+log check below.
+    const chartOpts = renderer.initOpts ? renderer.initOpts(config) : null;
+
     const widthAutoSig = widthExplicit ? null : _own(signal(800));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthAcc = widthExplicit ? asAccessor(config.width) : widthAutoSig;
@@ -4676,10 +4952,6 @@ const createBaseAxisChart = (config, renderer) => {
     // allocated (cheap) -- non-bar renderers simply never reference it.
     const categoriesRef = { value: [] };
 
-    // Chart-type-specific options bag. `null` for line; structured config
-    // for area / bar / future renderers.
-    const chartOpts = renderer.initOpts ? renderer.initOpts(config) : null;
-
     // v1.8.0: horizontal bar charts support pan, zoom, and grid via the
     // axis-role swap (the linear kernels are remapped at each gesture boundary,
     // buildGrid emits vertical value rules). v1.9.0 adds horizontal brush (a
@@ -4721,6 +4993,14 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.2.0-alpha.2: multi-series bubble hit-test iterates all visible
         // series' state arrays to find the best hit across series.
         seriesStates: null,
+        // v1.14.0: scatter fat-hover reads the live plot rect to cap the
+        // 'nearest' tolerance at the plot diagonal; the cell layer reads it as
+        // the tessellation bbox. Assigned once below (plotBoundsBox is declared
+        // after this literal in source order).
+        plotBoundsBox: null,
+        // v1.14.0: cold cell-geometry refresh records an overflow message here
+        // for mount()-time fail-closed surfacing (see _scatterPostProject).
+        cellError: null,
     };
     // seriesStates is declared above rendererCtx in source order; assign it
     // here now that rendererCtx exists.
@@ -4730,6 +5010,9 @@ const createBaseAxisChart = (config, renderer) => {
 
     // -- Plot bounds: a single mutable box + a signal that publishes "the box changed" --
     const plotBoundsBox = { x: 0, y: 0, w: 0, h: 0 };
+    // plotBoundsBox identity is stable (mutated in place); wire it onto the
+    // shared ctx now that it exists, mirroring the seriesStates late-assign.
+    rendererCtx.plotBoundsBox = plotBoundsBox;
     const plotBoundsSignal = _own(signal(0));
 
     // -- Annotation layer (v1.7.0) --
@@ -5361,6 +5644,12 @@ const createBaseAxisChart = (config, renderer) => {
                     if (seriesStates[i].n > 0) scaleSeriesToPixels(seriesStates[i], xScale, yScale);
                 }
             }
+            // v1.14.0: optional post-projection pass. Scatter's cell layer uses
+            // this to rebuild pixel-space tessellation geometry now that pxs/pys
+            // are current (data OR scale change). Dead for every other renderer,
+            // exactly like postExtract. Fail-closed: a refresh overflow records
+            // ctx.cellError (surfaced at mount below), never throws here.
+            if (renderer.postProject) renderer.postProject(seriesStates, rendererCtx);
             scaleVersion.update((v) => (v + 1) | 0);
             if (scene) scene.markDirty();
         }));
@@ -5368,12 +5657,16 @@ const createBaseAxisChart = (config, renderer) => {
         // until the end of mount(), so destroy() would skip cleanup on a mid-mount
         // throw; run the disposers created so far (the effects + any observers) and
         // clear them, so no signal node leaks on the rejected mount.
-        if (_logDomainError) {
+        // v1.14.0: a cell-refresh overflow on the first sync run surfaces here
+        // too (same unwind), mirroring the log fail-closed door. A later invalid
+        // run only skips its cells (markers still draw); this check runs once.
+        const _mountError = _logDomainError || rendererCtx.cellError;
+        if (_mountError) {
             for (let i = disposers.length - 1; i >= 0; i--) {
                 try { disposers[i](); } catch (_) { /* best-effort unwind */ }
             }
             disposers.length = 0;
-            throw new Error(_logDomainError);
+            throw new Error(_mountError);
         }
 
         // Effect 2b: mirror visibility signals into the synchronous refs the
@@ -5442,6 +5735,16 @@ const createBaseAxisChart = (config, renderer) => {
         }, rendererCtx);
         disposers.push(xAxis.dispose);
         disposers.push(yAxis.dispose);
+
+        // v1.14.0: cell (Voronoi) layer. One node per chart, added BEFORE the
+        // series marker nodes so it renders UNDERNEATH them (scene draws in tree
+        // order), inside the plot clip. cellsSpec is a scatter-only opts field,
+        // so no other renderer reaches this branch. Primary series only (D6).
+        if (chartOpts && chartOpts.cellsSpec) {
+            const cellDraw = makeScatterCellDrawFn(
+                seriesStates[0], seriesRefs[0], chartOpts, rendererCtx);
+            scene.root.add(pathNode({ draw: (ctx) => cellDraw(ctx) }));
+        }
 
         // One path node per series. Draw fn is renderer-specific; the same
         // (state, refs, plotBoundsBox, seriesIdx, totalSeries, ctx) signature
