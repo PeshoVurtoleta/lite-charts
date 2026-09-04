@@ -32,7 +32,8 @@ The forward plan in `../ROADMAP.md` points here.
 | ~~7~~ | ~~`market-hours.md`~~ | **SHIPPED v1.11.0** | S-M | Caller-supplied session calendar, complement-of-open-union band generation over the v1.10.0 shading machinery (`_weekendBands` byte-identical). Overnight sessions still OUT (throw; v1.11.x candidate). Kept for reference. |
 | ~~5~~ | ~~`legend-virtualization.md`~~ | **SHIPPED v1.12.0** | S | Caller-supplied `virtualize` fn per the `spatialIndex` precedent (NO lite-virtual import), vertical-only, ONE shared visibility effect + ONE delegated click listener (the planner overturned the brief's bounded-pool-effects option -- a rebind inside a scroll callback cannot re-run an effect). Horizontal virtualization still throws (candidate). Kept for reference. |
 | 11 | `charts-gl-rescue.md` | rescue, lite-charts-gl 0.1.0 -- EXECUTES IN LiteChartsGl | S-M | Gate the July orphan and publish: git init, reprove the 117 mock-GL tests, build the missing torture tiers (T0/T6/T7/T9 -- the one real engineering task; zero-GC claim currently UNPROVEN), fix the version lies (llms.txt "v1.0.0", stale sibling note, no VERSION const), blueprint README + missing ROADMAP.md + ASCII scrub. No feature work; the lite-gl-migration question is explicitly deferred to 1.0.0. Written 2026-09-03. |
-| 10 | `voronoi-cells.md` | feature, v1.14.0 -- EXECUTED 2026-09-03 (release-pending) | M | Fat hover (`hitTolerance: 'nearest'` -- charts-side ONLY, rides the existing findNearest k=1) + injected Voronoi cell tessellation layer on scatter (`cells: { index }` per the spatialIndex precedent). Carried THE CONSUMER CONTRACT for delaunay's `createCellIndex`; delaunay 1.2.0 published 2026-09-03, charts built + gated against it (463/463, A20, 5 reversion proofs). One as-executed deviation recorded in the brief: postProject seam, not extract-time. |
+| 12 | `field-raster.md` | feature, v1.16.0 -- EXECUTED 2026-09-05 (release-pending) | M | THE field consumer brief the dormancy protocol anticipated: `field: { index }` on scatter, third rung of the injection ladder, consuming the published lite-delaunay 1.3.0 `createFieldIndex` (locked contract + perf grounding recorded above). sampleField-only batching (never hot interpolate), postProject cold lifecycle per the cells precedent; as-executed: NO row flip (by0 = plotTop already lands row 0 on top -- orientation proven by fixture + reversion), independent cells/field fault domains, reviewer's coverage-only REJECTED discharged by qa (FR1-9 + A22 + 5 reversions). Peer bump ^1.3.0. |
+| 10 | `voronoi-cells.md` | feature, v1.14.0 -- EXECUTED 2026-09-03 (SHIPPED, live on npm) | M | Fat hover (`hitTolerance: 'nearest'` -- charts-side ONLY, rides the existing findNearest k=1) + injected Voronoi cell tessellation layer on scatter (`cells: { index }` per the spatialIndex precedent). Carried THE CONSUMER CONTRACT for delaunay's `createCellIndex`; delaunay 1.2.0 published 2026-09-03, charts built + gated against it (463/463, A20, 5 reversion proofs). One as-executed deviation recorded in the brief: postProject seam, not extract-time. |
 | ~~9~~ | ~~`overnight-holidays.md`~~ | **SHIPPED v1.13.0** | S-M | Overnight sessions (midnight-split normalization -- the sweep survived byte-structurally unchanged, planner falsified the brief's synth site into _normalizeSessionSpec) + holiday calendar (UTC-day-skip, gap fusion). qa added the Saturday-wrap rotate fixture the planner fixtures missed; four reversions proven. 453 tests + A19. Kept for reference. |
 | ~~8~~ | ~~`demo-refresh.md`~~ | **DONE 2026-09-02** (demo-only, no release) | M | Demo v1.6.0 -> v1.12.0: annotations, time-series weekend+sessions shading, hbar pan/zoom/brush wired live, 200-series virtualized legend against REAL lite-virtual via a scope-bridge adapter. Found + fixed a README doc bug: the shipped adapter snippet called `mountList(host, opts)` but lite-virtual 1.1.0's real signature is `(host, scope, opts)` with viewport/render keys -- README now ships the working ~25-line bridge (rides the next release). Kept for reference. |
 
@@ -92,6 +93,17 @@ surfaced while executing the future field-raster consumer brief here
 or their own ROADMAP lanes with charts grounding input. Also same day:
 lite-charts v1.15.0 released (horizontal legend virt + early-close
 calendar; 473/473 + A21; no delaunay surface involved).
+CONSUMPTION NOTICE OWED (2026-09-05, undeliverable -- their session ended
+after going dormant): charts v1.16.0 consumed createFieldIndex end-to-end
+(field: { index } on scatter; sampleField-only, never interpolate; NaN
+honored; locate/barycentric/triangleVertices unconsumed, waiting on a
+contour brief). Zero contract deviations. ONE doc note for them: the
+"+y-up bridge flips rows" clause from contract time is unnecessary --
+"row 0 = by0" is orientation-agnostic and the pixel-space consumer passes
+by0 = plotTop, no flip; if their docs cite a charts-side row flip, drop
+the clause. 1.4.0 dormancy UNCHANGED (a future contour brief consumes
+their shipped surface as-is; likely triggers nothing). DELIVER this to
+the next LiteDelaunay session that appears.
 PERF GROUNDING for the future field-raster/contour brief (their
 bench/bench.js on shipped 1.3.0, Node 22, Apple-Silicon-class, 1000x1000
 domain; medians, steady-state, heap deltas ~0): sampleField 64x64 ~0.55

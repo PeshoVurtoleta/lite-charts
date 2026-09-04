@@ -30,7 +30,7 @@ import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, c
 import { signal } from '@zakkster/lite-signal';
 // v1.14.0: the REAL published cell index (devDep) -- A20 gates the injected
 // tessellation end-to-end, not against a mock.
-import { createCellIndex } from '@zakkster/lite-delaunay';
+import { createCellIndex, createFieldIndex } from '@zakkster/lite-delaunay';
 import {
     createEventCanvas, quietCanvas, fireShared, runOpsGate, allocFailMsg,
     runAllocsGate, allocsFailMsg, graphDelta,
@@ -877,5 +877,89 @@ export function run() {
         } finally {
             globalThis.document = prevDoc;
         }
+    }
+
+    // --- 16. field-raster storm (A22, v1.16.0) ---------------------------------
+    // v1.16.0 adds the injected field layer (field.index -> createFieldIndex,
+    // ONE sampleField per cold refresh into a pooled grid, per-cell color
+    // strings precomputed; drawn as a fillRect walk UNDER cells/markers).
+    // Structural claims: (1) a pan/zoom storm rebuilds + resamples exactly once
+    // per scale change -- never per frame, never per redraw -- and adds zero
+    // signal-graph nodes; (2) the per-frame raster DRAW walks prebuilt color
+    // strings: redraw with a live 64x48 raster stays inside the standard
+    // <=16 B/op budget with maxMajor:0, within 2 B/op of a no-field control;
+    // (3) interpolate is NEVER called (the counting handle exposes none, so a
+    // pointwise regression would throw, not silently allocate).
+    {
+        const N = 2000;
+        const xs = new Float32Array(N), ys = new Float32Array(N), zs = new Float32Array(N);
+        let seed = 7654321;
+        const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+        for (let i = 0; i < N; i++) {
+            xs[i] = rnd() * 1000; ys[i] = rnd() * 500;
+            zs[i] = 2 * xs[i] + 3 * ys[i] + 1;
+        }
+        let builds = 0, disposes = 0, samples = 0;
+        const inner = createFieldIndex(N);
+        const counting = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                sampleField: (z, gw, gh, a, b, c2, d, o) => { samples++; return h.sampleField(z, gw, gh, a, b, c2, d, o); },
+                dispose() { disposes++; h.dispose(); },
+            };
+        };
+        const mkScatter = (field) => {
+            const c = createScatterChart({
+                data: { xs, ys, zs },
+                zoom: true,
+                ...(field ? { field: { index: counting, value: 'z', opacity: 0.4 } } : {}),
+                width: 800, height: 400, schedule: (fn) => fn(),
+            });
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const c = mkScatter(true);
+        const ctrl = mkScatter(false);
+        check(builds === 1, () => `A22: expected 1 field build at mount, got ${builds}`);
+        check(samples === 1, () => `A22: expected 1 sampleField at mount, got ${samples}`);
+
+        // View storm: 208 writes alternating two zoomed views. Every write is a
+        // scale change -> exactly one dispose+rebuild+resample each; a redraw
+        // between writes must add nothing.
+        const vA = { xMin: 100, xMax: 900, yMin: 50, yMax: 450 };
+        const vB = { xMin: 200, xMax: 800, yMin: 100, yMax: 400 };
+        // Warm-up (the A19 precedent): the first writes settle one-time lazy
+        // registrations/disposals; the gated storm must then be EXACTLY flat.
+        for (let i = 0; i < 8; i++) c.setView(i & 1 ? vA : vB);
+        const b0 = builds, d0 = disposes;
+        const before = graphSnapshot();
+        for (let i = 0; i < 208; i++) {
+            c.setView(i & 1 ? vA : vB);
+            c.redraw();
+        }
+        const after = graphSnapshot();
+        check(after.nodes - before.nodes === 0,
+            () => `A22: ${after.nodes - before.nodes} new signal-graph nodes across the view storm (expected 0)`);
+        check(builds - b0 === 208 && disposes - d0 === 208,
+            () => `A22: expected exactly 208 builds / 208 disposes across 208 view writes, got ${builds - b0}/${disposes - d0}`);
+        check(samples === builds,
+            () => `A22: expected one sampleField per build, got ${samples} samples / ${builds} builds`);
+
+        // Redraw budget: raster walk vs no-field control.
+        const bBefore = builds;
+        const gField = runOpsGate(() => { c.redraw(); }, { ops: 4000, warmup: 300 });
+        const gCtrl = runOpsGate(() => { ctrl.redraw(); }, { ops: 4000, warmup: 300 });
+        check(builds === bBefore, () => `A22: redraw storm rebuilt the field index (${builds - bBefore}x)`);
+        if (!gField.report.ok) die(allocFailMsg('A22.field-redraw', gField.report, gField.summary));
+        check(gField.bytesPerOp <= 16,
+            () => `A22: field redraw ${gField.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gField.bytesPerOp - gCtrl.bytesPerOp) <= 2.0,
+            () => `A22: field redraw ${gField.bytesPerOp.toFixed(3)} B/op vs no-field control ${gCtrl.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        ctrl.destroy();
+        c.destroy();
+        check(disposes === builds, () => `A22: ${builds - disposes} field handle(s) never disposed`);
     }
 }

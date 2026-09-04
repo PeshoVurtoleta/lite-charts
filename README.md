@@ -17,13 +17,30 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.15.0 -- horizontal legend virtualization + early-close
-holidays + an earlier fail-closed point for bad legend config (minor). A
-virtualized top/bottom legend windows a single X-scrolling row (`legend.width` +
-`legend.itemWidth`); `shading.holidays` accepts `{ ts, closeMinutes }` early
-closes alongside whole-day numbers; and bad legend config throws with zero owned
-signals allocated. A chart using none of these is byte-identical.
-**473/473 tests pass** plus a torture/stress gate (`npm run torture`).
+**Status:** v1.16.0 -- injected field-raster layer on `createScatterChart`
+(minor). `field: { index, value, ... }` rasterizes the primary series' per-point
+scalar into a smooth barycentric-interpolated background heatmap, drawn under the
+cells layer and the markers at 0 B/frame, from an injected `FieldIndexFactory`
+(optional peer `@zakkster/lite-delaunay` `^1.3.0`). A scatter with no `field` key
+is byte-identical. **482/482 tests pass** plus a torture/stress gate
+(`npm run torture`).
+
+**New in v1.16.0:**
+- **Injected field-raster layer.** `field: { index: createFieldIndex(N), value,
+  gridW?, gridH?, colors?, colorFn?, opacity? }`: the primary series' per-point
+  scalar `value` is rasterized into a smooth interpolated background heatmap
+  (the third injection rung after `spatialIndex` and `cells`), drawn UNDER the
+  cells and markers inside the plot clip at 0 B/frame. Built over pixel-space
+  points and re-sampled cold on every data/scale change (same `postProject`
+  seam as cells), so pan/zoom never serves a stale or affine-wrong field. One
+  `sampleField` per refresh fills a pooled grid; per-cell colors are precomputed
+  cold. `gridW`/`gridH` integers in `[8, 256]` (default `64 x 48`); `colors`
+  `[low, high]` hex ramp or `colorFn(v, vMin, vMax)` (extents over FINITE cells
+  only); `opacity` default `0.5`. Independent fault domain from `cells` (each
+  has its own `try/catch`, error slot, and handle disposal). SVG export parity
+  (one `<rect>` per finite cell). Construction throws before any owned signal:
+  non-object `field`, missing/non-function `index`, missing `value`, or
+  non-integer/out-of-caps `gridW`/`gridH`. See "Field raster" below for wiring.
 
 **New in v1.15.0:**
 - **Horizontal legend virtualization.** A virtualized legend at
@@ -1099,6 +1116,51 @@ polygon. Cells are primary-series only (a multi-series tessellation is
 ill-posed) and scatter only; a scatter without `cells` and without
 `hitTolerance: 'nearest'` is byte-identical to before.
 
+## Field raster (v1.16.0)
+
+The third rung of the injection ladder -- `spatialIndex` (hit-test) -> `cells`
+(Voronoi) -> `field` (barycentric interpolation). Where `cells` gives each point
+a colored polygon, `field` interpolates the per-point scalar into a continuous
+heatmap *under* the dots:
+
+```js
+import { createScatterChart } from '@zakkster/lite-charts';
+import { createFieldIndex } from '@zakkster/lite-delaunay'; // optional peer ^1.3.0
+
+const chart = createScatterChart({
+    data: samples,          // [{ x, y, temp }, ...]
+    x: 'x',
+    y: 'y',
+    field: {
+        index: createFieldIndex(samples.length), // injected -- charts imports nothing
+        value: 'temp',                           // the scalar to interpolate
+        gridW: 64, gridH: 48,                    // raster resolution ([8,256])
+        colors: ['#dbeafe', '#b91c1c'],          // low -> high ramp
+        opacity: 0.5,
+    },
+});
+chart.mount('#chart');
+```
+
+The mesh is built over the same projected `pxs/pys` the cells layer uses and
+re-**sampled** (one `sampleField` call) cold on every data or scale change, so
+the field is anisotropy-correct and pan/zoom never serves a stale raster. The
+per-frame draw walks a **precomputed** per-cell color-string array
+(`fillStyle`/`fillRect`, NaN cells skipped) at **0 B/frame**; `exportSVG` emits
+one `<rect>` per finite cell. The color extents (`vMin`/`vMax`) come from the
+**finite sampled cells only**, so a panned-out point never pins the ramp; pass
+`colorFn(v, vMin, vMax)` for a custom mapping. Points with a NaN `value` drop
+out of the mesh, and cells outside the convex hull paint nothing (never a false
+zero). The `field` layer is an **independent fault domain** from `cells` -- a
+fault in one never suppresses the other, and each disposes only its own index
+handle. Primary-series only, scatter only; a scatter without `field` is
+byte-identical.
+
+SoA note: with `data: { xs, ys }` add a parallel `zs` typed array (zero-copy,
+like bubble's `rs`) or pass a FUNCTION accessor as `value` -- a string key
+cannot address per-point values on SoA input, so it fails CLOSED to no field
+(markers still draw, nothing throws).
+
 ## Performance
 
 All numbers are from `bench/line-100k.mjs` running on Node 22 against a
@@ -1823,8 +1885,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.12.0** | Legend virtualization. `legend.virtualize: (host, opts) => ({ dispose })` windows the legend rows through a caller-supplied adapter (wire it to `@zakkster/lite-virtual`'s `mountList` -- your import; `Charts.js` contains zero references to it, asserted by test). A 200-series legend holds <= 14 DOM rows, ONE shared visibility effect, and ONE delegated click listener regardless of series count; `renderRow` re-reads swatch colour + visibility per bind so recycled rows never carry stale state. Explicit opt-in, vertical (`left`/`right`) only; the eager path `buildLegendDOM`..`installLegend` is byte-identical (SHA-pinned in the suite). Fail-closed: non-function `virtualize`, horizontal position, missing/`null` `height` (null is not 0), invalid `itemHeight`/`overscan`, and a dispose-less factory handle all throw with nothing attached. 444 tests (9 new: bounded window, scroll rebind, recycled-click signal index, asymmetric-recycle dimmed-state, byte-identity + confinement, validation matrix, handle validation, 50x retention, O(1) listeners -- V3/V4/V6 proven load-bearing by reversion) + a 50k-op scroll-storm torture case (A18: 1.02 B/op vs 0.85 control, zero new signal-graph nodes). |
 | **v1.13.0** | Overnight sessions + holiday calendar. `shading.sessions` accepts `closeMinutes < openMinutes`: the session is split at the UTC midnight seam into an evening half + a next-day morning half (weekday bits rotated), so the single-cursor complement sweep is structurally unchanged and the seam never emits a band; `days` names the weekday the session opens. `shading.holidays: number[]` (epoch ms, truncated to UTC day starts) closes each whole UTC day and fuses it with the adjacent gaps into ONE band; holidays without sessions ride a synthesized full-day Mon-Fri calendar (weekends + holidays), validated identically. One fill for all gap bands (per-holiday fills would break the fusion -- use an `annotations` range). Fail-closed: zero-width sessions, `[]`, `null`/non-integer/`Date`/string holiday entries all throw at construction; pre-1970 dates floor to the correct UTC day. `_weekendBands` byte-identical (SHA-pinned). 453 tests (9 new: v1.11.0 behavioral identity, confinement pin, seam-never-emits, exact Globex 5-band fixture, holiday-fusion exact bounds + chart-level count, holidays-only equivalence, validator matrix, overnight edges + Saturday-wrap rotate + pre-1970 floor, 50x retention -- four reversions proven load-bearing: rotate wrap-drop, split removal, day-skip deletion, floor->% truncation) + a band-regeneration torture case (A19). |
 | **v1.14.0** | Fat hover + injected Voronoi cell layer on `createScatterChart`. `hitTolerance: 'nearest'` snaps the hover to the closest point from anywhere in the plot (finite plot-diagonal cap, linear and indexed paths agree). `cells: { index, colorKey?, fillOpacity?, stroke?, strokeWidth? }` tessellates the primary series with pixel-space bbox-clipped Voronoi polygons from an injected `CellIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.2.0`), rebuilt cold at a new `postProject` renderer seam (after projection -- extract-time would index stale pixels), drawn under the markers at 0 B/frame with a hover-cell highlight off the crosshair. Degenerate clouds draw markers with no cells; index faults fail closed (mount-time door / later runs skip cells); construction throws fire before any owned signal is allocated. 463 tests (10 new: independent half-plane oracle + exact plot-tiling invariant, indexed/linear fat-hover agreement, SVG parity with clipPath isolation, zero-node construction throws, retention, source-scan confinement -- five mechanisms reversion-proven) + torture A20 (one rebuild per scale change over a 208-write view storm, redraw within 2 B/op of a no-cells control, vs the real published `createCellIndex`). |
-| **v1.15.0** (this) | Horizontal legend virtualization + early-close holidays + an earlier fail-closed point for bad legend config. A virtualized legend at `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling along X: supply `legend.width` + `legend.itemWidth` (positive integers) and the adapter receives `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. Size keys are orientation-exclusive -- `height`/`itemHeight` on top/bottom, or `width`/`itemWidth` on left/right, throw at construction; the left/right adapter opts + DOM path stay byte-identical. `shading.holidays` entries may be `{ ts, closeMinutes }` (early close): every session that UTC day clamps to close at `closeMinutes` (1..1439) and the trailing closed time fuses forward like a whole-day holiday's band; whole-day (number) entries are byte-identical. Early-close doors that throw at construction: object without `ts`; bad `ts`; `closeMinutes` null/non-integer/outside 1..1439; a duplicate UTC day across all entries; an early close on a weekday with no open session; an early close on a day carrying an overnight evening session. The clamp is one cold-path line in `_sessionBands` (`cutMs = Infinity` on non-early days). Legend position/container validation + `virtualize` normalization are hoisted above the first owned signal in `createBaseAxisChart`, so bad legend config throws with nothing allocated; when both chart-type options and legend are invalid, the `initOpts` error wins. 10 new tests (463->473) + torture A21 (horizontal scroll storm vs a vertical-storm branch-parity control, measured delta 0.000 B/op); five reversion proofs. |
-| v1.15.x / v1.16.0 (candidates) | band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
+| **v1.15.0** | Horizontal legend virtualization + early-close holidays + an earlier fail-closed point for bad legend config. A virtualized legend at `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling along X: supply `legend.width` + `legend.itemWidth` (positive integers) and the adapter receives `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. Size keys are orientation-exclusive -- `height`/`itemHeight` on top/bottom, or `width`/`itemWidth` on left/right, throw at construction; the left/right adapter opts + DOM path stay byte-identical. `shading.holidays` entries may be `{ ts, closeMinutes }` (early close): every session that UTC day clamps to close at `closeMinutes` (1..1439) and the trailing closed time fuses forward like a whole-day holiday's band; whole-day (number) entries are byte-identical. Early-close doors that throw at construction: object without `ts`; bad `ts`; `closeMinutes` null/non-integer/outside 1..1439; a duplicate UTC day across all entries; an early close on a weekday with no open session; an early close on a day carrying an overnight evening session. The clamp is one cold-path line in `_sessionBands` (`cutMs = Infinity` on non-early days). Legend position/container validation + `virtualize` normalization are hoisted above the first owned signal in `createBaseAxisChart`, so bad legend config throws with nothing allocated; when both chart-type options and legend are invalid, the `initOpts` error wins. 10 new tests (463->473) + torture A21 (horizontal scroll storm vs a vertical-storm branch-parity control, measured delta 0.000 B/op); five reversion proofs. |
+| **v1.16.0** (this) | Injected field-raster layer on `createScatterChart`. `field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }` rasterizes the primary series' per-point scalar into a smooth barycentric-interpolated background heatmap -- the third injection rung after `spatialIndex` and `cells`. The triangulated mesh + serpentine grid sampler come from an injected `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0`, `createFieldIndex(N)`; lite-charts imports nothing), built over pixel-space points and re-sampled cold on every data/scale change on the same `postProject` seam as cells, so it stays anisotropy-correct under pan/zoom. One `sampleField` per refresh fills a pooled grow-only grid; per-cell CSS colors are precomputed cold so the draw walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped) at 0 B/frame; `exportSVG` emits one `<rect>` per finite cell. `gridW`/`gridH` integers in `[8,256]` (default 64x48); `colors` `[low,high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v,vMin,vMax)` with extents over the FINITE cells only; `opacity` default 0.5. Independent fault domain from `cells` (own `try/catch`, own `ctx` error slot OR-ed into the mount door, own handle disposal); drawn UNDER the cells node. `interpolate` is never called. Construction throws before any owned signal: non-object `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps `gridW`/`gridH` (`== null` gated before any `+`). A scatter with no `field` is byte-identical. |
+| v1.16.x / v1.17.0 (candidates) | contour/isoline layer over the same `FieldIndex` mesh; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
 
 ## Ecosystem
 

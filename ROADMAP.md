@@ -5,7 +5,49 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.15.0 (current)
+## v1.16.0 (current)
+
+Injected field-raster layer on `createScatterChart` (brief #11, the consumer
+of the published lite-delaunay v1.3.0 `createFieldIndex` surface --
+`briefs/field-raster.md`, executed against the installed package). A scatter
+with no `field` key is byte-identical.
+
+- **Field-raster layer.** `field: { index, value, gridW?, gridH?, colors?,
+  colorFn?, opacity? }`: the primary series' per-point scalar `value` is
+  rasterized into a smooth barycentric-interpolated background heatmap -- the
+  third rung of the injection ladder (`spatialIndex` -> `cells` -> `field`),
+  drawn UNDER the cells node and the markers inside the plot clip at 0 B/frame.
+  The triangulated mesh + serpentine grid sampler arrive via an injected
+  `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0` ships
+  `createFieldIndex`; lite-charts imports nothing). Built over PIXEL-space
+  points and re-sampled COLD on every data/scale change on the same
+  `postProject` seam the cells layer uses, so it stays anisotropy-correct under
+  pan/zoom. PIXEL space is y-down so `by0 = plotTop` and the sampler's contract
+  `row 0 = by0` places row 0 at the TOP row -- NO flip.
+- **Cold sampler, hot walk.** One `sampleField` call per refresh fills a pooled
+  grow-only `Float32Array` grid; `vMin`/`vMax` are taken over the FINITE cells
+  only (a panned-out point never pins the ramp) and the per-cell CSS color
+  strings are precomputed cold, so the per-frame draw only walks a prebuilt
+  array (`fillStyle`/`fillRect`, NaN cells skipped). `interpolate` is never
+  called. `exportSVG` emits one `<rect>` per finite cell through the same mock
+  serializer. `gridW`/`gridH` integers in `[8, 256]` (default 64x48); `colors`
+  `[low, high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v, vMin,
+  vMax)`; `opacity` default 0.5, clamped.
+- **Independent fault domain.** `_scatterPostProject` runs `_scatterRefreshCells`
+  then `_scatterRefreshField` as two separate passes -- each has its own
+  `try/catch`, its own `ctx` error slot (`cellError`/`fieldError`, both OR-ed
+  into the mount fail-closed door), and disposes ONLY its own index handle. A
+  cells fault cannot suppress the field and vice-versa.
+- **Kernel isolation.** The ramp's hex parser is a minimal axis-kernel duplicate
+  (`_fieldParseHex`), not a reference to the grid kernel's `_parseHexColor`;
+  the A5/A15 source-region pins keep the grid kernel tree-shakeable out of a
+  scatter-only bundle. Cold-path only.
+- **Hardening.** Construction throws fire BEFORE any owned signal: non-object
+  `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps
+  `gridW`/`gridH` (`== null` gated before any `+`).
+- `@zakkster/lite-delaunay` peer bumped to `^1.3.0` (still OPTIONAL).
+
+## v1.15.0
 
 Horizontal legend virtualization + early-close holidays + an earlier
 fail-closed point for bad legend config. A chart using none of these is

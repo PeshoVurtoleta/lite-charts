@@ -3996,6 +3996,19 @@ const _disposeCellIndex = (state) => {
     }
 };
 
+// v1.16.0: field-index disposal -- byte-identical shape to _disposeCellIndex.
+// Separate handle so a cells fault and a field fault never touch each other's
+// resource (the two layers build from the same pxs/pys but own distinct
+// indices, distinct faults, distinct disposal).
+const _disposeFieldIndex = (state) => {
+    if (state.fieldIndex) {
+        if (typeof state.fieldIndex.dispose === 'function') {
+            state.fieldIndex.dispose();
+        }
+        state.fieldIndex = null;
+    }
+};
+
 // Construction-time validator + one-time scratch. Returns null when no cells
 // config was supplied (every downstream branch stays dead). Fails closed on a
 // non-object or a missing index factory.
@@ -4021,6 +4034,107 @@ const _normalizeCellsSpec = (cells) => {
         // cold), owned by the opts object -- never per-frame or per-cell. 2 * 64
         // floats = the documented degree+5 hull bound; cell() throws past it.
         outXY: new Float32Array(128),
+    };
+};
+
+// v1.16.0 field-raster layer support.
+//
+// Minimal hex parser DUPLICATED into the axis kernel. The shipped
+// `_parseHexColor` lives in the grid-kernel region (createBaseGridChart body),
+// which the A5/A15 kernel-isolation source-region pins keep tree-shakeable out
+// of a scatter-only bundle; referencing it from here would drag the whole grid
+// kernel into that bundle. This ramp is built COLD (once per data/scale change
+// in _scatterPostProject), never per frame, so a tiny local copy is the correct
+// trade -- kernel isolation over a shared byte. Returns [r,g,b] or null.
+const _fieldParseHex = (hex) => {
+    if (typeof hex !== 'string' || hex.length === 0 || hex.charCodeAt(0) !== 35) return null;
+    let r, g, b;
+    if (hex.length === 7) {
+        r = parseInt(hex.slice(1, 3), 16);
+        g = parseInt(hex.slice(3, 5), 16);
+        b = parseInt(hex.slice(5, 7), 16);
+    } else if (hex.length === 4) {
+        r = parseInt(hex.charAt(1) + hex.charAt(1), 16);
+        g = parseInt(hex.charAt(2) + hex.charAt(2), 16);
+        b = parseInt(hex.charAt(3) + hex.charAt(3), 16);
+    } else {
+        return null;
+    }
+    if (r !== r || g !== g || b !== b) return null;  // NaN guards
+    return [r, g, b];
+};
+
+// Grid caps (brief D5): their bench measures a 64x64 grid at ~0.55 ms/sample
+// on 100k points; a 256x256 grid is ~16x that. Cap the configurable grid so a
+// pathological gridW/gridH cannot turn the cold sampler into a stall.
+const FIELD_GRID_MIN = 8;
+const FIELD_GRID_MAX = 256;
+const FIELD_GRID_DEFAULT_W = 64;
+const FIELD_GRID_DEFAULT_H = 48;
+
+// Construction-time validator + one-time scratch grid. Returns null when no
+// field config was supplied (every downstream branch stays dead). Fails closed
+// on a non-object spec, a missing/non-function index factory, a missing value
+// source, or an out-of-caps / non-integer grid dimension. Every guard gates
+// `== null` BEFORE any `+` or coercion so a null never sneaks through as 0.
+const _normalizeFieldSpec = (field) => {
+    if (field == null) return null;
+    if (typeof field !== 'object') {
+        throw new Error('lite-charts: field must be an object with an index factory');
+    }
+    if (typeof field.index !== 'function') {
+        throw new Error('lite-charts: field.index must be a FieldIndex factory');
+    }
+    // value: REQUIRED numeric source (key / index / accessor). Gated == null
+    // BEFORE buildAccessor so an omitted value throws loud, never resolves to a
+    // silent 0. A NaN result marks a missing point -- their SoA-NaN compaction
+    // drops it from the triangulation and hull.
+    if (field.value == null) {
+        throw new Error('lite-charts: field.value is required (a numeric key, index, or accessor)');
+    }
+    // gridW / gridH: == null gated FIRST (so +null === 0 never masquerades as a
+    // valid tiny grid), then integer + cap check. Defaults 64 x 48.
+    let gridW = FIELD_GRID_DEFAULT_W;
+    let gridH = FIELD_GRID_DEFAULT_H;
+    if (field.gridW != null) {
+        const w = field.gridW;
+        if (!Number.isInteger(w) || w < FIELD_GRID_MIN || w > FIELD_GRID_MAX) {
+            throw new Error('lite-charts: field.gridW must be an integer in [8, 256]');
+        }
+        gridW = w;
+    }
+    if (field.gridH != null) {
+        const h = field.gridH;
+        if (!Number.isInteger(h) || h < FIELD_GRID_MIN || h > FIELD_GRID_MAX) {
+            throw new Error('lite-charts: field.gridH must be an integer in [8, 256]');
+        }
+        gridH = h;
+    }
+    // Ramp: `colors: [low, high]` hex endpoints (the grid-heatmap default ramp),
+    // parsed COLD to [r,g,b]; optional `colorFn(v, vMin, vMax) -> CSS string`
+    // wins when supplied. Endpoints that don't parse fall back to blue-100 /
+    // blue-900, matching _computeGridColors.
+    const colors = Array.isArray(field.colors) ? field.colors : null;
+    const lo = (colors && _fieldParseHex(colors[0])) || [219, 234, 254];  // blue-100
+    const hi = (colors && _fieldParseHex(colors[1])) || [30, 58, 138];    // blue-900
+    const colorFn = typeof field.colorFn === 'function' ? field.colorFn : null;
+    // opacity: == null gated, default 0.5, clamped to [0, 1]; a NaN opacity
+    // falls back to the default rather than poisoning globalAlpha.
+    let opacity = 0.5;
+    if (field.opacity != null) {
+        const o = +field.opacity;
+        opacity = o !== o ? 0.5 : (o < 0 ? 0 : (o > 1 ? 1 : o));
+    }
+    return {
+        index: field.index,
+        // Numeric accessor (buildAccessor: `+v`, Date -> ms, NaN passthrough).
+        valueAccessor: buildAccessor(field.value),
+        gridW,
+        gridH,
+        lo,
+        hi,
+        colorFn,
+        opacity,
     };
 };
 
@@ -4502,6 +4616,10 @@ const _initScatterOpts = (config) => {
         // v1.14.0: optional injected Voronoi cell layer (null when absent, so
         // every downstream branch -- draw node, refresh, extract -- is dead).
         cellsSpec: _normalizeCellsSpec(config.cells),
+        // v1.16.0: optional injected interpolated field-raster layer (null when
+        // absent -> every downstream branch dead). Normalized here so a bad
+        // spec throws at construction, BEFORE the first _own(signal()).
+        fieldSpec: _normalizeFieldSpec(config.field),
         strokeRef: { value: config.stroke != null ? config.stroke : null },
         strokeWidthRef: { value: config.strokeWidth != null ? +config.strokeWidth : 0 },
         fillOpacityRef: { value: config.fillOpacity != null ? +config.fillOpacity : 1 },
@@ -4527,6 +4645,10 @@ const _extractScatterData = (state, data, xAcc, yAcc, ctx) => {
     // kernel re-projects pxs/pys after this returns, so any prior tessellation
     // is stale. _scatterPostProject rebuilds it (cold) on the same run.
     _disposeCellIndex(state);
+    // v1.16.0: the field index rides the same lifecycle and disposes here for
+    // the same reason -- separate handle, so a cells refresh and a field
+    // refresh never share a disposal.
+    _disposeFieldIndex(state);
 
     // v1.14.0: per-point cell colors. When cells.colorKey is set, resolve each
     // primary-series row's color to a concrete CSS string so the cell draw can
@@ -4543,6 +4665,32 @@ const _extractScatterData = (state, data, xAcc, yAcc, ctx) => {
         }
     } else if (state.cellColors) {
         state.cellColors = null;
+    }
+
+    // v1.16.0: pack the field's per-point scalar values into state.zs
+    // (grow-only, ORIGINAL-indexed) so the cold postProject sampler reads one
+    // contiguous channel. AoS -> the value accessor per row. SoA -> a parallel
+    // `data.zs` channel when present (zero-copy semantics like bubble's
+    // data.rs), else the accessor against the SoA object as the row view. NaN
+    // passes through untouched: their SoA-NaN compaction drops a NaN site from
+    // the triangulation/hull, so a NaN z simply vanishes from the field rather
+    // than pinning it to 0.
+    const fspec = ctx.opts && ctx.opts.fieldSpec;
+    if (fspec) {
+        const n = state.n;
+        state.zs = ensureFloat32(state.zs, n);
+        const zs = state.zs;
+        const vAcc = fspec.valueAccessor;
+        if (data && data.xs && data.ys && typeof data.xs.length === 'number') {
+            if (data.zs && typeof data.zs.length === 'number') {
+                const dz = data.zs;
+                for (let i = 0; i < n; i++) zs[i] = +dz[i];
+            } else {
+                for (let i = 0; i < n; i++) zs[i] = vAcc(data, i);
+            }
+        } else if (Array.isArray(data)) {
+            for (let i = 0; i < n; i++) zs[i] = vAcc(data[i], i);
+        }
     }
 };
 
@@ -4669,6 +4817,52 @@ const makeScatterCellDrawFn = (state, refs, opts, ctx) => (c) => {
     c.restore();
 };
 
+// v1.16.0: field (interpolated raster) layer draw. One node per chart, UNDER
+// the cells node (added before it) and the markers, inside the plot clip. Walks
+// the prebuilt per-cell color-string array at 0 B/frame -- every string is
+// precomputed cold in _scatterRefreshField; the loop only sets fillStyle and
+// calls fillRect, skipping NaN cells (null color). exportSVG rides the same
+// fillRect -> <rect> serializer the mock canvas uses, so parity is free.
+const makeScatterFieldDrawFn = (state, refs, opts, ctx) => (c) => {
+    if (!refs.visibleRef.value) return;
+    // 0 finite cells (or no build) -> draw nothing; never trust a stale grid.
+    if ((state.fieldFiniteCount | 0) === 0) return;
+    const colors = state.fieldColors;
+    if (colors == null) return;
+    const spec = opts.fieldSpec;
+    const gw = spec.gridW, gh = spec.gridH;
+    const pb = ctx.plotBoundsBox;
+    const plotL = pb.x, plotT = pb.y;
+    const plotW = pb.w, plotH = pb.h;
+    if (plotW <= 0 || plotH <= 0) return;
+    // Cell -> pixel rect mapping is 1:1 (grid built over the plot rect in
+    // pixels). Row 0 = top row (NO flip -- see _scatterRefreshField).
+    const cw = plotW / gw;
+    const ch = plotH / gh;
+
+    // Plot clip, identical idiom to the cells layer.
+    c.save();
+    c.beginPath();
+    c.rect(plotL, plotT, plotW, plotH);
+    c.clip();
+    c.beginPath();
+
+    const prevAlpha = c.globalAlpha;
+    c.globalAlpha = spec.opacity;
+    for (let row = 0; row < gh; row++) {
+        const base = row * gw;
+        const y = plotT + row * ch;
+        for (let col = 0; col < gw; col++) {
+            const color = colors[base + col];
+            if (color == null) continue;  // NaN / outside-hull cell: paint nothing
+            c.fillStyle = color;
+            c.fillRect(plotL + col * cw, y, cw, ch);
+        }
+    }
+    c.globalAlpha = prevAlpha;
+    c.restore();
+};
+
 // v1.14.0: cold cell-geometry refresh. Called from Effect 2 after projection
 // (postProject seam), so pxs/pys are current. Lazily builds the injected index
 // (extract disposed the prior one), then packs each point's bbox-clipped cell
@@ -4677,7 +4871,7 @@ const makeScatterCellDrawFn = (state, refs, opts, ctx) => (c) => {
 // during this cold pass; caught here, it zeroes the spans (markers draw, no
 // cells -- bit-identical to the degenerate path) and records the message on ctx
 // for mount()-time fail-closed surfacing. Never re-throws from the effect.
-const _scatterPostProject = (states, ctx) => {
+const _scatterRefreshCells = (states, ctx) => {
     const opts = ctx.opts;
     const spec = opts.cellsSpec;
     if (spec == null) return;
@@ -4734,6 +4928,113 @@ const _scatterPostProject = (states, ctx) => {
             ? err.message
             : 'lite-charts: cell index refresh failed';
     }
+};
+
+// v1.16.0: cold field (interpolated raster) refresh. Its OWN try/catch and
+// ctx.fieldError so a cells fault cannot kill the field and a field fault
+// cannot kill the cells -- each disposes ONLY its own handle. Lazily builds the
+// injected field index (extract disposed the prior one), then ONE sampleField
+// into the pooled grow-only grid, computes vMin/vMax over FINITE cells only
+// (brief D4 -- a panned-out point must not pin the ramp), and precomputes the
+// per-cell CSS color-string array (NaN cell -> null, painted never). NEVER
+// calls interpolate. First-build faults surface at mount; later faults skip
+// the field for this pass (markers/cells still draw).
+const _scatterRefreshField = (states, ctx) => {
+    const opts = ctx.opts;
+    const spec = opts.fieldSpec;
+    if (spec == null) return;
+    ctx.fieldError = null;
+    // D6: primary series only (a multi-series interpolation is ill-posed).
+    const primary = states[0];
+    if (primary == null || primary.n === 0) {
+        if (primary) primary.fieldFiniteCount = 0;
+        return;
+    }
+    const n = primary.n;
+    const pxs = primary.pxs;
+    const pys = primary.pys;
+    const zs = primary.zs;
+    if (pxs === null || pys === null || zs == null) {
+        primary.fieldFiniteCount = 0;
+        return;
+    }
+
+    const gw = spec.gridW, gh = spec.gridH;
+    const total = gw * gh;
+    // Pooled grow-only grid + color-string array (grid dims are fixed at
+    // construction, so this allocates once and never grows in practice; the
+    // >= guard keeps the pool contract uniform with the cells layer).
+    if (!primary.fieldGrid || primary.fieldGrid.length < total) {
+        primary.fieldGrid = new Float32Array(total);
+    }
+    if (!primary.fieldColors || primary.fieldColors.length < total) {
+        primary.fieldColors = new Array(total);
+    }
+    const grid = primary.fieldGrid;
+    const colors = primary.fieldColors;
+
+    const pb = ctx.plotBoundsBox;
+    // PIXEL space is y-DOWN: by0 = plotTop (the SMALLER pixel y). sampleField's
+    // contract "row 0 = by0" therefore places row 0 at the TOP row -- so NO row
+    // flip is needed here (the brief's +y-up flip does NOT apply: these bounds
+    // are already screen-oriented and by0 < by1 holds because top < bottom).
+    const bx0 = pb.x, by0 = pb.y, bx1 = pb.x + pb.w, by1 = pb.y + pb.h;
+    try {
+        if (!primary.fieldIndex) primary.fieldIndex = spec.index(pxs, pys, n);
+        const idx = primary.fieldIndex;
+        // ONE serpentine sampler pass -- never point-by-point interpolate.
+        const finite = idx.sampleField(zs, gw, gh, bx0, by0, bx1, by1, grid) | 0;
+        primary.fieldFiniteCount = finite;
+        if (finite <= 0) return;  // 0 finite cells -> draw nothing this pass
+
+        // vMin/vMax over FINITE cells only.
+        let vMin = Infinity, vMax = -Infinity;
+        for (let k = 0; k < total; k++) {
+            const v = grid[k];
+            if (v === v && v !== Infinity && v !== -Infinity) {
+                if (v < vMin) vMin = v;
+                if (v > vMax) vMax = v;
+            }
+        }
+        const span = vMax - vMin;
+        const colorFn = spec.colorFn;
+        const lo = spec.lo, hi = spec.hi;
+        const lr = lo[0], lg = lo[1], lb = lo[2];
+        const hr = hi[0], hg = hi[1], hb = hi[2];
+        for (let k = 0; k < total; k++) {
+            const v = grid[k];
+            if (!(v === v) || v === Infinity || v === -Infinity) {
+                colors[k] = null;  // NaN / outside-hull: painted never
+                continue;
+            }
+            if (colorFn) {
+                colors[k] = colorFn(v, vMin, vMax);
+            } else {
+                const t = span > 0 ? (v - vMin) / span : 0;
+                const r = (lr + t * (hr - lr)) | 0;
+                const g = (lg + t * (hg - lg)) | 0;
+                const b = (lb + t * (hb - lb)) | 0;
+                colors[k] = 'rgb(' + r + ',' + g + ',' + b + ')';
+            }
+        }
+    } catch (err) {
+        // Any field-index / sample fault: fail closed to no-field (markers and
+        // cells still draw) and surface at mount. Dispose ONLY the field handle.
+        primary.fieldFiniteCount = 0;
+        _disposeFieldIndex(primary);
+        ctx.fieldError = err && err.message
+            ? err.message
+            : 'lite-charts: field index refresh failed';
+    }
+};
+
+// v1.14.0 + v1.16.0: cold post-projection pass. Refreshes the cells layer then
+// the field layer as INDEPENDENT fault domains -- each has its own try/catch,
+// its own ctx error slot, and disposes only its own handle, so a fault in one
+// can never suppress or corrupt the other (both build from the same pxs/pys).
+const _scatterPostProject = (states, ctx) => {
+    _scatterRefreshCells(states, ctx);
+    _scatterRefreshField(states, ctx);
 };
 
 const _scatterHitTest = (canvasX, canvasY, primary, /*xScale*/_xs, ctx) => {
@@ -4804,6 +5105,11 @@ const _scatterCleanup = (states) => {
     for (let i = 0; i < states.length; i++) {
         _disposeSpatialIndex(states[i]);
         _disposeCellIndex(states[i]);
+        // v1.16.0: dispose the field handle + release its pooled arrays so
+        // nothing outlives the chart. Separate handle from cells.
+        _disposeFieldIndex(states[i]);
+        states[i].fieldColors = null;
+        states[i].fieldGrid = null;
     }
 };
 
@@ -5078,6 +5384,9 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.14.0: cold cell-geometry refresh records an overflow message here
         // for mount()-time fail-closed surfacing (see _scatterPostProject).
         cellError: null,
+        // v1.16.0: the field-raster refresh records a first-build fault here,
+        // surfaced at mount alongside cellError (independent fault domain).
+        fieldError: null,
     };
     // seriesStates is declared above rendererCtx in source order; assign it
     // here now that rendererCtx exists.
@@ -5714,7 +6023,7 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.14.0: a cell-refresh overflow on the first sync run surfaces here
         // too (same unwind), mirroring the log fail-closed door. A later invalid
         // run only skips its cells (markers still draw); this check runs once.
-        const _mountError = _logDomainError || rendererCtx.cellError;
+        const _mountError = _logDomainError || rendererCtx.cellError || rendererCtx.fieldError;
         if (_mountError) {
             for (let i = disposers.length - 1; i >= 0; i--) {
                 try { disposers[i](); } catch (_) { /* best-effort unwind */ }
@@ -5789,6 +6098,17 @@ const createBaseAxisChart = (config, renderer) => {
         }, rendererCtx);
         disposers.push(xAxis.dispose);
         disposers.push(yAxis.dispose);
+
+        // v1.16.0: field (interpolated raster) layer. One node per chart, added
+        // BEFORE the cells node (so it renders UNDER cells, which render under
+        // markers -- scene draws in tree order), inside the plot clip. fieldSpec
+        // is a scatter-only opts field. Primary series only (D6). Gated on its
+        // OWN spec, independent of the cells node.
+        if (chartOpts && chartOpts.fieldSpec) {
+            const fieldDraw = makeScatterFieldDrawFn(
+                seriesStates[0], seriesRefs[0], chartOpts, rendererCtx);
+            scene.root.add(pathNode({ draw: (ctx) => fieldDraw(ctx) }));
+        }
 
         // v1.14.0: cell (Voronoi) layer. One node per chart, added BEFORE the
         // series marker nodes so it renders UNDERNEATH them (scene draws in tree

@@ -33,7 +33,7 @@ setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
 import { createLineChart, createTimeLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, _testHelpers } from '../Charts.js';
 // v1.14.0: the REAL published cell index (devDep) -- the tessellation tests run
 // end-to-end against the actual consumer contract, not a mock.
-import { createCellIndex } from '@zakkster/lite-delaunay';
+import { createCellIndex, createFieldIndex } from '@zakkster/lite-delaunay';
 import {
     createMockCanvas,
     countCalls,
@@ -9808,5 +9808,365 @@ describe('v1.15.0 -- horizontal legend virtualization + early-close holidays', (
             [M + 2 * D + 720 * MIN, M + 3 * D],   // Wed 12:00 -> Thu 00:00
             [M + 5 * D, M + 7 * D],               // the weekend
         ], 'synth calendar early close shades from noon; ts truncated to the UTC day');
+    });
+});
+
+describe('v1.16.0 -- injected field-raster layer (vs REAL lite-delaunay 1.3.0)', () => {
+    const W = 800, H = 400;
+    const OP = 0.37; // distinctive globalAlpha so field rects are unambiguous in ctx.calls
+
+    // Diamond cloud in data space [0,100]^2: |x-50| + |y-50| <= 50. Its hull is
+    // the diamond, so the PLOT CORNERS project outside the hull -- corner grid
+    // cells must stay unpainted (NaN confinement is observable, unlike a cloud
+    // whose hull covers the whole plot).
+    const diamondData = (() => {
+        const rows = [];
+        for (let x = 0; x <= 100; x += 10) {
+            for (let y = 0; y <= 100; y += 10) {
+                if (Math.abs(x - 50) + Math.abs(y - 50) <= 50) {
+                    rows.push({ x, y, z: 2 * x + 3 * y + 1 });
+                }
+            }
+        }
+        return rows;
+    })();
+
+    const mkField = (extra, dataOverride) => createScatterChart({
+        data: dataOverride != null ? dataOverride : diamondData,
+        width: W, height: H, schedule: (fn) => fn(),
+        field: Object.assign({ index: createFieldIndex(1024), value: 'z', opacity: OP }, extra),
+    });
+
+    // Pull the field pass out of ctx.calls: the rects painted while
+    // globalAlpha === OP. Returns [{x, y, w, h, color}].
+    const fieldRects = (ctx) => {
+        const out = [];
+        let inPass = false;
+        let fill = null;
+        for (const [name, args] of ctx.calls) {
+            if (name === 'set:globalAlpha') { inPass = args[0] === OP; continue; }
+            if (!inPass) continue;
+            if (name === 'set:fillStyle') { fill = args[0]; continue; }
+            if (name === 'fillRect') out.push({ x: args[0], y: args[1], w: args[2], h: args[3], color: fill });
+        }
+        return out;
+    };
+    const parseRgb = (c) => {
+        const m = /^rgb\((\d+),(\d+),(\d+)\)$/.exec(c);
+        return m ? [+m[1], +m[2], +m[3]] : null;
+    };
+    // Ramp parameter from the red channel of the default blue-100 -> blue-900
+    // ramp (r: 219 -> 30, strictly decreasing in t).
+    const tOfColor = (c) => { const p = parseRgb(c); return p ? (219 - p[0]) / (219 - 30) : NaN; };
+
+    // -- FR1: independent planar oracle + hull confinement ---------------------
+    it('FR1: a planar field z = 2x+3y+1 paints every finite cell to the oracle color; hull-outside cells stay unpainted', () => {
+        const chart = mkField({});
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        const pb = chart._internal.plotBoundsBox;
+        const gw = 64, gh = 48;
+        const cw = pb.w / gw, ch = pb.h / gh;
+        const rects = fieldRects(ctx);
+        assert.ok(rects.length > gw * gh * 0.3, 'a solid share of cells painted: ' + rects.length);
+
+        // ORACLE: barycentric interpolation reproduces a planar field EXACTLY.
+        // z is planar in DATA space, and pixel space is an affine image of data
+        // space, so at any painted cell's pixel center: invert -> data ->
+        // z = 2x+3y+1 -> expected ramp color. vMin/vMax must match the chart's
+        // (finite-cells-only), so recover them from the painted extremes: on a
+        // planar field the painted min/max ARE the sampled vMin/vMax.
+        let vLo = Infinity, vHi = -Infinity;
+        const cellV = [];
+        for (const r of rects) {
+            const px = r.x + r.w / 2, py = r.y + r.h / 2;
+            const v = 2 * chart.xScale.invert(px) + 3 * chart.yScale.invert(py) + 1;
+            cellV.push(v);
+            if (v < vLo) vLo = v;
+            if (v > vHi) vHi = v;
+        }
+        const span = vHi - vLo;
+        assert.ok(span > 0, 'planar field spans');
+        for (let i = 0; i < rects.length; i++) {
+            const got = parseRgb(rects[i].color);
+            assert.ok(got, 'field cell painted with an rgb() ramp color: ' + rects[i].color);
+            const t = (cellV[i] - vLo) / span;
+            const exp = [(219 + t * (30 - 219)) | 0, (234 + t * (58 - 234)) | 0, (254 + t * (138 - 254)) | 0];
+            for (let ch3 = 0; ch3 < 3; ch3++) {
+                assert.ok(Math.abs(got[ch3] - exp[ch3]) <= 2,
+                    `cell ${i} channel ${ch3}: got ${got[ch3]} vs oracle ${exp[ch3]} (v=${cellV[i].toFixed(2)})`);
+            }
+        }
+
+        // Hull confinement: the four plot-corner cells sit outside the diamond
+        // hull -> never painted.
+        const painted = new Set(rects.map((r) => {
+            const col = Math.round((r.x - pb.x) / cw), row = Math.round((r.y - pb.y) / ch);
+            return row * gw + col;
+        }));
+        for (const [row, col] of [[0, 0], [0, gw - 1], [gh - 1, 0], [gh - 1, gw - 1]]) {
+            assert.ok(!painted.has(row * gw + col), `corner cell (${row},${col}) outside the hull stays unpainted`);
+        }
+        chart.destroy();
+    });
+
+    // -- FR2: orientation -- a top-hot field paints hotter at the top ----------
+    it('FR2: z = data y paints the TOP grid rows hotter than the bottom rows (row 0 = plot top, no flip)', () => {
+        const chart = mkField({ value: 'y' });
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        const pb = chart._internal.plotBoundsBox;
+        const ch = pb.h / 48;
+        const rects = fieldRects(ctx);
+        assert.ok(rects.length > 100, 'cells painted');
+        let topSum = 0, topN = 0, botSum = 0, botN = 0;
+        for (const r of rects) {
+            const row = Math.round((r.y - pb.y) / ch);
+            const t = tOfColor(r.color);
+            if (!(t === t)) continue;
+            if (row < 8) { topSum += t; topN++; }
+            else if (row >= 40) { botSum += t; botN++; }
+        }
+        assert.ok(topN > 0 && botN > 0, 'both bands sampled');
+        // High data y = plot TOP (screen y inverted). z = y -> top rows hot.
+        assert.ok(topSum / topN > botSum / botN + 0.3,
+            `top band t=${(topSum / topN).toFixed(3)} must be hotter than bottom t=${(botSum / botN).toFixed(3)}`);
+        chart.destroy();
+    });
+
+    // -- FR3: construction door matrix, zero nodes; fallback pins --------------
+    it('FR3: malformed field specs throw at construction with zero reactive nodes; ramp fallbacks match the heatmap precedent', () => {
+        const mk = (field) => createScatterChart({ data: diamondData, schedule: (fn) => fn(), field });
+        const before = stats().activeNodes;
+        const fn = createFieldIndex(1024);
+        const cases = [
+            [7, /field must be an object/],
+            ['x', /field must be an object/],
+            [{ value: 'z' }, /field\.index must be a FieldIndex factory/],
+            [{ index: 'x', value: 'z' }, /field\.index must be a FieldIndex factory/],
+            [{ index: fn }, /field\.value is required/],
+            [{ index: fn, value: null }, /field\.value is required/],
+            [{ index: fn, value: 'z', gridW: 7 }, /gridW must be an integer in \[8, 256\]/],
+            [{ index: fn, value: 'z', gridW: 257 }, /gridW must be an integer in \[8, 256\]/],
+            [{ index: fn, value: 'z', gridW: 64.5 }, /gridW must be an integer in \[8, 256\]/],
+            [{ index: fn, value: 'z', gridH: '48' }, /gridH must be an integer in \[8, 256\]/],
+        ];
+        for (const [field, re] of cases) assert.throws(() => mk(field), re);
+        assert.equal(stats().activeNodes - before, 0, 'doors fire before any owned signal alloc');
+
+        // Fallback pins (heatmap ramp-vocabulary parity, NOT doors -- documented):
+        // non-array colors / non-function colorFn fall back to the default ramp.
+        const c1 = mkField({ colors: 'red', colorFn: 'nope' });
+        const cv = createMockCanvas(W, H);
+        c1.mount(cv);
+        const rects = fieldRects(cv.getContext('2d'));
+        assert.ok(rects.length > 0 && /^rgb\(/.test(rects[0].color), 'default ramp used on junk colors/colorFn');
+        c1.destroy();
+    });
+
+    // -- FR4: independent fault domains (cells x field) ------------------------
+    it('FR4: a rebuild fault in one injected layer never kills the other; each disposes only its own handle', () => {
+        const mkCounting = (innerFactory, faultOnBuild) => {
+            const counts = { builds: 0, disposes: 0 };
+            const factory = (pxs, pys, n) => {
+                counts.builds++;
+                if (counts.builds === faultOnBuild) throw new Error('boom-' + faultOnBuild);
+                const h = innerFactory(pxs, pys, n);
+                return {
+                    cell: h.cell ? h.cell.bind(h) : undefined,
+                    cellCount: h.cellCount,
+                    sampleField: h.sampleField ? h.sampleField.bind(h) : undefined,
+                    dispose: () => { counts.disposes++; h.dispose(); },
+                };
+            };
+            return { factory, counts };
+        };
+        const mkBoth = (cellsF, fieldF) => createScatterChart({
+            data: diamondData, width: W, height: H, schedule: (fn) => fn(),
+            pan: true, zoom: true,
+            cells: { index: cellsF },
+            field: { index: fieldF, value: 'z', opacity: OP },
+        });
+
+        // (a) cells faults on rebuild #2 -> field still paints fresh.
+        const cA = mkCounting(createCellIndex(1024), 2);
+        const fA = mkCounting(createFieldIndex(1024), -1);
+        const chA = mkBoth(cA.factory, fA.factory);
+        const cvA = createMockCanvas(W, H);
+        chA.mount(cvA);
+        const ctxA = cvA.getContext('2d');
+        ctxA.calls.length = 0;
+        chA.setView({ xMin: -1, xMax: 101, yMin: -1, yMax: 101 });
+        assert.ok(fieldRects(ctxA).length > 0, 'field survives a cells rebuild fault');
+        chA.destroy();
+        assert.equal(cA.counts.disposes, cA.counts.builds - 1, 'faulted cells build has no handle to dispose; others all disposed');
+        assert.equal(fA.counts.disposes, fA.counts.builds, 'field handles all disposed');
+
+        // (b) field faults on rebuild #2 -> cells (Z-closed polygons) still draw.
+        const cB = mkCounting(createCellIndex(1024), -1);
+        const fB = mkCounting(createFieldIndex(1024), 2);
+        const chB = mkBoth(cB.factory, fB.factory);
+        const cvB = createMockCanvas(W, H);
+        chB.mount(cvB);
+        const ctxB = cvB.getContext('2d');
+        ctxB.calls.length = 0;
+        chB.setView({ xMin: -1, xMax: 101, yMin: -1, yMax: 101 });
+        assert.equal(fieldRects(ctxB).length, 0, 'faulted field draws nothing this pass');
+        assert.ok(countCalls(ctxB, 'closePath') > 0, 'cells still tessellate + draw');
+        chB.destroy();
+        assert.equal(fB.counts.disposes, fB.counts.builds - 1, 'faulted field build has no handle; others disposed');
+        assert.equal(cB.counts.disposes, cB.counts.builds, 'cells handles all disposed');
+
+        // (c) FIRST-build field fault -> mount throws (fail-closed door), destroy clean.
+        const before = stats().activeNodes;
+        const fC = mkCounting(createFieldIndex(1024), 1);
+        const chC = createScatterChart({
+            data: diamondData, width: W, height: H, schedule: (fn) => fn(),
+            field: { index: fC.factory, value: 'z' },
+        });
+        assert.throws(() => chC.mount(createMockCanvas(W, H)), /boom-1/);
+        chC.destroy();
+        assert.equal(stats().activeNodes - before, 0, 'destroy after failed mount releases everything');
+    });
+
+    // -- FR5: SVG parity + layer order -----------------------------------------
+    it('FR5: exportSVG emits one <rect> per painted cell, and the field layer precedes the cell polygons', () => {
+        const chart = createScatterChart({
+            data: diamondData, width: W, height: H, schedule: (fn) => fn(),
+            cells: { index: createCellIndex(1024) },
+            field: { index: createFieldIndex(1024), value: 'z', opacity: OP },
+        });
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        // ctx.calls accumulates every sync draw pass during mount, so count
+        // DISTINCT cells (the SVG snapshot is exactly one pass).
+        const pb = chart._internal.plotBoundsBox;
+        const cw = pb.w / 64, chh = pb.h / 48;
+        const painted = new Set(fieldRects(canvas.getContext('2d')).map((r) =>
+            Math.round((r.y - pb.y) / chh) * 64 + Math.round((r.x - pb.x) / cw))).size;
+        // Strip <defs> first -- the plot-clip <clipPath> definitions are
+        // Z-closed paths that are NOT content (the VC6 lesson).
+        const svg = chart.exportSVG().replace(/<defs>[\s\S]*?<\/defs>/g, '');
+        const rgbRects = (svg.match(/<rect [^>]*fill="rgb\(/g) || []).length;
+        assert.ok(painted > 0, 'cells painted on canvas');
+        assert.equal(rgbRects, painted, `SVG emits exactly one ramp rect per painted cell`);
+        // Layer order: the FIRST ramp rect precedes the FIRST Z-closed cell path.
+        const firstRect = svg.indexOf('<rect x');
+        const zPath = svg.search(/<path [^>]*d="[^"]*Z"/);
+        assert.ok(firstRect >= 0 && zPath >= 0, 'both layers exported');
+        assert.ok(firstRect < zPath, 'field raster under the cell polygons in document order');
+        chart.destroy();
+    });
+
+    // -- FR6: retention across 50 mount/destroy cycles -------------------------
+    it('FR6: 50 mount/destroy cycles -- builds === disposes for BOTH injected layers, zero node retention', () => {
+        let fb = 0, fd = 0, cb = 0, cd = 0;
+        const innerF = createFieldIndex(1024), innerC = createCellIndex(1024);
+        const ff = (pxs, pys, n) => { fb++; const h = innerF(pxs, pys, n); return { sampleField: h.sampleField.bind(h), dispose: () => { fd++; h.dispose(); } }; };
+        const cf = (pxs, pys, n) => { cb++; const h = innerC(pxs, pys, n); return { cell: h.cell.bind(h), cellCount: h.cellCount, dispose: () => { cd++; h.dispose(); } }; };
+        const before = stats().activeNodes;
+        for (let i = 0; i < 50; i++) {
+            const ch = createScatterChart({
+                data: diamondData, width: W, height: H, schedule: (fn) => fn(),
+                cells: { index: cf }, field: { index: ff, value: 'z' },
+            });
+            ch.mount(createMockCanvas(W, H));
+            ch.destroy();
+        }
+        assert.equal(fb, 50, 'one field build per mount');
+        assert.equal(fd, 50, 'every field handle disposed');
+        assert.equal(cb, cd, 'every cells handle disposed');
+        assert.equal(stats().activeNodes - before, 0, 'no reactive-node retention');
+    });
+
+    // -- FR7: lifecycle freshness + finite-only ramp ---------------------------
+    it('FR7: data change and view change each rebuild+resample exactly once; a panned-out extreme cannot pin the ramp', () => {
+        let builds = 0, samples = 0, disposes = 0;
+        const inner = createFieldIndex(4096);
+        const factory = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                sampleField: (...a) => { samples++; return h.sampleField(...a); },
+                dispose: () => { disposes++; h.dispose(); },
+            };
+        };
+        // Extreme-z outlier at data (200, 200) -- excluded by the zoomed view.
+        const withOutlier = diamondData.concat([{ x: 200, y: 200, z: 1e6 }]);
+        const dataSig = signal(withOutlier);
+        const chart = createScatterChart({
+            data: dataSig, width: W, height: H, schedule: (fn) => fn(),
+            pan: true, zoom: true,
+            field: { index: factory, value: 'z', opacity: OP },
+        });
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        assert.equal(builds, 1, 'mount: one build');
+        assert.equal(samples, 1, 'mount: one sampleField');
+
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.setView({ xMin: 0, xMax: 100, yMin: 0, yMax: 100 }); // outlier outside
+        assert.equal(builds, 2, 'view change: exactly one rebuild');
+        assert.equal(samples, 2, 'view change: exactly one resample');
+        // Finite-only ramp: with the 1e6 outlier OUTSIDE the sampled plot, the
+        // visible diamond must still span the full ramp -- some cell near hot.
+        let tMax = 0;
+        for (const r of fieldRects(ctx)) { const t = tOfColor(r.color); if (t === t && t > tMax) tMax = t; }
+        assert.ok(tMax > 0.9, `ramp re-normalized to visible cells (tMax=${tMax.toFixed(3)}); a panned-out extreme must not pin it`);
+
+        dataSig.set(diamondData);
+        assert.equal(builds, 3, 'data change: exactly one rebuild');
+        assert.equal(samples, 3, 'data change: exactly one resample');
+        chart.redraw();
+        chart.redraw();
+        assert.equal(builds, 3, 'redraws build nothing');
+        assert.equal(samples, 3, 'redraws sample nothing');
+        chart.destroy();
+        assert.equal(disposes, builds, 'every handle disposed');
+    });
+
+    // -- FR8: SoA value channel + the documented string-accessor footgun -------
+    it('FR8: SoA data.zs channel feeds the field; SoA without zs + a string key fails closed to no field', () => {
+        const n = diamondData.length;
+        const xs = new Float32Array(n), ys = new Float32Array(n), zsArr = new Float32Array(n);
+        for (let i = 0; i < n; i++) { xs[i] = diamondData[i].x; ys[i] = diamondData[i].y; zsArr[i] = diamondData[i].z; }
+
+        const c1 = createScatterChart({
+            data: { xs, ys, zs: zsArr }, width: W, height: H, schedule: (fn) => fn(),
+            field: { index: createFieldIndex(1024), value: 'z', opacity: OP },
+        });
+        const cv1 = createMockCanvas(W, H);
+        c1.mount(cv1);
+        assert.ok(fieldRects(cv1.getContext('2d')).length > 100, 'SoA zs channel paints the field');
+        c1.destroy();
+
+        // Documented footgun (fails CLOSED): SoA without zs + a string key
+        // cannot resolve per-point values -> every z NaN -> nothing painted.
+        const c2 = createScatterChart({
+            data: { xs, ys }, width: W, height: H, schedule: (fn) => fn(),
+            field: { index: createFieldIndex(1024), value: 'z', opacity: OP },
+        });
+        const cv2 = createMockCanvas(W, H);
+        c2.mount(cv2);
+        assert.equal(fieldRects(cv2.getContext('2d')).length, 0, 'no zs channel + string key -> no field, no throw, markers intact');
+        assert.ok(countCalls(cv2.getContext('2d'), 'arc') > 0, 'markers still draw');
+        c2.destroy();
+    });
+
+    // -- FR9: source-scan confinement ------------------------------------------
+    it('FR9: zero delaunay imports; field machinery wired exactly once', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        assert.equal((src.match(/delaunay/gi) || []).length, 0, 'no delaunay reference in source');
+        assert.equal((src.match(/createFieldIndex/g) || []).length, 0, 'no factory import');
+        assert.equal((src.match(/const _normalizeFieldSpec =/g) || []).length, 1);
+        assert.equal((src.match(/_normalizeFieldSpec\(/g) || []).length, 1, 'one call site');
+        assert.equal((src.match(/const _scatterRefreshField =/g) || []).length, 1);
+        assert.equal((src.match(/_scatterRefreshField\(/g) || []).length, 1, 'called only from _scatterPostProject');
+        assert.equal((src.match(/const makeScatterFieldDrawFn =/g) || []).length, 1);
+        assert.equal((src.match(/makeScatterFieldDrawFn\(/g) || []).length, 1, 'one draw-node site');
+        assert.equal((src.match(/\.interpolate\(/g) || []).length, 0, 'interpolate never called');
     });
 });

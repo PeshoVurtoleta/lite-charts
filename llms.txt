@@ -10,7 +10,53 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.15.0 (current): horizontal legend virtualization + early-close holidays
+> v1.16.0 (current): injected field-raster layer on createScatterChart --
+> field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }. The
+> third rung of the injection ladder (spatialIndex -> cells -> field): the
+> primary series' per-point scalar value is rasterized into a smooth
+> barycentric-interpolated background heatmap, drawn UNDER the cells layer and
+> the markers, inside the plot clip, at 0 B/frame. The mesh + serpentine grid
+> sampler arrive via an injected FieldIndexFactory (e.g. @zakkster/lite-delaunay
+> createFieldIndex(N)); lite-charts imports nothing. Built over PIXEL-space
+> points and re-sampled COLD on every data/scale change on the same postProject
+> seam the cells layer uses, so it stays correct under anisotropic pan/zoom. One
+> sampleField call per refresh fills a pooled grow-only grid; per-cell CSS color
+> strings are precomputed cold, so the draw loop only walks a prebuilt array
+> (fillStyle/fillRect, NaN cells skipped) -- exportSVG emits one <rect> per
+> finite cell through the same serializer. gridW/gridH integers in [8,256]
+> (default 64x48); colors [low,high] hex ramp (default blue-100 -> blue-900) or
+> colorFn(v,vMin,vMax); vMin/vMax over the FINITE sampled cells only (a
+> panned-out point never pins the ramp); opacity default 0.5 clamped. PIXEL
+> space is y-down so by0 = plotTop and the contract's row 0 = by0 puts row 0 at
+> the TOP row -- NO flip. The field fault domain is fully INDEPENDENT of cells:
+> _scatterPostProject runs _scatterRefreshCells then _scatterRefreshField, each
+> with its own try/catch, its own ctx error slot (cellError/fieldError, both
+> OR-ed into the mount fail-closed door), disposing only its own handle. Ramp
+> hex parser is a minimal axis-kernel duplicate (_fieldParseHex), not a
+> reference to the grid kernel's _parseHexColor -- the A5/A15 kernel-isolation
+> pins keep the grid kernel tree-shakeable out of a scatter bundle; the
+> duplicate runs cold only. Construction fails closed BEFORE the first
+> _own(signal()): non-object field, missing/non-function index, missing value,
+> non-integer/out-of-caps gridW/gridH all throw (== null gated before any +).
+> @zakkster/lite-delaunay peer bumped to ^1.3.0 (ships createFieldIndex); still
+> OPTIONAL. A scatter with no field key is byte-identical. 9 new tests
+> (473->482) vs the REAL published 1.3.0: an independent planar oracle (z
+> planar in data space stays planar under the affine pixel map, so every
+> painted cell must match the formula at its inverted center, +-2/channel)
+> with diamond-hull NaN confinement; orientation fixture (row 0 = plot top,
+> NO flip); 10-door construction matrix at zero node delta + ramp-fallback
+> pins; cross-fault matrix (cells fault -> field survives, field fault ->
+> cells survive, own handles only; first-build fault throws at mount);
+> SVG parity (one rect per painted cell, defs-stripped) + layer order;
+> 50x retention; lifecycle (one rebuild+resample per view/data change,
+> redraws never; finite-only ramp vs a panned-out 1e6 outlier); SoA zs
+> channel + fail-closed string-key footgun; source-scan confinement.
+> Torture A22: 208-write view storm = 208/208 builds/disposes post-warmup,
+> one sampleField per build, 0 new graph nodes; raster redraw <=16 B/op
+> maxMajor:0 within 2 B/op of no-field. Five reversion proofs (draw-node
+> gate, finite-only scan, no-flip mapping, field-local catch, extract-time
+> dispose).
+> v1.15.0: horizontal legend virtualization + early-close holidays
 > + an earlier fail-closed point for bad legend config. A chart using none of
 > these is byte-identical. A virtualized legend at position top/bottom now
 > windows a single non-wrapping row scrolling along X: supply legend.width

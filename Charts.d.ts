@@ -1247,6 +1247,48 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
         /** Cell boundary width in pixels. Default 0 (no stroke). */
         strokeWidth?: number;
     };
+
+    /**
+     * v1.16.0: OPTIONAL interpolated field-raster layer. When present, the
+     * primary series' per-point scalar `value` is rasterized into a smooth
+     * barycentric-interpolated background heatmap, drawn UNDER the cells layer
+     * and the markers, inside the plot clip, at 0 B/frame.
+     *
+     * The mesh + sampler come from an injected {@link FieldIndexFactory} (an
+     * optional peer such as `@zakkster/lite-delaunay`'s `createFieldIndex(N)`)
+     * -- lite-charts imports nothing. The field is built over PIXEL-space
+     * points and re-sampled (cold) with the projection, so it stays correct
+     * under anisotropic pan/zoom. Points with a NaN `value` drop out of the
+     * mesh; cells outside the hull paint nothing. Primary series only; scatter
+     * only. A `field` object missing a function `index` or a `value` throws at
+     * construction.
+     */
+    field?: {
+        /** REQUIRED: the FieldIndex factory (e.g. `createFieldIndex(N)`). */
+        index: FieldIndexFactory;
+        /**
+         * REQUIRED: the per-point numeric scalar to interpolate (key, index,
+         * or accessor). Coerced with `+v`; a NaN marks a missing point.
+         */
+        value: string | number | ((row: unknown, i: number) => number);
+        /** Grid columns. Integer in [8, 256]. Default 64. */
+        gridW?: number;
+        /** Grid rows. Integer in [8, 256]. Default 48. */
+        gridH?: number;
+        /**
+         * Two-stop linear color ramp `[low, high]`. Default
+         * `['#dbeafe', '#1e3a8a']` (blue-100 to blue-900). Hex strings.
+         */
+        colors?: [string, string];
+        /**
+         * Custom color function. Receives `(value, vMin, vMax)` where the
+         * extents are over the FINITE sampled cells; returns a CSS color
+         * string. Overrides the `colors` ramp entirely.
+         */
+        colorFn?: (value: number, vMin: number, vMax: number) => string;
+        /** Raster fill alpha. Default 0.5, clamped to [0, 1]. */
+        opacity?: number;
+    };
 }
 
 export function createScatterChart(config: ScatterChartConfig): Chart;
@@ -1283,6 +1325,44 @@ export type CellIndexFactory = (
     pys: Float32Array,
     n: number,
 ) => CellIndex;
+
+/**
+ * v1.16.0: a barycentric field index over pixel-space points. Structurally
+ * identical to what `@zakkster/lite-delaunay`'s `createFieldIndex` returns,
+ * declared here so lite-charts imports no implementation. One triangulated mesh
+ * serves MANY scalar fields; each `sampleField` call takes its `zs` per-call,
+ * indexed by ORIGINAL point index. Only `sampleField` + `dispose` are used by
+ * the charts bridge (it never calls `interpolate` point-by-point).
+ */
+export interface FieldIndex {
+    /**
+     * Sample the interpolated field on a `gridW x gridH` cell-center grid over
+     * the bbox `[bx0,by0,bx1,by1]`, writing row-major (`row*gridW + col`) into
+     * `outGrid`. `zs` is per-call, ORIGINAL-indexed, length >= the build `n`.
+     * Cells outside the hull (or degenerate) are written NaN, never 0. Returns
+     * the count of finite cells. Zero allocation. THROWS if disposed/stale,
+     * `zs` is short, the grid dims aren't positive integers, `outGrid` is the
+     * wrong type/too short, or the bbox is non-finite / not strictly ordered.
+     */
+    sampleField(
+        zs: Float32Array | Float64Array | number[],
+        gridW: number, gridH: number,
+        bx0: number, by0: number, bx1: number, by1: number,
+        outGrid: Float32Array | Float64Array,
+    ): number;
+    dispose(): void;
+}
+
+/**
+ * Build a {@link FieldIndex} over the given pixel-space coordinates. `n` is the
+ * count of valid entries in `pxs`/`pys` (NaN entries are legal and compacted
+ * out). Mirrors {@link CellIndexFactory}.
+ */
+export type FieldIndexFactory = (
+    pxs: Float32Array,
+    pys: Float32Array,
+    n: number,
+) => FieldIndex;
 
 // ---------------------------------------------------------------------------
 // createHeatmap (v1.2.0-alpha.3) -- fourth kernel

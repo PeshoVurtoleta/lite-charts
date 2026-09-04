@@ -5,7 +5,54 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.16.0] -- 2026-09
+
+### Added
+
+- **Injected field-raster layer on `createScatterChart` (`field: { index, value, ... }`).**
+  The third rung of the injection ladder (`spatialIndex` -> `cells` -> `field`):
+  the primary series' per-point scalar `value` is rasterized into a smooth
+  barycentric-interpolated background heatmap, drawn UNDER the cells layer and
+  the markers, inside the plot clip, at 0 B/frame. The triangulated mesh + the
+  serpentine grid sampler arrive via an injected factory matching the
+  `FieldIndexFactory` contract (e.g. `@zakkster/lite-delaunay`'s
+  `createFieldIndex(N)`) -- lite-charts imports no implementation. The mesh is
+  built over PIXEL-space points and re-sampled (cold) on every data / scale
+  change on the same postProject seam the cells layer uses, so it stays correct
+  under anisotropic pan/zoom. One `sampleField` call per refresh fills a pooled
+  grow-only grid; per-cell CSS color strings are precomputed cold so the draw
+  loop only walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped).
+  `exportSVG` emits one `<rect>` per finite cell through the same serializer.
+  Options: `gridW` / `gridH` (integers in `[8, 256]`, default `64 x 48`),
+  `colors: [low, high]` (hex ramp, default blue-100 -> blue-900) or a
+  `colorFn(v, vMin, vMax)` (extents over the FINITE cells only, so a panned-out
+  point never pins the ramp), and `opacity` (default `0.5`, clamped). A scatter
+  with no `field` key is byte-identical in behavior.
+
+### Changed
+
+- **`@zakkster/lite-delaunay` peer range bumped to `^1.3.0`** (was `^1.2.0`),
+  the version that ships `createFieldIndex`. It remains an OPTIONAL peer -- only
+  a chart that injects `cells` or `field` needs it; lite-charts still imports
+  nothing from it.
+
+### Design
+
+- The `field` fault domain is fully INDEPENDENT of `cells`: `_scatterPostProject`
+  runs `_scatterRefreshCells` then `_scatterRefreshField` as two separate passes,
+  each with its own `try/catch`, its own `ctx` error slot (`cellError` /
+  `fieldError`, both OR-ed into the mount fail-closed door), and disposing ONLY
+  its own index handle. A cells fault cannot suppress the field and vice-versa,
+  even when both layers are configured over the same projected points.
+- The field ramp's hex parser is a minimal duplicate (`_fieldParseHex`) living in
+  the axis-chart kernel region, not a reference to the grid kernel's
+  `_parseHexColor`. The A5/A15 kernel-isolation source-region pins keep the grid
+  kernel tree-shakeable out of a scatter-only bundle; sharing the helper would
+  breach that. The duplicate runs only on the cold refresh, never per frame.
+- Field construction fails closed BEFORE the first `_own(signal())`: a non-object
+  `field`, a missing / non-function `index`, a missing `value`, or a
+  non-integer / out-of-caps `gridW` / `gridH` all throw at construction
+  (`== null` gated before any `+` so a null never masquerades as `0`).
 
 ### Testing
 
@@ -23,6 +70,39 @@ the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   fails, a section-1-shaped non-retaining slot-write body passes settled, and a
   drift guard pins `maxBytesPerCall` strictly below `MIN_HEAP_OBJECT_BYTES` (16).
   Test-only; the shipped module is byte-identical.
+
+### Coverage
+
+- 9 new tests (473 -> 482), run against the REAL published lite-delaunay
+  1.3.0 (devDep). FR1 is an independent planar oracle: z = 2x+3y+1 is planar
+  in data space and pixel space is its affine image, so every painted cell's
+  color must equal the ramp of the formula evaluated at the cell's inverted
+  pixel center (+-2/channel) -- and a diamond-hull cloud proves NaN
+  confinement (plot-corner cells outside the hull stay unpainted). FR2 pins
+  orientation (z = data y -> top rows hotter; row 0 = plot top, NO flip).
+  FR3 walks the 10-case construction-door matrix at a zero reactive-node
+  delta and pins the colors/colorFn junk fallback as heatmap ramp-vocabulary
+  parity. FR4 proves the independent fault domains: a cells rebuild fault
+  leaves the field painting and vice versa, each side disposing exactly its
+  own handles; a FIRST-build field fault throws at mount and destroy releases
+  everything. FR5 pins SVG parity (exactly one <rect> per painted cell,
+  clipPath defs stripped) and document-order layering (field raster before
+  the cell polygons). FR6: 50 mount/destroy cycles, builds === disposes for
+  BOTH injected layers, zero retention. FR7 pins the lifecycle (view change
+  and data change each rebuild + resample EXACTLY once, redraws never) and
+  the finite-only ramp (a 1e6 outlier panned outside the view cannot pin
+  vMin/vMax). FR8 covers the SoA data.zs channel and pins the documented
+  footgun (SoA without zs + a string key fails CLOSED to no field, markers
+  intact). FR9 is the source-scan confinement (zero delaunay references,
+  each mechanism wired exactly once, interpolate never called).
+- Torture A22: a 208-write pan/zoom storm rebuilds + resamples exactly once
+  per scale change (208/208 after warm-up, one sampleField per build, zero
+  new signal-graph nodes), and the raster redraw stays <= 16 B/op with
+  maxMajor:0, within 2 B/op of a no-field control.
+- Five mechanisms proven load-bearing by reversion, each turning an exact
+  test set red: the field draw-node gate (FR1/2/3/4/5/7/8), the finite-only
+  vMin/vMax scan (FR1 + FR7), the no-flip row mapping (FR1 + FR2), the
+  field-local catch (FR4), and the extract-time dispose (FR7).
 
 ## [1.15.0] -- 2026-09
 
