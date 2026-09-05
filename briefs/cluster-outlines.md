@@ -10,10 +10,64 @@ executes THIS brief against the PUBLISHED package. The charts side is
 BLOCKED until 1.4.0 is on npm -- do not build against a local checkout.
 
 UPDATE 2026-09-05: lite-delaunay 1.4.0 is PUBLISHED and npm-view-verified
-(latest=1.4.0). The publish block is cleared. Execution still WAITS on
-their relay ping-back with the four deliverables in "Asks relayed WITH
-the contract" below -- the SIZING BOUND above all (pool pre-allocation
-cannot be written without it). Do not substitute a guessed bound.
+(latest=1.4.0). The publish block is cleared.
+
+UPDATE 2026-09-05 (later): the delaunay thread is ARCHIVED; the four
+deliverables were harvested directly from their shipped 1.4.0 CHANGELOG
+(user authorized the folder peek). Execution is FULLY UNBLOCKED. The
+answers, verbatim from their docs:
+
+1. SIZING BOUNDS: factory is `createClusterIndex(maxPoints)` ->
+   `(pxs, pys, n) -> ClusterIndex` (convexHull/alphaShape/dispose).
+   `convexHull` outIndices bound: n. `alphaShape` outIndices tight
+   3n-6 / SAFE 3n; outLoopEnds tight n-2 / SAFE n. Charts pools use
+   the SAFE bounds (3n / n). Both methods count and validate the
+   exact need BEFORE writing anything.
+2. HOLE LOOPS: emitted. Orientation: outer loops and convexHull are
+   counter-clockwise in SCREEN coordinates (+y down); holes wind
+   opposite. Charts is pixel-space, so this matches the contract's
+   CCW ask. (Their prior winding docs were backwards; 1.4.0 fixed the
+   docs to the measured convention -- trust the 1.4.0 statement only.)
+3. DUPLICATES: emitted ORIGINAL index is the sweep-order-first
+   duplicate -- deterministic for identical input arrays, NOT
+   guaranteed lowest. Test fixtures must not assume lowest-index.
+4. BENCH (Node 22, Apple-Silicon-class, medians): full per-group cycle
+   build -> convexHull -> alphaShape -> dispose = 0.72 us at n=8,
+   7.76 us at n=64, 34.8 us at n=256 (the per-group workload that
+   dominates charts refreshes); convexHull 13.9-34.7 Mq/s; alphaShape
+   O(T)/call (44.1k q/s at 1k, 0.5k at 100k); warm rebuild 32.3 ms at
+   100k. Tiny-n correctness (n<3, collinear, all-duplicate -> 0) is
+   owned by their gate (+21 tests, 148 total, independent hull +
+   circumradius oracles). Per-slot memory ~116*maxPoints B + 16 KB.
+
+Contract confirmations riding along: `Infinity` alpha THROWS (the door
+we specified -- no hull alias); NaN-circumradius degenerate triangles
+are never kept; 0 loops legal; pooling per the cell/field precedent
+(generation-stamped facades, stale/double-dispose throws).
+
+AS-EXECUTED 2026-09-05 (same session): pipeline planner -> coder ->
+reviewer (APPROVED, zero blockers) -> qa (13 OL tests + torture A24 +
+five measured reversion proofs). Zero contract deviations. Notes vs the
+brief: (1) the fill draws ONE path per group over all its loops -- the
+nonzero fill rule plus the 1.4.0 opposite-wound holes carves holes out,
+strictly better than the sketched per-loop fill; (2) partition is AoS
+rows only (a SoA cloud has no per-row group column -- the cells colorKey
+precedent); (3) strokeWidth clamps to 16 rather than falling back on
+overshoot; (4) the refresh-time handle dispose was measured REDUNDANT
+(extract's dispose covers every reachable rebuild path -- proven by the
+R4/R4b reversion pair) and is retained as a zero-cost fail-safe; the
+load-bearing claim is the PAIR. QA lesson banked: the hull-oracle test
+needed an INTERLEAVED two-group fixture + a match BIJECTION -- a
+concatenated fixture plus some() let an index-space bug (original-array
+deref instead of packed-subset deref) pass. Gate ledger: 503/503,
+torture ok (A24: 416/416 builds/disposes over the 208-write storm,
+redraw within 2 B/op of the no-outlines control), reversion proofs R1
+cap / R2 index-space / R3d retained draw growth (10.167 vs 0.076 B/op) /
+R4b dispose pair / R5 mount-door OR all measured failing when gutted.
+T6 B/op gates measure NET RETAINED growth: a small transient per-frame
+alloc is invisible to the harness house-wide (the demo-audit "frame
+killer" note) -- the guard at that granularity is the reviewer source
+audit, which passed clean.
 
 ## Goal
 

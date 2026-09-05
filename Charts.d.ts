@@ -1297,6 +1297,61 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
          */
         contours?: FieldContoursSpec;
     };
+
+    /**
+     * v1.18.0: OPTIONAL cluster-outlines layer. Rows partition into groups by
+     * `groupKey`'s value; each group gets one boundary outline (convex hull, or
+     * a concave alpha-shape hull), stroked + optionally translucently filled,
+     * drawn ABOVE the cells layer and BELOW the markers, inside the plot clip,
+     * at 0 B/frame.
+     *
+     * The boundary geometry comes from an injected {@link ClusterIndexFactory}
+     * (an optional peer such as `@zakkster/lite-delaunay`'s
+     * `createClusterIndex(N)`) -- lite-charts imports nothing. Outlines are
+     * PIXEL-space and rebuilt (cold) with the projection, so they stay correct
+     * under anisotropic pan/zoom (pixel-space `alpha` re-fragments as points
+     * crowd/spread -- honest, documented behavior). Primary series only; scatter
+     * only. An `outlines` object that is a non-object, is missing a function
+     * `index`, is missing a string `groupKey`, or carries a non-finite / <= 0
+     * `alpha` throws at construction.
+     */
+    outlines?: {
+        /**
+         * REQUIRED: the ClusterIndex factory (e.g. `createClusterIndex(N)`).
+         * The factory's own `maxPoints` bound is the caller's to size against
+         * the largest group -- a too-small factory faults the layer at refresh
+         * (fail closed), never during paint.
+         */
+        index: ClusterIndexFactory;
+        /**
+         * REQUIRED: the raw per-row group key (string). Rows are partitioned by
+         * this key's VALUE (SameValueZero, insertion-ordered groups). A row
+         * whose value is `null`/`undefined` belongs to NO group (marker only,
+         * never a throw). Max 64 distinct groups -- over-cap faults the layer at
+         * refresh. AoS data only (a SoA cloud has no per-row group column).
+         */
+        groupKey: string;
+        /**
+         * Alpha-shape radius in PIXEL units (finite > 0). Present -> concave
+         * alpha-shape hull (keeps triangles with circumradius <= alpha); OMIT
+         * for the convex hull. Infinity is refused (not a hull alias). A group
+         * that is degenerate (n < 3 or collinear) draws nothing.
+         */
+        alpha?: number;
+        /** Outline stroke color. RAW string, default `'#7a7a7a'` (theme-safe). */
+        stroke?: string;
+        /** Outline stroke width in pixels. Default 1, clamped to (0, 16]. */
+        strokeWidth?: number;
+        /** Fill color. RAW string, defaults to the stroke value when omitted. */
+        fill?: string;
+        /** Fill alpha. Default 0 (no fill), clamped to [0, 1]. */
+        fillOpacity?: number;
+        /**
+         * Dash pattern (array of positive finite numbers). An invalid pattern
+         * falls back to a solid stroke. A valid pattern is copied + frozen.
+         */
+        dash?: number[];
+    };
 }
 
 /**
@@ -1395,6 +1450,49 @@ export type FieldIndexFactory = (
     pys: Float32Array,
     n: number,
 ) => FieldIndex;
+
+/**
+ * v1.18.0: a cluster boundary index over pixel-space points. Structurally
+ * identical to what `@zakkster/lite-delaunay`'s `createClusterIndex` returns,
+ * declared here so lite-charts imports no implementation. Built fresh per GROUP
+ * per refresh over that group's subset coords; answers two boundary-extraction
+ * queries against the one triangulation. `convexHull` rides along as the
+ * `alpha -> +Infinity` degenerate. Only these three members are used by the
+ * charts bridge. Probed with `typeof` at the FIRST refresh (methods may live on
+ * the facade prototype), not at construction.
+ */
+export interface ClusterIndex {
+    /**
+     * Write the CCW convex hull as ORIGINAL site indices into `outIndices`;
+     * return the vertex count (<= n). Collinear or n < 3 -> 0 (not an error).
+     * Zero allocation. Charts sizes `outIndices` to the SAFE bound `3 * n`.
+     */
+    convexHull(outIndices: Int32Array): number;
+    /**
+     * Alpha-shape boundary: keep triangles with circumradius <= `alpha` (a
+     * RADIUS in pixel units), trace the boundary loops CONCATENATED into
+     * `outIndices` (ORIGINAL indices, CCW per loop, closure implicit
+     * last -> first). `outLoopEnds[i]` = EXCLUSIVE end offset of loop i in
+     * `outIndices`. Returns the loop count (0 legal). Interior hole loops are
+     * emitted with opposite winding. Zero allocation. Charts sizes `outIndices`
+     * to `3 * n` and `outLoopEnds` to `n` (the SAFE bounds); a too-small handle
+     * faults the layer at refresh (fail closed). `alpha` must be finite > 0.
+     */
+    alphaShape(alpha: number, outIndices: Int32Array, outLoopEnds: Int32Array): number;
+    dispose(): void;
+}
+
+/**
+ * Build a {@link ClusterIndex} over the given pixel-space coordinates. `n` is
+ * the count of valid entries in `pxs`/`pys`. Mirrors {@link FieldIndexFactory}.
+ * The factory's own `maxPoints` bound is the CALLER's to size against the
+ * largest group -- a too-small factory faults the outline layer at refresh.
+ */
+export type ClusterIndexFactory = (
+    pxs: Float32Array,
+    pys: Float32Array,
+    n: number,
+) => ClusterIndex;
 
 // ---------------------------------------------------------------------------
 // createHeatmap (v1.2.0-alpha.3) -- fourth kernel

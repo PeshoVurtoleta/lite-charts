@@ -5,6 +5,76 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] -- 2026-09
+
+### Added
+
+- **Cluster-outlines layer on `createScatterChart`** -- `outlines: { index,
+  groupKey, alpha?, stroke?, strokeWidth?, fill?, fillOpacity?, dash? }`.
+  One boundary outline per point group: the convex hull when `alpha` is
+  absent, the concave alpha shape (`alpha` = a radius in pixel units,
+  finite `> 0`; `Infinity` throws) when present. Fourth rung of the
+  injection ladder (`spatialIndex` -> `cells` -> `field` -> `outlines`):
+  geometry comes from an injected `ClusterIndexFactory` (optional peer
+  `@zakkster/lite-delaunay` bumped `^1.3.0` -> `^1.4.0`,
+  `createClusterIndex(maxPoints)`; `Charts.js` still imports nothing).
+- Rows partition by the RAW `groupKey` value (SameValueZero,
+  insertion-ordered, AoS rows only; a `== null` key value means no group).
+  Per-group pixel subsets are packed cold with non-finite rows skipped; one
+  handle is built per group per refresh on the `postProject` seam and
+  disposed before the next build (pixel space is not affine-stable across
+  anisotropic zoom). `convexHull`/`alphaShape` results land in pooled
+  buffers sized to the published SAFE bounds (`3n` indices / `n` loop
+  ends); boundary loops bake into flat pooled geometry.
+- Draw: one scene node above the cells node, below the markers, inside the
+  plot clip, walking prebuilt geometry at 0 B/frame -- per group one
+  optional fill path over ALL its loops (nonzero fill rule + the mesh's
+  opposite-wound hole loops carve holes out) followed by one stroke path;
+  dash resets via the module-frozen empty, `getLineDash` is never called.
+- Fault model: FOURTH independent fault domain -- own try/catch, own
+  `outlineError` slot OR-ed into the mount door; a fault sheds only the
+  outlines (markers/cells/field/contours draw on) and vice versa.
+  Degenerate groups (fewer than 3 usable rows, collinear, alpha below
+  every triangle) skip silently per group; more than 64 distinct groups
+  is a fail-closed layer fault (silently dropping groups lies). Handle
+  methods are `typeof`-probed at first refresh (prototype-resident
+  methods fine); a too-small factory `maxPoints` faults the layer at
+  refresh.
+- Doors (construction, before any owned signal): non-object `outlines`,
+  missing/non-function `index`, missing/empty/non-string `groupKey`,
+  `alpha` present but not a finite number `> 0` (`== null` gated before
+  any coercion; `+0`/`-0`/`NaN`/negative/`Infinity` all throw). Junk
+  styles fall back: `stroke` `#7a7a7a`, `strokeWidth` 1 clamped `(0,16]`,
+  `fill` defaults to the stroke, `fillOpacity` 0 clamped `[0,1]`, `dash`
+  frozen copy or solid.
+- `Charts.d.ts`: `ClusterIndex` + `ClusterIndexFactory` types and the
+  scatter `outlines` config key.
+- Tests: +13 (490 -> 503) against the REAL published lite-delaunay 1.4.0:
+  independent monotone-chain hull oracle with CCW-screen orientation and a
+  per-group match bijection; huge-alpha == hull vertex set; an exact
+  2-loop split fixture; partition matrix incl. no-group rows; degenerate
+  isolation; the 64-cap at mount (throws) and on later growth (sheds,
+  never throws); the four-domain fault matrix in both directions; a
+  per-group build/dispose ledger (2 per view write, books closed at
+  unmount); one-fill-per-group hole winding; SVG Z-closed path parity;
+  source scan (single call sites, zero delaunay imports,
+  `locate`/`barycentric` still unconsumed); absent-config parity (zero
+  added reactive nodes).
+- Torture A24: gesture storm at 2 groups x 1000 pts vs a no-outlines
+  branch-parity control -- exactly 416 builds / 416 disposes across 208
+  view writes (2 per write, never per frame), zero new signal-graph
+  nodes, redraw within 2 B/op of control. Five reversion proofs measured:
+  group cap, packed-index space (via the oracle bijection), the dispose
+  pair, the mount-door OR, and retained draw-path growth (10.167 B/op vs
+  0.076 control when reverted).
+
+### Changed
+
+- `devDependencies`: `@zakkster/lite-delaunay` `^1.3.0` -> `^1.4.0` (the
+  test suites exercise the REAL published `createClusterIndex`).
+- `llms.txt` line-count claim corrected (`~6.9k` -> `~11.2k` -- it had
+  gone stale over the v1.14-1.17 line).
+
 ## [1.17.0] -- 2026-09
 
 ### Added

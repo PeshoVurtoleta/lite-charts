@@ -4037,6 +4037,102 @@ const _normalizeCellsSpec = (cells) => {
     };
 };
 
+// v1.18.0: cluster-outlines layer. Max distinct groups per chart (C5). The cap
+// is enforced at REFRESH, not construction -- runtime data can grow groups, and
+// silently dropping any lies; over-cap is a layer-level fault (recorded in
+// ctx.outlineError, surfaced at mount). outlineGroupEnds is a fixed 64-slot pool
+// so the draw walk indexes it without a bounds branch.
+const _OUTLINE_MAX_GROUPS = 64;
+
+// Dispose every per-group cluster handle. Sweeps the pooled handle array (one
+// handle per group -- the factory takes (pxs, pys, n), so a per-group subset
+// mesh, not one global handle). Mirrors _disposeCellIndex; defensive against a
+// facade that omits dispose(). Leaves the array allocated (pooled).
+const _disposeOutlineIndexes = (state) => {
+    const handles = state.outlineHandles;
+    if (handles) {
+        for (let g = 0; g < handles.length; g++) {
+            const h = handles[g];
+            if (h && typeof h.dispose === 'function') h.dispose();
+            handles[g] = null;
+        }
+    }
+};
+
+// Construction-time validator for the cluster-outlines spec. Returns null when
+// absent (every downstream branch stays dead). Fails closed (throws, before any
+// owned signal) on a non-object, a missing/non-function index factory, a
+// missing groupKey, or an alpha that is not a finite number > 0. Style guards
+// fall back per the cells/contours precedent -- never a throw. `stroke`/`fill`
+// are RAW strings (NO CSS-var resolution -- the contour lesson: a var resolves
+// to nothing in a headless mount); the default is a both-theme-safe grey.
+const _normalizeOutlinesSpec = (outlines) => {
+    if (outlines == null) return null;
+    if (typeof outlines !== 'object') {
+        throw new Error('lite-charts: outlines must be an object with an index factory');
+    }
+    if (typeof outlines.index !== 'function') {
+        throw new Error('lite-charts: outlines.index must be a ClusterIndex factory');
+    }
+    if (typeof outlines.groupKey !== 'string' || outlines.groupKey.length === 0) {
+        throw new Error('lite-charts: outlines.groupKey is required (a non-empty string key)');
+    }
+    // alpha: == null gated FIRST (null is not zero; never `+` before the gate).
+    // Present -> a finite number > 0 (Infinity refused -- omit alpha for the
+    // convex hull; +0 and -0 both fail `> 0`). Absent -> the convexHull path.
+    let alpha = null;
+    if (outlines.alpha != null) {
+        const a = outlines.alpha;
+        if (typeof a !== 'number' || !Number.isFinite(a) || !(a > 0)) {
+            throw new Error('lite-charts: outlines.alpha must be a finite number > 0 (omit alpha for the convex hull)');
+        }
+        alpha = a;
+    }
+    // Style fallbacks (cells/contours FR3 precedent -- never a throw).
+    const stroke = typeof outlines.stroke === 'string' ? outlines.stroke : '#7a7a7a';
+    let strokeWidth = 1;
+    if (outlines.strokeWidth != null) {
+        const w = +outlines.strokeWidth;
+        strokeWidth = !(w > 0) ? 1 : (w > 16 ? 16 : w);
+    }
+    // fill defaults to the stroke value when omitted (RAW; no var resolution).
+    const fill = typeof outlines.fill === 'string' ? outlines.fill : stroke;
+    // fillOpacity: == null gated, default 0 (no fill), clamped [0, 1]; a NaN
+    // opacity falls back to 0 rather than poisoning globalAlpha.
+    let fillOpacity = 0;
+    if (outlines.fillOpacity != null) {
+        const o = +outlines.fillOpacity;
+        fillOpacity = o !== o ? 0 : (o < 0 ? 0 : (o > 1 ? 1 : o));
+    }
+    // dash: a valid pattern (positive finite numbers) is copied + frozen so the
+    // hot draw never touches caller memory; anything else -> solid.
+    let dash = null;
+    if (Array.isArray(outlines.dash) && outlines.dash.length > 0) {
+        let valid = true;
+        for (let i = 0; i < outlines.dash.length; i++) {
+            const d = outlines.dash[i];
+            if (d == null || typeof d !== 'number' || !Number.isFinite(d) || !(d > 0)) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) dash = Object.freeze(outlines.dash.slice());
+    }
+    return {
+        index: outlines.index,
+        // RAW accessor -- group key VALUES must never be `+v`-coerced (the
+        // colorKey precedent). SameValueZero grouping happens in the extract
+        // partition against a persistent Map.
+        groupAccessor: buildRawAccessor(outlines.groupKey),
+        alpha,
+        stroke,
+        strokeWidth,
+        fill,
+        fillOpacity,
+        dash,
+    };
+};
+
 // v1.16.0 field-raster layer support.
 //
 // Minimal hex parser DUPLICATED into the axis kernel. The shipped
@@ -4697,6 +4793,10 @@ const _initScatterOpts = (config) => {
         // absent -> every downstream branch dead). Normalized here so a bad
         // spec throws at construction, BEFORE the first _own(signal()).
         fieldSpec: _normalizeFieldSpec(config.field),
+        // v1.18.0: optional injected cluster-outlines layer (null when absent ->
+        // every downstream branch dead). Normalized here so a bad spec throws at
+        // construction, BEFORE the first _own(signal()).
+        outlinesSpec: _normalizeOutlinesSpec(config.outlines),
         strokeRef: { value: config.stroke != null ? config.stroke : null },
         strokeWidthRef: { value: config.strokeWidth != null ? +config.strokeWidth : 0 },
         fillOpacityRef: { value: config.fillOpacity != null ? +config.fillOpacity : 1 },
@@ -4726,6 +4826,11 @@ const _extractScatterData = (state, data, xAcc, yAcc, ctx) => {
     // the same reason -- separate handle, so a cells refresh and a field
     // refresh never share a disposal.
     _disposeFieldIndex(state);
+    // v1.18.0: the per-group cluster handles ride the same lifecycle -- pixel
+    // space is not affine-stable across anisotropic zoom, so every prior handle
+    // is stale after the re-projection. _scatterRefreshOutlines rebuilds them
+    // (cold) on the same run.
+    _disposeOutlineIndexes(state);
 
     // v1.14.0: per-point cell colors. When cells.colorKey is set, resolve each
     // primary-series row's color to a concrete CSS string so the cell draw can
@@ -4768,6 +4873,85 @@ const _extractScatterData = (state, data, xAcc, yAcc, ctx) => {
         } else if (Array.isArray(data)) {
             for (let i = 0; i < n; i++) zs[i] = vAcc(data[i], i);
         }
+    }
+
+    // v1.18.0: partition rows into insertion-ordered groups by the RAW groupKey
+    // value (SameValueZero via a persistent Map). A row whose key is == null
+    // belongs to NO group (marker only -- panning-safe, never a throw). AoS only
+    // (a SoA cloud has no per-row group column -- the cells colorKey precedent).
+    // Cold, on every data change: two-pass count-then-fill so outlineGroupRows is
+    // EXACT (no slack). The 64-group cap is NOT enforced here -- refresh owns
+    // that fault (C5); extract only counts.
+    const ospec = ctx.opts && ctx.opts.outlinesSpec;
+    if (ospec && Array.isArray(data)) {
+        let map = state.outlineGroupMap;
+        if (!map) { map = new Map(); state.outlineGroupMap = map; }
+        map.clear();
+        const n = state.n;
+        const gAcc = ospec.groupAccessor;
+        // Pass A: discover groups (insertion order), count members per group.
+        // outlineGroupStart holds the running per-group COUNT here, then is
+        // converted in place to exclusive-prefix offsets below.
+        let starts = state.outlineGroupStart;
+        let groupCount = 0;
+        let total = 0;
+        for (let i = 0; i < n; i++) {
+            const key = gAcc(data[i], i);
+            if (key == null) continue;  // no group -> marker only
+            let gid = map.get(key);
+            if (gid === undefined) {
+                gid = groupCount++;
+                if (!starts || starts.length < groupCount + 1) {
+                    let cap = (starts && starts.length) || 8;
+                    while (cap < groupCount + 1) cap = cap * 2;
+                    const grown = new Int32Array(cap);
+                    if (starts) grown.set(starts);
+                    starts = grown;
+                    state.outlineGroupStart = starts;
+                }
+                starts[gid] = 0;
+                map.set(key, gid);
+            }
+            starts[gid]++;
+            total++;
+        }
+        // Exclusive-prefix conversion: starts[g] := offset of group g's span;
+        // starts[groupCount] := total (the draw/refresh read these as the
+        // group -> row-range map into outlineGroupRows).
+        let acc = 0;
+        for (let g = 0; g < groupCount; g++) {
+            const cnt = starts[g];
+            starts[g] = acc;
+            acc += cnt;
+        }
+        if (groupCount > 0) starts[groupCount] = acc;
+        // Pass B: place each non-null row index into its group's contiguous span
+        // via a per-group cursor (starts stays the immutable prefix map).
+        let rows = state.outlineGroupRows;
+        if (!rows || rows.length < total) {
+            let cap = (rows && rows.length) || 16;
+            while (cap < total) cap = cap * 2;
+            rows = new Int32Array(cap);
+            state.outlineGroupRows = rows;
+        }
+        let cursor = state.outlineGroupCursor;
+        if (!cursor || cursor.length < groupCount) {
+            let cap = (cursor && cursor.length) || 8;
+            while (cap < groupCount) cap = cap * 2;
+            cursor = new Int32Array(cap);
+            state.outlineGroupCursor = cursor;
+        }
+        for (let g = 0; g < groupCount; g++) cursor[g] = starts[g];
+        for (let i = 0; i < n; i++) {
+            const key = gAcc(data[i], i);
+            if (key == null) continue;
+            const gid = map.get(key);
+            rows[cursor[gid]++] = i;
+        }
+        state.outlineGroupCount = groupCount;
+    } else if (ospec) {
+        // Spec present but SoA (or no data): no groups this pass.
+        state.outlineGroupCount = 0;
     }
 };
 
@@ -5241,6 +5425,181 @@ const _scatterRefreshContours = (states, ctx) => {
     }
 };
 
+// v1.18.0: cold cluster-outline refresh. The FOURTH independent fault domain --
+// its own try/catch + ctx.outlineError, disposing ONLY its own per-group
+// handles, so a fault here never suppresses cells/field/contours and vice versa.
+// Per group: repack that group's FINITE pixel coords into pooled subset arrays,
+// build one injected cluster handle over the subset, extract either the convex
+// hull (alpha absent) or the alpha shape (alpha present) as ORIGINAL subset
+// indices, and bake the boundary loops COLD into flat pooled geometry the draw
+// walks at 0 B/frame. Handles are rebuilt every refresh -- pixel space is not
+// affine-stable across anisotropic zoom (the cells lesson). Handles stay alive
+// until the NEXT build/extract/unmount (dispose-at-next-build keeps the failure
+// story simple, mirrors cells); a thrown build leaves siblings intact.
+const _scatterRefreshOutlines = (states, ctx) => {
+    const opts = ctx.opts;
+    const spec = opts.outlinesSpec;
+    if (spec == null) return;
+    ctx.outlineError = null;
+    // D6: primary series only (a multi-series cluster outline is ill-posed).
+    const primary = states[0];
+    if (primary == null || primary.n === 0) {
+        if (primary) primary.outlineLoopCount = 0;
+        return;
+    }
+    const pxs = primary.pxs;
+    const pys = primary.pys;
+    if (pxs === null || pys === null) { primary.outlineLoopCount = 0; return; }
+    const groupCount = primary.outlineGroupCount | 0;
+    if (groupCount === 0) { primary.outlineLoopCount = 0; return; }
+
+    // Scale changes rebuild -- pixel space is not affine-stable (the cells
+    // lesson). Dispose the prior handles before this pass builds new ones.
+    _disposeOutlineIndexes(primary);
+
+    try {
+        // Group cap (C5): a refresh-time layer fault -- silently dropping groups
+        // lies. Runtime data can grow groups past the cap; fail closed here.
+        if (groupCount > _OUTLINE_MAX_GROUPS) {
+            throw new Error('lite-charts: outlines exceeds the 64-group cap');
+        }
+        const starts = primary.outlineGroupStart;
+        const rows = primary.outlineGroupRows;
+        // Pooled per-group handle array (length >= groupCount) so cleanup and the
+        // next extract can dispose every one.
+        let handles = primary.outlineHandles;
+        if (!handles || handles.length < groupCount) {
+            handles = new Array(groupCount);
+            primary.outlineHandles = handles;
+        }
+        // Geometry pools. outlineGroupEnds is fixed at the 64-group cap so the
+        // draw indexes it without a bounds branch.
+        if (!primary.outlineXY) primary.outlineXY = new Float32Array(64);
+        if (!primary.outlineLoopEnds) primary.outlineLoopEnds = new Int32Array(16);
+        if (!primary.outlineGroupEnds) primary.outlineGroupEnds = new Int32Array(_OUTLINE_MAX_GROUPS);
+        let xy = primary.outlineXY;              // interleaved x,y pairs, global
+        let loopEnds = primary.outlineLoopEnds;  // exclusive end per loop, in PAIRS
+        const groupEnds = primary.outlineGroupEnds;
+        let packX = primary.outlinePackX;
+        let packY = primary.outlinePackY;
+        let outIdx = primary.outlineIdx;
+        let loopEndsBuf = primary.outlineLoopEndsBuf;
+
+        let xyOff = 0;        // float offset into outlineXY (2 floats per point)
+        let loopOff = 0;      // loop index into outlineLoopEnds (global)
+        let groupsDrawn = 0;
+        let prevGroupEnd = 0;
+
+        for (let g = 0; g < groupCount; g++) {
+            const s = starts[g];
+            const e = starts[g + 1];
+            const cap = e - s;
+            // Repack this group's FINITE pixel coords into the subset pool,
+            // SKIPPING non-finite rows (`x !== x` -- the hit-test idiom).
+            if (!packX || packX.length < cap) {
+                let c = (packX && packX.length) || 16;
+                while (c < cap) c = c * 2;
+                packX = new Float32Array(c);
+                packY = new Float32Array(c);
+                primary.outlinePackX = packX;
+                primary.outlinePackY = packY;
+            }
+            let gn = 0;
+            for (let r = s; r < e; r++) {
+                const ri = rows[r];
+                const x = pxs[ri], y = pys[ri];
+                if (x !== x || y !== y) continue;  // NaN pixel -> drop from hull
+                packX[gn] = x;
+                packY[gn] = y;
+                gn++;
+            }
+            if (gn >= 3) {  // C4: gn < 3 draws nothing for this group
+                const h = spec.index(packX, packY, gn);
+                handles[g] = h;
+                // FIRST-refresh probe: methods may live on the facade prototype
+                // (the 1.3.0 layout -- typeof at first refresh, not construction).
+                if (typeof h.convexHull !== 'function' || typeof h.alphaShape !== 'function') {
+                    throw new Error('lite-charts: outlines.index handle must expose convexHull + alphaShape');
+                }
+                // Query buffers: SAFE bounds 3*gn (outIndices) + gn (loop ends).
+                const idxNeed = 3 * gn;
+                if (!outIdx || outIdx.length < idxNeed) {
+                    let c = (outIdx && outIdx.length) || 16;
+                    while (c < idxNeed) c = c * 2;
+                    outIdx = new Int32Array(c);
+                    primary.outlineIdx = outIdx;
+                }
+                if (!loopEndsBuf || loopEndsBuf.length < gn) {
+                    let c = (loopEndsBuf && loopEndsBuf.length) || 16;
+                    while (c < gn) c = c * 2;
+                    loopEndsBuf = new Int32Array(c);
+                    primary.outlineLoopEndsBuf = loopEndsBuf;
+                }
+                // alpha absent -> convex hull (one loop when count >= 3, else 0);
+                // present -> alpha shape (concatenated CCW loops, exclusive ends).
+                // Both paths funnel through loopEndsBuf so the bake loop is one.
+                let nLoops;
+                if (spec.alpha == null) {
+                    const count = h.convexHull(outIdx) | 0;
+                    if (count >= 3) { loopEndsBuf[0] = count; nLoops = 1; }
+                    else { nLoops = 0; }
+                } else {
+                    nLoops = h.alphaShape(spec.alpha, outIdx, loopEndsBuf) | 0;
+                }
+                // Bake each loop COLD: dereference the PACKED subset now (indices
+                // reference packX/packY). Hole loops bake as ordinary loops --
+                // their opposite winding is the fill-correctness mechanism (T6).
+                let prevEnd = 0;
+                for (let li = 0; li < nLoops; li++) {
+                    const end = loopEndsBuf[li];
+                    const start = prevEnd;
+                    prevEnd = end;
+                    const len = end - start;
+                    if (len < 3) continue;  // degenerate loop -> skip
+                    const need = xyOff + 2 * len;
+                    if (need > xy.length) {
+                        let c = xy.length || 64;
+                        while (c < need) c = c * 2;
+                        const grown = new Float32Array(c);
+                        grown.set(xy);
+                        xy = grown;
+                        primary.outlineXY = xy;
+                    }
+                    for (let k = 0; k < len; k++) {
+                        const si = outIdx[start + k];
+                        xy[xyOff++] = packX[si];
+                        xy[xyOff++] = packY[si];
+                    }
+                    if (loopOff >= loopEnds.length) {
+                        let c = loopEnds.length || 16;
+                        while (c <= loopOff) c = c * 2;
+                        const grown = new Int32Array(c);
+                        grown.set(loopEnds);
+                        loopEnds = grown;
+                        primary.outlineLoopEnds = loopEnds;
+                    }
+                    loopEnds[loopOff++] = xyOff >> 1;  // exclusive end in PAIRS
+                }
+            }
+            groupEnds[g] = loopOff;  // exclusive loop-index end for group g
+            if (loopOff > prevGroupEnd) groupsDrawn++;
+            prevGroupEnd = loopOff;
+        }
+        primary.outlineLoopCount = loopOff;
+        primary.outlineGroupDrawn = groupsDrawn;
+    } catch (err) {
+        // Any outline fault: fail closed to no-outline (markers/cells/field/
+        // contours still draw) and surface at mount. Dispose ONLY the outline
+        // handles built this pass (siblings' handles are theirs).
+        primary.outlineLoopCount = 0;
+        primary.outlineGroupDrawn = 0;
+        _disposeOutlineIndexes(primary);
+        ctx.outlineError = err && err.message
+            ? err.message
+            : 'lite-charts: outline refresh failed';
+    }
+};
+
 // Module-level frozen empty dash -- solid stroke without a per-frame `[]` alloc.
 // getLineDash() ALLOCATES, so the draw never reads ambient dash: it sets its own
 // and resets to this after (no layer relies on ambient dash state).
@@ -5294,16 +5653,108 @@ const makeScatterContourDrawFn = (state, refs, opts, ctx) => (c) => {
     c.restore();
 };
 
-// v1.14.0 + v1.16.0 + v1.17.0: cold post-projection pass. Refreshes the cells
-// layer, the field layer, then the contour layer as INDEPENDENT fault domains --
-// each has its own try/catch, its own ctx error slot, and disposes only its own
-// handle, so a fault in one can never suppress or corrupt the others. The
-// contour pass runs AFTER the field pass so fieldVMin/fieldVMax + fieldIndex are
-// current before it reads them (structural ordering, C5).
+// v1.18.0: cluster-outline draw. One node per chart, ABOVE the cells node and
+// BELOW the markers (an outline frames the cluster the cells tile), inside the
+// plot clip. Walks the prebuilt per-group loop geometry at 0 B/frame. PER GROUP:
+// an optional fill (ONE beginPath over ALL the group's loops -- the default
+// NONZERO fill rule plus the opposite-wound hole loops carves holes out with no
+// even-odd tricks), then ONE beginPath/stroke re-walking the same loops. No
+// getLineDash (it allocates); dash resets to the module-frozen empty. Loop li
+// spans PAIRS [ (li===0?0:loopEnds[li-1]), loopEnds[li] ); group g owns loop
+// indices [ (g===0?0:groupEnds[g-1]), groupEnds[g] ).
+const makeScatterOutlineDrawFn = (state, refs, opts, ctx) => (c) => {
+    if (!refs.visibleRef.value) return;
+    if ((state.outlineLoopCount | 0) === 0) return;
+    const xy = state.outlineXY;
+    if (xy == null) return;
+    const loopEnds = state.outlineLoopEnds;
+    const groupEnds = state.outlineGroupEnds;
+    const groupCount = state.outlineGroupCount | 0;
+    const spec = opts.outlinesSpec;
+    const pb = ctx.plotBoundsBox;
+    const plotL = pb.x, plotT = pb.y, plotW = pb.w, plotH = pb.h;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    // Plot clip, identical idiom to the field/cells/contour layers.
+    c.save();
+    c.beginPath();
+    c.rect(plotL, plotT, plotW, plotH);
+    c.clip();
+
+    const prevStroke = c.strokeStyle;
+    const prevFill = c.fillStyle;
+    const prevWidth = c.lineWidth;
+    const prevAlpha = c.globalAlpha;
+    c.strokeStyle = spec.stroke;
+    c.fillStyle = spec.fill;
+    c.lineWidth = spec.strokeWidth;
+    c.setLineDash(spec.dash || _CONTOUR_NO_DASH);
+
+    const fillOpacity = spec.fillOpacity;
+    let loopStart = 0;  // first loop index of the current group
+    for (let g = 0; g < groupCount; g++) {
+        const loopEnd = groupEnds[g];
+        if (loopEnd > loopStart) {
+            if (fillOpacity > 0) {
+                // ONE path over all the group's loops -> nonzero fill + opposite-
+                // wound holes carve out, no even-odd tricks.
+                c.beginPath();
+                let pairStart = loopStart === 0 ? 0 : loopEnds[loopStart - 1];
+                for (let li = loopStart; li < loopEnd; li++) {
+                    const pairEnd = loopEnds[li];
+                    let off = pairStart << 1;
+                    c.moveTo(xy[off], xy[off + 1]);
+                    for (let p = pairStart + 1; p < pairEnd; p++) {
+                        off = p << 1;
+                        c.lineTo(xy[off], xy[off + 1]);
+                    }
+                    c.closePath();
+                    pairStart = pairEnd;
+                }
+                c.globalAlpha = fillOpacity;
+                c.fill();
+                c.globalAlpha = prevAlpha;
+            }
+            // Stroke pass: ONE path re-walking the same loops, one stroke.
+            c.beginPath();
+            let sPairStart = loopStart === 0 ? 0 : loopEnds[loopStart - 1];
+            for (let li = loopStart; li < loopEnd; li++) {
+                const pairEnd = loopEnds[li];
+                let off = sPairStart << 1;
+                c.moveTo(xy[off], xy[off + 1]);
+                for (let p = sPairStart + 1; p < pairEnd; p++) {
+                    off = p << 1;
+                    c.lineTo(xy[off], xy[off + 1]);
+                }
+                c.closePath();
+                sPairStart = pairEnd;
+            }
+            c.stroke();
+        }
+        loopStart = loopEnd;
+    }
+
+    c.setLineDash(_CONTOUR_NO_DASH);
+    c.strokeStyle = prevStroke;
+    c.fillStyle = prevFill;
+    c.lineWidth = prevWidth;
+    c.globalAlpha = prevAlpha;
+    c.restore();
+};
+
+// v1.14.0 + v1.16.0 + v1.17.0 + v1.18.0: cold post-projection pass. Refreshes
+// the cells layer, the field layer, the contour layer, then the outlines layer
+// as INDEPENDENT fault domains -- each has its own try/catch, its own ctx error
+// slot, and disposes only its own handle(s), so a fault in one can never
+// suppress or corrupt the others. The contour pass runs AFTER the field pass so
+// fieldVMin/fieldVMax + fieldIndex are current before it reads them (structural
+// ordering, C5). The outlines pass is independent of all three (its own injected
+// factory, its own groups) and runs LAST.
 const _scatterPostProject = (states, ctx) => {
     _scatterRefreshCells(states, ctx);
     _scatterRefreshField(states, ctx);
     _scatterRefreshContours(states, ctx);
+    _scatterRefreshOutlines(states, ctx);
 };
 
 const _scatterHitTest = (canvasX, canvasY, primary, /*xScale*/_xs, ctx) => {
@@ -5385,6 +5836,21 @@ const _scatterCleanup = (states) => {
         states[i].contourTriIdx = null;
         states[i].contourCounts = null;
         states[i].contourLevels = null;
+        // v1.18.0: dispose every per-group cluster handle + release the outline
+        // pools so nothing outlives the chart.
+        _disposeOutlineIndexes(states[i]);
+        states[i].outlineHandles = null;
+        states[i].outlineXY = null;
+        states[i].outlineIdx = null;
+        states[i].outlineLoopEnds = null;
+        states[i].outlineLoopEndsBuf = null;
+        states[i].outlineGroupEnds = null;
+        states[i].outlineGroupRows = null;
+        states[i].outlineGroupStart = null;
+        states[i].outlineGroupCursor = null;
+        states[i].outlinePackX = null;
+        states[i].outlinePackY = null;
+        states[i].outlineGroupMap = null;
     }
 };
 
@@ -5665,6 +6131,9 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.17.0: the contour refresh records a first-build fault here,
         // surfaced at mount alongside field/cellError (third fault domain).
         contourError: null,
+        // v1.18.0: the cluster-outline refresh records a first-build / over-cap
+        // fault here, surfaced at mount alongside the others (fourth fault domain).
+        outlineError: null,
     };
     // seriesStates is declared above rendererCtx in source order; assign it
     // here now that rendererCtx exists.
@@ -6301,7 +6770,7 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.14.0: a cell-refresh overflow on the first sync run surfaces here
         // too (same unwind), mirroring the log fail-closed door. A later invalid
         // run only skips its cells (markers still draw); this check runs once.
-        const _mountError = _logDomainError || rendererCtx.cellError || rendererCtx.fieldError || rendererCtx.contourError;
+        const _mountError = _logDomainError || rendererCtx.cellError || rendererCtx.fieldError || rendererCtx.contourError || rendererCtx.outlineError;
         if (_mountError) {
             for (let i = disposers.length - 1; i >= 0; i--) {
                 try { disposers[i](); } catch (_) { /* best-effort unwind */ }
@@ -6406,6 +6875,18 @@ const createBaseAxisChart = (config, renderer) => {
             const cellDraw = makeScatterCellDrawFn(
                 seriesStates[0], seriesRefs[0], chartOpts, rendererCtx);
             scene.root.add(pathNode({ draw: (ctx) => cellDraw(ctx) }));
+        }
+
+        // v1.18.0: cluster-outline layer. One node per chart, added AFTER the
+        // cells node (so outlines render ABOVE cells) and BEFORE the series
+        // marker nodes (so they render BELOW markers -- an outline frames the
+        // cluster the cells tile), inside the plot clip. Gated on its OWN
+        // outlinesSpec (scatter-only, primary series only, D6); a chart without
+        // `outlines` adds NO node and stays byte-identical.
+        if (chartOpts && chartOpts.outlinesSpec) {
+            const outlineDraw = makeScatterOutlineDrawFn(
+                seriesStates[0], seriesRefs[0], chartOpts, rendererCtx);
+            scene.root.add(pathNode({ draw: (ctx) => outlineDraw(ctx) }));
         }
 
         // One path node per series. Draw fn is renderer-specific; the same

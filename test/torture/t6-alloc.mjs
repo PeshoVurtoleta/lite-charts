@@ -30,7 +30,7 @@ import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, c
 import { signal } from '@zakkster/lite-signal';
 // v1.14.0: the REAL published cell index (devDep) -- A20 gates the injected
 // tessellation end-to-end, not against a mock.
-import { createCellIndex, createFieldIndex } from '@zakkster/lite-delaunay';
+import { createCellIndex, createFieldIndex, createClusterIndex } from '@zakkster/lite-delaunay';
 import {
     createEventCanvas, quietCanvas, fireShared, runOpsGate, allocFailMsg,
     runAllocsGate, allocsFailMsg, graphDelta,
@@ -1055,5 +1055,92 @@ export function run() {
         ctrl.destroy();
         c.destroy();
         check(disposes === builds, () => `A23: ${builds - disposes} field handle(s) never disposed`);
+    }
+
+    // --- 18. cluster-outline storm (A24, v1.18.0) ------------------------------
+    // v1.18.0 adds the outlines layer: per-group cluster handles built COLD once
+    // per scale/data change (2 groups -> 2 builds per view write, never per
+    // frame), boundary loops baked into pooled flat geometry, drawn as a
+    // per-group moveTo/lineTo/closePath walk. Structural claims mirror A23 with
+    // the outline lens: (1) a gesture storm rebuilds EXACTLY one handle per
+    // group per scale change and adds zero graph nodes; (2) the per-frame draw
+    // walks prebuilt geometry only: redraw with 2 groups x 1000 pts under a
+    // concave alpha stays inside <=16 B/op with maxMajor:0, within 2 B/op of a
+    // BRANCH-PARITY control (identical scatter WITHOUT outlines -- the A21
+    // lesson); (3) builds === disposes at destroy (per-group handle hygiene).
+    {
+        const N = 2000;  // 2 groups x 1000 pts (brief gate size)
+        const rows = new Array(N);
+        let seed = 20260905;
+        const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+        for (let i = 0; i < N; i++) {
+            const g = i & 1;
+            rows[i] = {
+                x: (g ? 550 : 50) + rnd() * 400,   // two overlapping-x blobs
+                y: 50 + rnd() * 400,
+                g: g ? 'right' : 'left',
+            };
+        }
+        let builds = 0, disposes = 0, queries = 0;
+        const inner = createClusterIndex(2048);
+        const counting = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                convexHull: (o) => { queries++; return h.convexHull(o); },
+                alphaShape: (a, o, e) => { queries++; return h.alphaShape(a, o, e); },
+                dispose() { disposes++; h.dispose(); },
+            };
+        };
+        const mkScatter = (withOutlines) => {
+            const c = createScatterChart({
+                data: rows,
+                zoom: true,
+                ...(withOutlines ? {
+                    outlines: { index: counting, groupKey: 'g', alpha: 60, fillOpacity: 0.2, stroke: '#7a7a7a' },
+                } : {}),
+                width: 800, height: 400, schedule: (fn) => fn(),
+            });
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const c = mkScatter(true);
+        const ctrl = mkScatter(false);
+        check(builds === 2, () => `A24: expected 2 handle builds at mount (one per group), got ${builds}`);
+        check(queries === 2, () => `A24: expected 2 boundary queries at mount, got ${queries}`);
+
+        // Gesture storm: every write is a scale change -> exactly one
+        // dispose+rebuild PER GROUP, never per frame.
+        const vA = { xMin: 100, xMax: 900, yMin: 50, yMax: 450 };
+        const vB = { xMin: 200, xMax: 800, yMin: 100, yMax: 400 };
+        for (let i = 0; i < 8; i++) c.setView(i & 1 ? vA : vB);
+        const b0 = builds, d0 = disposes;
+        const before = graphSnapshot();
+        for (let i = 0; i < 208; i++) {
+            c.setView(i & 1 ? vA : vB);
+            c.redraw();
+        }
+        const after = graphSnapshot();
+        check(after.nodes - before.nodes === 0,
+            () => `A24: ${after.nodes - before.nodes} new signal-graph nodes across the gesture storm (expected 0)`);
+        check(builds - b0 === 416 && disposes - d0 === 416,
+            () => `A24: expected exactly 416 builds / 416 disposes (2 groups x 208 writes), got ${builds - b0}/${disposes - d0}`);
+
+        // Redraw budget: prebuilt-geometry walk vs no-outlines control (20000
+        // ops -- the A23 granularity lesson: tighten ops, never thresholds).
+        const bBefore = builds;
+        const gOutline = runOpsGate(() => { c.redraw(); }, { ops: 20000, warmup: 1000 });
+        const gCtrl = runOpsGate(() => { ctrl.redraw(); }, { ops: 20000, warmup: 1000 });
+        check(builds === bBefore, () => `A24: redraw storm rebuilt cluster handles (${builds - bBefore}x)`);
+        if (!gOutline.report.ok) die(allocFailMsg('A24.outline-redraw', gOutline.report, gOutline.summary));
+        check(gOutline.bytesPerOp <= 16,
+            () => `A24: outline redraw ${gOutline.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gOutline.bytesPerOp - gCtrl.bytesPerOp) <= 2.0,
+            () => `A24: outline redraw ${gOutline.bytesPerOp.toFixed(3)} B/op vs no-outlines control ${gCtrl.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        ctrl.destroy();
+        c.destroy();
+        check(disposes === builds, () => `A24: ${builds - disposes} cluster handle(s) never disposed`);
     }
 }

@@ -5,7 +5,21 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.17.0 (current)
+## v1.18.0 (current)
+
+Cluster-outlines layer on createScatterChart (brief #14,
+`briefs/cluster-outlines.md`, incl. the AS-EXECUTED block). `outlines:
+{ index, groupKey, alpha?, ... }` -- one convex-hull or alpha-shape
+boundary per point group from the injected lite-delaunay 1.4.0
+`createClusterIndex` (peer bump `^1.4.0`, still optional; zero imports).
+Fourth injection rung and fourth independent fault domain. A scatter
+with no `outlines` key is byte-identical. 503/503 tests + torture A24 +
+five reversion proofs; reviewer APPROVED zero blockers; zero contract
+deviations.
+
+---
+
+## v1.17.0
 
 Contour/isoline layer on the scatter field raster (brief #13,
 `briefs/contour-isolines.md`; plan `briefs/contour-isolines-plan.md`). A field
@@ -750,10 +764,10 @@ not shipped in `files[]`). They are independent; pick by appetite.
   `field.contours` with pan/zoom, vs jsdelivr-pinned lite-delaunay 1.3.0
   `createFieldIndex` (importmap bumped 1.2.0 -> 1.3.0; demo header/version
   badges de-staled v1.12.0 -> v1.17.0).
-- **Cluster outlines** (v1.18.0 candidate, brief `briefs/cluster-outlines.md`;
-  lite-delaunay 1.4.0 PUBLISHED + npm-view-verified 2026-09-05, awaiting
-  their relay ping-back: sizing bound, hole-loop statement, duplicate-index
-  determinism, bench numbers) -- per-group convex-hull / alpha-shape
+- **Cluster outlines** (v1.18.0, brief `briefs/cluster-outlines.md`;
+  EXECUTED 2026-09-05 against the published lite-delaunay 1.4.0 --
+  503/503 tests, torture A24, five reversion proofs; awaiting `/release
+  1.18.0` + user publish) -- per-group convex-hull / alpha-shape
   boundary outlines on scatter (`outlines: { index, groupKey, alpha? }`), the
   fourth injection rung. The brief carries the consumer contract delaunay
   1.4.0 (`convexHull` + `alphaShape`) is built against -- the 1.2.0/1.3.0
@@ -778,8 +792,10 @@ needs one before any cut:
 
 - **Candlestick / OHLC (+ volume)** -- highest leverage: the financial
   substrate already exists (time-line preset, session shading, holidays,
-  log scale, pan/zoom). Likely a tenth chart type on the axis kernel
-  with SoA `{ts, o, h, l, c, v}` input.
+  log scale, pan/zoom). BRIEF WRITTEN 2026-09-05: `briefs/candlestick.md`
+  (v1.19.0 candidate) -- tenth axis-kernel type via a new CANDLE_RENDERER
+  hook object; time-continuous x, median-slot width, fail-closed OHLC
+  rows, shading-engine reuse; volume pane deferred with a named trigger.
 - **Chart chrome: title / subtitle / caption** that participates in the
   reactive margin system (not user-DOM stacked around the canvas).
 - **Axis titles + tick-format callback** that survives pan/zoom without

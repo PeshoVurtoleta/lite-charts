@@ -10,7 +10,44 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.17.0 (current): contour/isoline layer on the scatter field raster --
+> v1.18.0 (current): cluster-outlines layer on createScatterChart --
+> outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?,
+> fillOpacity?, dash? }. The FOURTH rung of the injection ladder
+> (spatialIndex -> cells -> field -> outlines): rows partition by the RAW
+> groupKey value (SameValueZero, insertion-ordered, AoS only; == null value
+> -> no group, marker only) and each group gets one boundary outline --
+> convex hull when alpha is absent, concave alpha shape when alpha (a RADIUS
+> in pixel units, finite > 0; Infinity refused, omit for the hull) is set.
+> Geometry comes from an injected ClusterIndexFactory (optional peer
+> @zakkster/lite-delaunay ^1.4.0, createClusterIndex(maxPoints); lite-charts
+> imports nothing): per-group pixel subsets packed cold (non-finite rows
+> skipped), one handle built per group per refresh on the postProject seam
+> (dispose + rebuild every scale/data change -- pixel space is not
+> affine-stable), convexHull/alphaShape queried into SAFE-bound pooled
+> buffers (3n / n, their documented sizing), loops baked into flat pooled
+> geometry the draw walks at 0 B/frame. Draw sits ABOVE cells, BELOW
+> markers, inside the plot clip: per group one optional fill path over ALL
+> its loops (nonzero rule + the mesh's opposite-wound hole loops carve holes
+> out, no even-odd tricks) then one stroke path; dash reset via the frozen
+> empty, getLineDash never called. FOURTH independent fault domain: own
+> try/catch + error slot OR-ed into the mount door; degenerate groups
+> (n < 3, collinear, alpha too small) are silent per-group skips; > 64
+> distinct groups is a layer fault (fail closed -- silently dropping groups
+> lies). Doors pre-signal: non-object outlines, missing/non-function index,
+> missing/non-string groupKey, bad alpha; junk styles fall back (stroke
+> #7a7a7a, width 1 clamp (0,16], fillOpacity 0 clamp [0,1], dash frozen
+> copy). typeof-probe of convexHull/alphaShape at FIRST refresh (prototype-
+> resident methods fine). A scatter without outlines is byte-identical.
+> 503/503 (+13 OL tests: monotone-chain hull oracle w/ orientation bijection,
+> huge-alpha == hull, exact 2-loop split fixture, partition + no-group rows,
+> degenerate isolation, 64-cap both-ways, four-domain fault matrix both
+> directions, per-group build/dispose ledger, one-fill-per-group hole
+> winding, SVG Z-closure, source scan, absent-config parity). Torture A24
+> gesture storm (2 groups x 1000 pts, 416 builds/disposes over 208 writes,
+> redraw within 2 B/op of a no-outlines branch-parity control); five
+> reversion proofs (cap, index-space bijection, dispose pair, mount door,
+> retained draw growth).
+> v1.17.0: contour/isoline layer on the scatter field raster --
 > field.contours: { levels: count | number[], color?, width?, dash? }.
 > Iso-value lines over the v1.16.0 heatmap, drawn between the raster and the
 > cells/markers at 0 B/frame. Computed COLD on the same postProject refresh by
@@ -659,7 +696,7 @@
 > size domain. v1.2.0-alpha.1: createScatterChart. v1.2.0-alpha.0:
 > spatial-index foundation. v1.1.0: bar layout polish. 259/259
 > tests pass.
-> ESM-only. Single-file ~6.9k lines. Four peer deps (lite-signal,
+> ESM-only. Single-file ~11.2k lines. Four peer deps (lite-signal,
 > lite-scene, lite-axis required; lite-delaunay optional), zero
 > runtime deps. MIT.
 > See ROADMAP.md for forward plan: v1.4 log scale + pan/zoom +

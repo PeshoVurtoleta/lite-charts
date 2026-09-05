@@ -17,13 +17,34 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.17.0 -- contour/isoline layer on the scatter field raster
-(minor). `field.contours: { levels, ... }` draws exact iso-value lines over the
-v1.16.0 interpolated heatmap -- computed cold on the same refresh from the same
-injected mesh (`triangleCount`/`triangleVertices` + edge interpolation), drawn
-at 0 B/frame between the raster and the cells layer. A field chart with no
-`contours` key is byte-identical. **490/490 tests pass** plus a torture/stress
-gate (`npm run torture`).
+**Status:** v1.18.0 -- cluster-outlines layer on `createScatterChart`
+(minor). `outlines: { index, groupKey, alpha?, ... }` draws one boundary
+outline per point group -- a convex hull, or a concave alpha shape that
+actually hugs the cluster -- from an injected `ClusterIndexFactory`
+(optional peer `@zakkster/lite-delaunay` `^1.4.0`), computed cold per
+refresh and drawn above the cells, below the markers, at 0 B/frame. A
+scatter with no `outlines` key is byte-identical. **503/503 tests pass**
+plus a torture/stress gate (`npm run torture`).
+
+**New in v1.18.0:**
+- **Cluster outlines on scatter.** `outlines: { index: createClusterIndex(N),
+  groupKey, alpha?, stroke?, strokeWidth?, fill?, fillOpacity?, dash? }`
+  partitions the primary series' rows by the raw `groupKey` value and strokes
+  one boundary per group: the convex hull when `alpha` is absent, or the
+  concave alpha shape (`alpha` = a radius in pixel units, finite `> 0`;
+  `Infinity` is refused -- omit `alpha` for the hull) when set. The fourth
+  injection rung after `spatialIndex`, `cells` and `field`: geometry comes
+  from the injected factory (lite-charts imports nothing), per-group handles
+  are rebuilt cold on every data/scale change on the `postProject` seam, and
+  the per-frame draw walks prebuilt pooled loops only. Multi-loop alpha
+  shapes (split clusters) and interior hole loops both draw; an optional
+  translucent fill runs one path per group, so hole loops carve out under the
+  nonzero fill rule. Rows whose key is missing/`null` belong to no group;
+  groups with fewer than 3 usable points (or none under the alpha) silently
+  draw markers only; more than 64 distinct groups is a fail-closed layer
+  fault. Construction throws before any owned signal on a bad `index`,
+  `groupKey`, or `alpha`; junk styles fall back. `exportSVG` emits Z-closed
+  paths per loop.
 
 **New in v1.17.0:**
 - **Contour lines over the field raster.** `field.contours: { levels, color?,
@@ -1215,6 +1236,45 @@ to show (no finite cells, degenerate cloud, faulted mesh) -- no raster, no
 contours. Contour labels, filled isobands, and smoothing are out of scope by
 design: the mesh's piecewise-linear truth is the product.
 
+### Cluster outlines (v1.18.0)
+
+```js
+import { createScatterChart } from '@zakkster/lite-charts';
+import { createClusterIndex } from '@zakkster/lite-delaunay'; // optional peer ^1.4.0
+
+const chart = createScatterChart({
+  data: rows,                        // AoS rows with a group column
+  outlines: {
+    index: createClusterIndex(4096), // injected factory -- size >= largest group
+    groupKey: 'cluster',             // raw row key; missing/null -> no group
+    alpha: 40,                       // px radius; omit for the convex hull
+    stroke: '#7a7a7a',
+    fillOpacity: 0.15,               // 0 (default) = stroke only
+  },
+});
+```
+
+One outline per group, drawn above the Voronoi cells and below the markers.
+Without `alpha` each group gets its convex hull (single loop). With `alpha`
+each group gets its alpha shape: triangles of the group's Delaunay mesh with
+circumradius `<= alpha` survive, and the boundary of what survives is traced
+into loops -- a stretched cluster splits into multiple loops, a ring keeps its
+hole, and the fill (one path per group, nonzero rule) paints holes correctly
+because the mesh emits hole loops wound opposite to their outers. Alpha is a
+pixel-space radius, so zooming re-fragments honestly: spread the points out
+far enough and the shape thins, splits, and eventually vanishes (0 loops is a
+legal, drawn-as-nothing result).
+
+Group handles are rebuilt from the packed pixel subsets on every data/scale
+change on the same cold `postProject` seam as the other injected layers --
+pan/zoom never strokes a stale or affine-wrong boundary. Degenerate groups
+(fewer than 3 finite-pixel rows, collinear, or alpha below every triangle)
+skip silently per group; the other groups and every other layer draw on. More
+than 64 distinct groups faults the layer (fail closed, surfaced at mount) --
+silently outlining a subset would lie. The factory's `maxPoints` bound is
+yours to size: a group larger than it faults the layer at refresh, not at
+construction.
+
 ## Performance
 
 All numbers are from `bench/line-100k.mjs` running on Node 22 against a
@@ -1941,7 +2001,8 @@ forward plan and the development history that led here. Headlines:
 | **v1.14.0** | Fat hover + injected Voronoi cell layer on `createScatterChart`. `hitTolerance: 'nearest'` snaps the hover to the closest point from anywhere in the plot (finite plot-diagonal cap, linear and indexed paths agree). `cells: { index, colorKey?, fillOpacity?, stroke?, strokeWidth? }` tessellates the primary series with pixel-space bbox-clipped Voronoi polygons from an injected `CellIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.2.0`), rebuilt cold at a new `postProject` renderer seam (after projection -- extract-time would index stale pixels), drawn under the markers at 0 B/frame with a hover-cell highlight off the crosshair. Degenerate clouds draw markers with no cells; index faults fail closed (mount-time door / later runs skip cells); construction throws fire before any owned signal is allocated. 463 tests (10 new: independent half-plane oracle + exact plot-tiling invariant, indexed/linear fat-hover agreement, SVG parity with clipPath isolation, zero-node construction throws, retention, source-scan confinement -- five mechanisms reversion-proven) + torture A20 (one rebuild per scale change over a 208-write view storm, redraw within 2 B/op of a no-cells control, vs the real published `createCellIndex`). |
 | **v1.15.0** | Horizontal legend virtualization + early-close holidays + an earlier fail-closed point for bad legend config. A virtualized legend at `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling along X: supply `legend.width` + `legend.itemWidth` (positive integers) and the adapter receives `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. Size keys are orientation-exclusive -- `height`/`itemHeight` on top/bottom, or `width`/`itemWidth` on left/right, throw at construction; the left/right adapter opts + DOM path stay byte-identical. `shading.holidays` entries may be `{ ts, closeMinutes }` (early close): every session that UTC day clamps to close at `closeMinutes` (1..1439) and the trailing closed time fuses forward like a whole-day holiday's band; whole-day (number) entries are byte-identical. Early-close doors that throw at construction: object without `ts`; bad `ts`; `closeMinutes` null/non-integer/outside 1..1439; a duplicate UTC day across all entries; an early close on a weekday with no open session; an early close on a day carrying an overnight evening session. The clamp is one cold-path line in `_sessionBands` (`cutMs = Infinity` on non-early days). Legend position/container validation + `virtualize` normalization are hoisted above the first owned signal in `createBaseAxisChart`, so bad legend config throws with nothing allocated; when both chart-type options and legend are invalid, the `initOpts` error wins. 10 new tests (463->473) + torture A21 (horizontal scroll storm vs a vertical-storm branch-parity control, measured delta 0.000 B/op); five reversion proofs. |
 | **v1.16.0** | Injected field-raster layer on `createScatterChart`. `field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }` rasterizes the primary series' per-point scalar into a smooth barycentric-interpolated background heatmap -- the third injection rung after `spatialIndex` and `cells`. The triangulated mesh + serpentine grid sampler come from an injected `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0`, `createFieldIndex(N)`; lite-charts imports nothing), built over pixel-space points and re-sampled cold on every data/scale change on the same `postProject` seam as cells, so it stays anisotropy-correct under pan/zoom. One `sampleField` per refresh fills a pooled grow-only grid; per-cell CSS colors are precomputed cold so the draw walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped) at 0 B/frame; `exportSVG` emits one `<rect>` per finite cell. `gridW`/`gridH` integers in `[8,256]` (default 64x48); `colors` `[low,high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v,vMin,vMax)` with extents over the FINITE cells only; `opacity` default 0.5. Independent fault domain from `cells` (own `try/catch`, own `ctx` error slot OR-ed into the mount door, own handle disposal); drawn UNDER the cells node. `interpolate` is never called. Construction throws before any owned signal: non-object `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps `gridW`/`gridH` (`== null` gated before any `+`). A scatter with no `field` is byte-identical. |
-| **v1.17.0** (this) | Contour/isoline layer over the field raster. `field.contours: { levels: count \| number[], color?, width?, dash? }` sweeps the injected triangulation for iso-value crossings (`triangleCount`/`triangleVertices` + edge interpolation -- exact for the piecewise-linear interpolant, proven against an independent planar oracle) and strokes them between the raster and the cells layer at 0 B/frame from a pooled cold-computed segment buffer. Count-form levels sit strictly inside the finite sampled range and re-derive per pan/zoom (outlier rule); explicit out-of-range levels legally draw nothing; strict `z > v` tie rule (every triangle yields 0 or 2 crossings). Third independent fault domain: reuses the field handle, skips when the raster shows nothing (no rebuild), never disposes what it does not own. Bad `levels` throw pre-signal; junk styles fall back. SVG parity free through the draw serializer. `locate`/`barycentric` remain unconsumed -- no delaunay-side change. |
+| **v1.17.0** | Contour/isoline layer over the field raster. `field.contours: { levels: count \| number[], color?, width?, dash? }` sweeps the injected triangulation for iso-value crossings (`triangleCount`/`triangleVertices` + edge interpolation -- exact for the piecewise-linear interpolant, proven against an independent planar oracle) and strokes them between the raster and the cells layer at 0 B/frame from a pooled cold-computed segment buffer. Count-form levels sit strictly inside the finite sampled range and re-derive per pan/zoom (outlier rule); explicit out-of-range levels legally draw nothing; strict `z > v` tie rule (every triangle yields 0 or 2 crossings). Third independent fault domain: reuses the field handle, skips when the raster shows nothing (no rebuild), never disposes what it does not own. Bad `levels` throw pre-signal; junk styles fall back. SVG parity free through the draw serializer. `locate`/`barycentric` remain unconsumed -- no delaunay-side change. |
+| **v1.18.0** (this) | Cluster-outlines layer on `createScatterChart`. `outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?, fillOpacity?, dash? }` draws one boundary per point group -- convex hull (no `alpha`) or concave alpha shape (`alpha` = pixel radius, finite `> 0`, `Infinity` refused) -- via an injected `ClusterIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.4.0`, `createClusterIndex(maxPoints)`; zero imports). Fourth injection rung: rows partition by raw `groupKey` (SameValueZero, insertion-ordered; `== null` -> no group), per-group pixel subsets pack cold (non-finite rows skipped), one handle per group per refresh on the `postProject` seam, queries land in SAFE-bound pooled buffers (`3n`/`n` per their 1.4.0 docs), loops bake into flat pooled geometry walked at 0 B/frame above cells / below markers. Multi-loop shapes + hole loops draw as ordinary loops; per-group single-path fill + nonzero rule + opposite hole winding = correct holes. Fourth independent fault domain (own error slot in the mount-door OR); degenerate groups skip silently; > 64 groups faults fail-closed. Doors pre-signal; junk styles fall back; `typeof` handle probe at first refresh. 13 new tests (490->503: hull-oracle bijection w/ orientation, 2-loop split fixture, four-domain fault matrix both ways, build/dispose ledger, hole-winding fill, SVG Z-closure, absent-config parity) + torture A24 (208-write gesture storm, 416/416 builds/disposes, redraw within 2 B/op of a no-outlines control); five reversion proofs. |
 | v1.17.x / v1.18.0 (candidates) | cluster outlines (per-group convex/alpha-shape hulls on scatter, injected -- awaits lite-delaunay 1.4.0); band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. Longer arc (from the 2026-09-05 external review, see ROADMAP): candlestick/OHLC + volume; chart title/subtitle/caption in the layout system; axis titles + zero-alloc tick formatters; error bars / stacked area; linked-chart helpers; crosshair/tooltip ARIA. |
 
 ## Ecosystem

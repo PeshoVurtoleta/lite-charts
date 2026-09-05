@@ -33,7 +33,7 @@ setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
 import { createLineChart, createTimeLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, _testHelpers } from '../Charts.js';
 // v1.14.0: the REAL published cell index (devDep) -- the tessellation tests run
 // end-to-end against the actual consumer contract, not a mock.
-import { createCellIndex, createFieldIndex } from '@zakkster/lite-delaunay';
+import { createCellIndex, createFieldIndex, createClusterIndex } from '@zakkster/lite-delaunay';
 import {
     createMockCanvas,
     countCalls,
@@ -10551,5 +10551,420 @@ describe('v1.17.0 -- contour/isoline layer on the field raster (vs REAL lite-del
         assert.equal((src.match(/const makeScatterContourDrawFn =/g) || []).length, 1);
         assert.equal((src.match(/makeScatterContourDrawFn\(/g) || []).length, 1, 'one contour draw-node site');
         assert.equal((src.match(/_scatterRefreshContours\(/g) || []).length, 1, 'one contour refresh call site');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.18.0 -- cluster outlines layer (vs REAL lite-delaunay 1.4.0)
+// ---------------------------------------------------------------------------
+describe('v1.18.0 -- cluster outlines layer (vs REAL lite-delaunay 1.4.0)', () => {
+    const W = 800, H = 400;
+    const OCOL = '#c2410c'; // distinctive outline strokeStyle to key the pass
+
+    // Two well-separated blobs in data space [0,100]^2, AoS rows with a raw
+    // group column 'g'. Grid spacing keeps every triangulation deterministic.
+    const blob = (x0, y0, g, step) => {
+        const rows = [];
+        const s = step || 5;
+        for (let i = 0; i < 4; i++) {
+            for (let j = 0; j < 4; j++) {
+                rows.push({ x: x0 + i * s, y: y0 + j * s, g });
+            }
+        }
+        return rows;
+    };
+    const twoGroups = () => {
+        // INTERLEAVED rows: subset-local indices must never alias original row
+        // indices, or an index-space bug (pxs[si] for packX[si]) hides (R2).
+        const a = blob(10, 10, 'a'), b = blob(70, 70, 'b'), rows = [];
+        for (let i = 0; i < a.length; i++) rows.push(a[i], b[i]);
+        return rows;
+    };
+
+    const mkChart = (outlines, extra, dataOverride) => createScatterChart(Object.assign({
+        data: dataOverride != null ? dataOverride : twoGroups(),
+        width: W, height: H, schedule: (fn) => fn(),
+        outlines: Object.assign({ index: createClusterIndex(2048), groupKey: 'g', stroke: OCOL }, outlines || {}),
+    }, extra));
+
+    // Parse the LAST outline pass out of ctx.calls (sync scheduler paints
+    // multiple passes at mount -- FR5 lesson). A pass is armed by
+    // set:strokeStyle === OCOL and closed by the following restore. Within it,
+    // each stroke() closes one GROUP whose path is the loops walked since its
+    // beginPath (loop = moveTo..lineTo..closePath); each fill() records the
+    // filled loop count + the globalAlpha it ran under.
+    const lastOutlinePass = (ctx) => {
+        const passes = [];
+        let pass = null, path = null, loop = null, alpha = 1;
+        for (const [name, args] of ctx.calls) {
+            if (name === 'set:strokeStyle') {
+                // The draw restores prevStroke BEFORE restore() -- a non-OCOL
+                // set while armed is the end of the pass, not a broken one.
+                if (pass != null) { pass.done = true; pass = null; }
+                if (args[0] === OCOL) { pass = { groups: [], fills: [] }; passes.push(pass); }
+                continue;
+            }
+            if (pass == null) continue;
+            if (name === 'restore') { pass.done = true; pass = null; continue; }
+            if (name === 'set:globalAlpha') { alpha = args[0]; continue; }
+            if (name === 'beginPath') { path = []; loop = null; continue; }
+            if (name === 'moveTo' && path) { loop = [[args[0], args[1]]]; continue; }
+            if (name === 'lineTo' && loop) { loop.push([args[0], args[1]]); continue; }
+            if (name === 'closePath' && loop) { path.push(loop); loop = null; continue; }
+            if (name === 'fill' && path) { pass.fills.push({ loops: path.length, alpha }); continue; }
+            if (name === 'stroke' && path) { pass.groups.push(path); path = null; continue; }
+        }
+        // Last COMPLETE pass (armed strokeStyle + its restore observed).
+        for (let i = passes.length - 1; i >= 0; i--) if (passes[i].done) return passes[i];
+        return null;
+    };
+
+    // Independent convex-hull oracle: monotone chain over pixel points,
+    // returned in CCW-SCREEN order (clockwise in math coords, +y down flips
+    // it -- the 1.4.0 documented convention). `< 0` (not `<= 0`) KEEPS
+    // collinear boundary points: the delaunay hull ring keeps them, so the
+    // oracle must too or a grid fixture's edge points falsify a correct hull.
+    const oracleHull = (pts) => {
+        const p = pts.slice().sort((u, v) => u[0] - v[0] || u[1] - v[1]);
+        const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        const lower = [];
+        for (const pt of p) {
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pt) < 0) lower.pop();
+            lower.push(pt);
+        }
+        const upper = [];
+        for (let i = p.length - 1; i >= 0; i--) {
+            const pt = p[i];
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pt) < 0) upper.pop();
+            upper.push(pt);
+        }
+        lower.pop(); upper.pop();
+        // The chain emits CCW in MATH coords (+y up) = CW on screen (+y down);
+        // reverse to the CCW-SCREEN convention the 1.4.0 hull documents.
+        return lower.concat(upper).reverse();
+    };
+
+    const keyOf = (pt) => pt[0].toFixed(2) + ',' + pt[1].toFixed(2);
+    const sameLoopModuloRotation = (loop, oracle) => {
+        if (loop.length !== oracle.length) return false;
+        const ok = oracle.map(keyOf);
+        const lk = loop.map(keyOf);
+        const start = ok.indexOf(lk[0]);
+        if (start < 0) return false;
+        for (let i = 0; i < lk.length; i++) {
+            if (lk[i] !== ok[(start + i) % ok.length]) return false;
+        }
+        return true;
+    };
+    const groupPixels = (chart, rows, g) => rows
+        .filter((r) => r.g === g)
+        .map((r) => [chart.xScale.map(r.x), chart.yScale.map(r.y)]);
+
+    // -- OL1: construction doors --------------------------------------------
+    it('OL1: construction doors throw before any owned signal', () => {
+        const idx = createClusterIndex(64);
+        const bad = [
+            42,                                        // non-object
+            { groupKey: 'g' },                         // index missing
+            { index: 7, groupKey: 'g' },               // index non-function
+            { index: idx },                            // groupKey missing
+            { index: idx, groupKey: '' },              // groupKey empty
+            { index: idx, groupKey: 9 },               // groupKey non-string
+            { index: idx, groupKey: 'g', alpha: NaN },
+            { index: idx, groupKey: 'g', alpha: 0 },
+            { index: idx, groupKey: 'g', alpha: -0 },
+            { index: idx, groupKey: 'g', alpha: -5 },
+            { index: idx, groupKey: 'g', alpha: Infinity },
+            { index: idx, groupKey: 'g', alpha: '4' }, // string is not a number
+        ];
+        for (const outlines of bad) {
+            const before = stats().activeNodes;
+            assert.throws(() => createScatterChart({
+                data: twoGroups(), width: W, height: H,
+                schedule: (fn) => fn(), outlines,
+            }), /lite-charts:/, JSON.stringify(outlines));
+            assert.equal(stats().activeNodes - before, 0,
+                'signal leak on rejected construction: ' + JSON.stringify(outlines));
+        }
+        // alpha: null is == null -> treated as absent (hull path), NOT a throw.
+        const c = mkChart({ alpha: null });
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        assert.ok(lastOutlinePass(canvas.getContext('2d')), 'alpha:null mounts on the hull path');
+        c.unmount();
+    });
+
+    // -- OL2: convex-hull oracle --------------------------------------------
+    it('OL2: hull vertices + CCW-screen order match an independent monotone chain, per group', () => {
+        const rows = twoGroups();
+        const c = mkChart(null, null, rows);
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        const pass = lastOutlinePass(canvas.getContext('2d'));
+        assert.ok(pass, 'outline pass drawn');
+        assert.equal(pass.groups.length, 2, 'two group strokes');
+        const oracles = [oracleHull(groupPixels(c, rows, 'a')), oracleHull(groupPixels(c, rows, 'b'))];
+        // BIJECTION: each oracle matched by exactly one drawn loop (a some()
+        // match lets an index-space bug draw group A twice -- the R2 lesson).
+        const matched = [false, false];
+        for (const g of pass.groups) {
+            assert.equal(g.length, 1, 'hull = single loop per group');
+            const hit = oracles.findIndex((o, i) => !matched[i] && sameLoopModuloRotation(g[0], o));
+            assert.ok(hit >= 0, 'hull loop matches an unclaimed oracle (vertices + CCW-screen order, modulo rotation)');
+            matched[hit] = true;
+        }
+        assert.deepEqual(matched, [true, true], 'both group oracles matched exactly once');
+        c.unmount();
+    });
+
+    // -- OL3: large alpha degenerates to the hull ---------------------------
+    it('OL3: alphaShape at a huge finite alpha equals the convex hull vertex set', () => {
+        const rows = blob(30, 30, 'a', 8);
+        const cH = mkChart(null, null, rows);
+        const cA = mkChart({ alpha: 1e6 }, null, rows);
+        const cvH = createMockCanvas(W, H), cvA = createMockCanvas(W, H);
+        cH.mount(cvH); cA.mount(cvA);
+        const pH = lastOutlinePass(cvH.getContext('2d'));
+        const pA = lastOutlinePass(cvA.getContext('2d'));
+        assert.ok(pH && pA);
+        assert.equal(pA.groups.length, 1);
+        assert.equal(pA.groups[0].length, 1, 'huge alpha -> single loop');
+        const setH = new Set(pH.groups[0][0].map(keyOf));
+        const setA = new Set(pA.groups[0][0].map(keyOf));
+        assert.deepEqual([...setA].sort(), [...setH].sort(), 'same vertex set as the hull');
+        cH.unmount(); cA.unmount();
+    });
+
+    // -- OL4: multi-loop alpha shape ----------------------------------------
+    it('OL4: two sub-blobs in ONE group under a between-scales alpha yield exactly 2 loops', () => {
+        // Same group key; blobs 60 data units apart, points 5 apart. Pixel
+        // spacing: x maps 100 data units onto ~740 px -> intra-blob edges are
+        // ~15-40 px, the bridge is ~200+ px. alpha 80 px sits between.
+        const rows = blob(5, 40, 'a').concat(blob(75, 40, 'a'));
+        const c = mkChart({ alpha: 80 }, null, rows);
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        const pass = lastOutlinePass(canvas.getContext('2d'));
+        assert.ok(pass, 'outline pass drawn');
+        assert.equal(pass.groups.length, 1, 'one group stroke');
+        assert.equal(pass.groups[0].length, 2, 'exactly 2 disjoint loops');
+        c.unmount();
+    });
+
+    // -- OL5: partition matrix ----------------------------------------------
+    it('OL5: missing/null groupKey rows belong to NO group and never extend a hull', () => {
+        const rows = twoGroups()
+            .concat([{ x: 0, y: 0 }, { x: 100, y: 100, g: null }]);  // corners, no group
+        const c = mkChart(null, null, rows);
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        const pass = lastOutlinePass(canvas.getContext('2d'));
+        assert.equal(pass.groups.length, 2, 'still two groups');
+        const cornerA = keyOf([c.xScale.map(0), c.yScale.map(0)]);
+        const cornerB = keyOf([c.xScale.map(100), c.yScale.map(100)]);
+        for (const g of pass.groups) {
+            for (const loop of g) {
+                for (const pt of loop) {
+                    const k = keyOf(pt);
+                    assert.ok(k !== cornerA && k !== cornerB,
+                        'a no-group corner row leaked into a hull');
+                }
+            }
+        }
+        c.unmount();
+    });
+
+    // -- OL6: degenerate groups are silent per-group skips (C4) -------------
+    it('OL6: n<3 and collinear groups draw nothing, siblings draw, mount stays clean', () => {
+        const rows = blob(70, 70, 'b')
+            .concat([{ x: 5, y: 5, g: 'tiny' }, { x: 9, y: 9, g: 'tiny' }])              // n=2
+            .concat([{ x: 10, y: 90, g: 'line' }, { x: 20, y: 90, g: 'line' }, { x: 30, y: 90, g: 'line' }]); // collinear
+        const c = mkChart(null, null, rows);
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);   // a degenerate group must NOT throw at mount
+        const pass = lastOutlinePass(canvas.getContext('2d'));
+        assert.ok(pass, 'outline pass drawn');
+        assert.equal(pass.groups.length, 1, 'only the healthy group outlined');
+        c.unmount();
+    });
+
+    // -- OL7: the 64-group cap is a layer fault, mount-time and later -------
+    it('OL7: 65 groups fault the layer -- mount throws; a later growth only sheds outlines', () => {
+        const manyGroups = (k) => {
+            const rows = [];
+            for (let g = 0; g < k; g++) {
+                const bx = (g % 8) * 12, by = ((g / 8) | 0) * 11;
+                rows.push({ x: bx, y: by, g: 'g' + g }, { x: bx + 3, y: by, g: 'g' + g }, { x: bx, y: by + 3, g: 'g' + g });
+            }
+            return rows;
+        };
+        assert.throws(() => {
+            const c = mkChart(null, null, manyGroups(65));
+            c.mount(createMockCanvas(W, H));
+        }, /64-group cap/);
+
+        const dataSig = signal(manyGroups(64));
+        const c = mkChart(null, null, dataSig);
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        assert.equal(lastOutlinePass(ctx).groups.length, 64, '64 groups draw');
+        ctx.calls.length = 0;              // stale passes must not satisfy the parse
+        dataSig.set(manyGroups(65));       // later growth: fail closed, never a throw
+        c.redraw();
+        assert.equal(lastOutlinePass(ctx), null,
+            'over-cap data sheds the outline pass entirely (no silent 64-group lie)');
+        c.unmount();
+    });
+
+    // -- OL8: fourth fault domain, both directions --------------------------
+    it('OL8: a later outline fault leaves cells intact; a later cells fault leaves outlines intact', () => {
+        const CFILL = 0.27;
+        // (a) outline factory healthy at mount, throwing on rebuild.
+        let outlineBuilds = 0;
+        const flakyOutline = (pxs, pys, n) => {
+            if (++outlineBuilds > 2) throw new Error('flaky outline build');
+            return createClusterIndex(2048)(pxs, pys, n);
+        };
+        const rows = twoGroups();
+        const cellRows = rows.map((r) => ({ x: r.x, y: r.y, g: r.g }));
+        const c1 = createScatterChart({
+            data: cellRows, width: W, height: H, schedule: (fn) => fn(), pan: true,
+            outlines: { index: flakyOutline, groupKey: 'g', stroke: OCOL },
+            cells: { index: createCellIndex(2048), fillOpacity: CFILL },
+        });
+        const cv1 = createMockCanvas(W, H);
+        c1.mount(cv1);  // builds 1+2 at mount succeed
+        const ctx1 = cv1.getContext('2d');
+        ctx1.calls.length = 0;             // only post-fault frames below
+        c1.setView({ xMin: -10, xMax: 110, yMin: null, yMax: null });  // rebuild -> throw
+        c1.redraw();
+        assert.equal(lastOutlinePass(ctx1), null, 'outline pass gone after its fault');
+        assert.ok(ctx1.calls.some(([n, a]) => n === 'set:globalAlpha' && a[0] === CFILL),
+            'cells still painted after the outline fault');
+        c1.unmount();
+
+        // (b) cells cell() throwing on the rebuild; outlines must survive.
+        const flakyCells = (pxs, pys, n) => {
+            const h = createCellIndex(2048)(pxs, pys, n);
+            let calls = 0;
+            return {
+                cell: (i, x0, y0, x1, y1, out) => {
+                    if (i === 0 && ++calls > 1) throw new Error('flaky cell walk');
+                    return h.cell(i, x0, y0, x1, y1, out);
+                },
+                dispose: () => h.dispose(),
+            };
+        };
+        const c2 = createScatterChart({
+            data: cellRows, width: W, height: H, schedule: (fn) => fn(), pan: true,
+            outlines: { index: createClusterIndex(2048), groupKey: 'g', stroke: OCOL },
+            cells: { index: flakyCells, fillOpacity: CFILL },
+        });
+        const cv2 = createMockCanvas(W, H);
+        c2.mount(cv2);
+        const ctx2 = cv2.getContext('2d');
+        ctx2.calls.length = 0;
+        c2.setView({ xMin: -10, xMax: 110, yMin: null, yMax: null });
+        c2.redraw();
+        const pass2 = lastOutlinePass(ctx2);
+        assert.ok(pass2 && pass2.groups.length === 2, 'outlines survive a cells fault');
+        c2.unmount();
+    });
+
+    // -- OL9: rebuild lifecycle (builds === disposes + 1 per live group) ----
+    it('OL9: every view write disposes + rebuilds one handle per group; unmount closes the books', () => {
+        let builds = 0, disposes = 0;
+        const factory = createClusterIndex(2048);
+        const spy = (pxs, pys, n) => {
+            builds++;
+            const h = factory(pxs, pys, n);
+            return {
+                convexHull: (o) => h.convexHull(o),
+                alphaShape: (a, o, e) => h.alphaShape(a, o, e),
+                dispose: () => { disposes++; h.dispose(); },
+            };
+        };
+        const c = mkChart({ index: spy }, { pan: true, zoom: true });
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        assert.equal(builds, 2, 'one build per group at mount');
+        const vA = { xMin: -10, xMax: 110, yMin: null, yMax: null };
+        const vB = { xMin: 5, xMax: 95, yMin: null, yMax: null };
+        for (let i = 0; i < 10; i++) c.setView(i & 1 ? vA : vB);
+        assert.equal(builds, 22, '2 mount + 2 per view write');
+        assert.equal(disposes, 20, 'prior pair disposed before each rebuild');
+        c.unmount();
+        assert.equal(disposes, builds, 'unmount disposes the last live pair');
+    });
+
+    // -- OL10: fill pass -- one path per group, holes ride opposite winding --
+    it('OL10: fillOpacity fills ONE path per group (hole loops included) under the configured alpha', () => {
+        // A ring: 16 outer points on r=30, 8 inner on r=15, one group. An alpha
+        // above the ring's own edge scale but below the hole diameter keeps the
+        // annulus triangles only -> outer loop + hole loop.
+        const rows = [];
+        for (let i = 0; i < 16; i++) {
+            rows.push({ x: 50 + 30 * Math.cos(i * Math.PI / 8), y: 50 + 30 * Math.sin(i * Math.PI / 8), g: 'ring' });
+        }
+        for (let i = 0; i < 8; i++) {
+            rows.push({ x: 50 + 15 * Math.cos(i * Math.PI / 4), y: 50 + 15 * Math.sin(i * Math.PI / 4), g: 'ring' });
+        }
+        const c = mkChart({ alpha: 90, fillOpacity: 0.4 }, null, rows);
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        const pass = lastOutlinePass(canvas.getContext('2d'));
+        assert.ok(pass, 'outline pass drawn');
+        assert.equal(pass.groups.length, 1, 'one group');
+        assert.equal(pass.groups[0].length, 2, 'outer + hole loop');
+        assert.equal(pass.fills.length, 1, 'ONE fill per group');
+        assert.equal(pass.fills[0].loops, 2, 'the fill path carries BOTH loops (nonzero rule + opposite winding)');
+        assert.ok(Math.abs(pass.fills[0].alpha - 0.4) < 1e-9, 'fill runs under fillOpacity');
+        c.unmount();
+    });
+
+    // -- OL11: exportSVG parity ---------------------------------------------
+    it('OL11: exportSVG emits one Z-closed path per loop in the outline color', () => {
+        const c = mkChart();
+        const canvas = createMockCanvas(W, H);
+        c.mount(canvas);
+        const svg = c.exportSVG();
+        const paths = svg.match(new RegExp('<path[^>]*' + OCOL + '[^>]*>', 'g')) || [];
+        assert.ok(paths.length >= 1, 'outline path present in SVG');
+        const zClosed = svg.match(new RegExp('<path[^>]*d="[^"]*Z[^"]*"[^>]*' + OCOL + '[^>]*>', 'g'))
+            || svg.match(new RegExp('<path[^>]*' + OCOL + '[^>]*d="[^"]*Z[^"]*"[^>]*>', 'g')) || [];
+        assert.ok(zClosed.length >= 1, 'outline SVG paths are Z-closed');
+        c.unmount();
+    });
+
+    // -- OL12: source scan --------------------------------------------------
+    it('OL12: single draw/refresh/node sites; ZERO delaunay imports; locate/barycentric still unconsumed', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        assert.equal((src.match(/const makeScatterOutlineDrawFn =/g) || []).length, 1);
+        assert.equal((src.match(/makeScatterOutlineDrawFn\(/g) || []).length, 1, 'one outline draw-node site');
+        assert.equal((src.match(/_scatterRefreshOutlines\(/g) || []).length, 1, 'one outline refresh call site');
+        assert.equal((src.match(/lite-delaunay/g) || []).length, 0, 'Charts.js imports no delaunay');
+        assert.equal((src.match(/\.locate\(/g) || []).length, 0, 'locate still unconsumed');
+        assert.equal((src.match(/\.barycentric\(/g) || []).length, 0, 'barycentric still unconsumed');
+    });
+
+    // -- OL13: absent-config parity -----------------------------------------
+    it('OL13: a scatter without `outlines` draws no outline pass and pays no signal nodes for it', () => {
+        const before = stats().activeNodes;
+        const plain = createScatterChart({
+            data: twoGroups(), width: W, height: H, schedule: (fn) => fn(),
+        });
+        const nPlain = stats().activeNodes - before;
+        const cvP = createMockCanvas(W, H);
+        plain.mount(cvP);
+        assert.equal(lastOutlinePass(cvP.getContext('2d')), null, 'no outline pass');
+        plain.unmount();
+
+        const mid = stats().activeNodes;
+        const outlined = mkChart();
+        const nOutlined = stats().activeNodes - mid;
+        assert.equal(nOutlined, nPlain, 'outlines add ZERO reactive nodes (cold layer, no signals)');
+        outlined.mount(createMockCanvas(W, H));
+        outlined.unmount();
     });
 });
