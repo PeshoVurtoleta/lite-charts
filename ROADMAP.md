@@ -5,7 +5,34 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.16.0 (current)
+## v1.17.0 (current)
+
+Contour/isoline layer on the scatter field raster (brief #13,
+`briefs/contour-isolines.md`; plan `briefs/contour-isolines-plan.md`). A field
+chart with no `contours` key is byte-identical; NO delaunay-side change (peer
+stays `^1.3.0`; `locate`/`barycentric` remain unconsumed).
+
+- **Contour lines.** `field.contours: { levels: count | number[], color?,
+  width?, dash? }` sweeps the injected triangulation for iso-value crossings
+  (`triangleCount` + `triangleVertices` + edge interpolation) and strokes them
+  between the raster and the cells/markers at 0 B/frame. Exact for the
+  piecewise-linear interpolant (planar-oracle-pinned). Strict `z > v` tie rule:
+  every triangle yields exactly 0 or 2 crossings.
+- **Levels.** Count form (integer 1..32) spreads levels strictly inside the
+  finite sampled range and re-derives per pan/zoom (the ramp outlier rule,
+  applied to levels); explicit arrays are validated finite / sorted / deduped,
+  and out-of-range values legally draw nothing. Bad `levels` throw pre-signal;
+  junk styles fall back (`#1e293b`, width 1, solid).
+- **Third fault domain.** Cells -> field -> contours, each with its own
+  `try/catch` and error slot OR-ed into the mount door. The contour pass reuses
+  the field handle and gates on the field domain (fault / no handle / 0 finite
+  cells -> silent skip, never a rebuild); its own fault disposes nothing.
+- Coverage: 490/490 (+8 CT tests incl. the planar oracle, an 11-door matrix,
+  a three-way fault matrix, and honest-zero cases), torture A23 (branch-parity
+  208-write storm, redraw <= 16 B/op within 2 B/op of a no-contours control,
+  0 new graph nodes), five reversion proofs.
+
+## v1.16.0
 
 Injected field-raster layer on `createScatterChart` (brief #11, the consumer
 of the published lite-delaunay v1.3.0 `createFieldIndex` surface --
@@ -699,18 +726,28 @@ not shipped in `files[]`). They are independent; pick by appetite.
 
 - ~~**Legend virtualization**~~ -- **SHIPPED v1.12.0** (caller-injected
   `virtualize` fn per the `spatialIndex` optional-peer precedent, no import,
-  vertical positions only). Horizontal (top/bottom) virtualization remains a
-  candidate (throws today).
+  vertical positions only). Horizontal (top/bottom) virtualization
+  **SHIPPED v1.15.0** (orientation-exclusive width/itemWidth keys).
 - ~~**Overnight sessions + holiday calendar**~~ -- **SHIPPED v1.13.0** (the
   midnight-split normalization made the predicted "real merge in
   `_sessionBands`" unnecessary -- the single-cursor sweep survived
   unchanged; holidays are a day-skip in the same sweep). Early-close
-  (half-day) calendar entries remain a candidate.
-- **Voronoi cell layer** (v1.14.0 candidate, brief `briefs/voronoi-cells.md`)
-  -- fat hover (`hitTolerance: 'nearest'`, charts-side only) + an injected
-  cell-tessellation layer on scatter (`cells: { index }`, spatialIndex
-  precedent). Blocks on lite-delaunay v1.2.0 `createCellIndex`; the brief
-  carries the consumer contract that release is built against.
+  (half-day) calendar entries **SHIPPED v1.15.0** ({ ts, closeMinutes }).
+- ~~**Voronoi cell layer**~~ -- **SHIPPED v1.14.0** (fat hover
+  `hitTolerance: 'nearest'` + injected `cells: { index }` vs published
+  lite-delaunay 1.2.0 `createCellIndex`; brief `briefs/voronoi-cells.md`
+  carried the consumer contract that release was built against).
+- ~~**Field raster layer**~~ -- **SHIPPED v1.16.0** (injected
+  `field: { index, value }` barycentric background heatmap on scatter vs
+  published lite-delaunay 1.3.0 `createFieldIndex`; brief
+  `briefs/field-raster.md`). Closes the injection ladder's third rung.
+- **Contour / isoline layer** (candidate, NO brief yet) -- iso-value lines
+  over the same injected field mesh, composing delaunay 1.3.0's shipped
+  `locate`/`barycentric`/`triangleVertices`/`triangleCount` surface AS-IS
+  (no delaunay-side change; does NOT trigger their 1.4.0). Would ride the
+  field layer's cold postProject lifecycle.
+- **Demo: field-raster panel** (XS, demo-only, no release) -- the demo shows
+  the v1.14/15 Voronoi-cells panel but nothing exercises `field:` yet.
 
 ### Companion track -- `@zakkster/lite-charts-gl` (separate package)
 

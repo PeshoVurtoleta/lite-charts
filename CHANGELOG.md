@@ -5,6 +5,70 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] -- 2026-09
+
+### Added
+
+- **Contour/isoline layer on the scatter field raster
+  (`field.contours: { levels, color?, width?, dash? }`).** Iso-value lines
+  drawn over the v1.16.0 interpolated heatmap, between the raster and the
+  cells/markers, inside the plot clip, at 0 B/frame. The lines are computed
+  COLD on the same postProject refresh as the raster by sweeping the injected
+  triangulation: each triangle is tested for an iso-value crossing (strict
+  `z > v` side rule -- every triangle yields exactly 0 or 2 crossings, no
+  ambiguity cases) and the crossing segment's endpoints are interpolated along
+  its edges. This is EXACT for the piecewise-linear interpolant: a planar
+  field's contour is a perfectly straight line, which the test suite pins
+  against an independent oracle. `levels` is a count (integer `1..32`; lines
+  spread evenly STRICTLY INSIDE the finite sampled range, re-derived on every
+  pan/zoom so a panned-out outlier never pins them -- the ramp rule, applied
+  to levels) or an explicit array (validated finite, sorted, deduped;
+  out-of-range values legally produce no segments at runtime). One
+  `color`/`width`/`dash` for all levels; junk styles fall back (color
+  `#1e293b`, width 1 clamped to `(0, 16]`, solid) rather than throwing; a
+  valid `dash` is copied and frozen so the hot draw never touches caller
+  memory. Segments live in a pooled grow-by-double buffer; the per-frame draw
+  walks prebuilt geometry only (one `beginPath`/`stroke` per level; the dash
+  reset uses a module-level frozen empty -- `getLineDash()` is never called
+  because it allocates). `exportSVG` emits the stroked paths between the field
+  rects and the cell polygons through the existing draw serializer.
+
+### Design
+
+- **Third independent fault domain.** `_scatterPostProject` now runs cells ->
+  field -> contours, each with its own `try/catch` and its own renderer-ctx
+  error slot (all OR-ed into the fail-closed mount door). The contour pass
+  REUSES the field's mesh handle and therefore gates on the field domain: a
+  field fault, a missing handle, or zero finite raster cells makes contours
+  skip silently (no raster, no contours) -- it never rebuilds the handle and
+  its own fault never disposes it. Consumes only `triangleCount` +
+  `triangleVertices` from the injected handle; `locate`/`barycentric` remain
+  unconsumed -- NO delaunay-side change was needed (peer stays `^1.3.0`).
+- Fail-closed construction: bad `field.contours`/`levels` throw with exact
+  messages BEFORE any owned signal (`== null` gated before any coercion); a
+  field chart without `contours` adds no scene node and is byte-identical.
+
+### Coverage
+
+- 490/490 (+8): CT1 independent planar oracle (every segment endpoint on the
+  mapped iso-line within 0.05 z-units of a 500 span) + hull confinement; CT2
+  count-form levels interior/ordered + fan-outlier tracking under pan/zoom;
+  CT3 11-door construction matrix at zero node delta + style-fallback pins;
+  CT4 three-way fault matrix (field fault -> silent contour skip; later
+  contour fault -> raster survives, handle NOT disposed; foreign handle
+  without the triangle surface -> mount door fires); CT5 SVG parity + layer
+  order (field rects < contour strokes < cell polygons) + no-contours
+  isolation; CT6 50x retention (builds === disposes, zero node growth); CT7
+  honest zeros (out-of-range levels, zero-span fields both forms, exact-tie
+  levels, off-hull view via the field-domain gate); CT8 source-scan
+  (`.locate(`/`.barycentric(`/`.getLineDash(` all zero call sites, one draw
+  node, one refresh call site). Torture A23: 208-write view storm with a
+  branch-parity no-contours control (redraw <= 16 B/op, within 2 B/op of
+  control, maxMajor 0, 0 new graph nodes, one sweep per write). Five
+  reversion proofs (edge-lerp sign, field-domain gate, per-level counts,
+  draw offset walk, fault-catch zeroing) -- each turned exactly its predicted
+  test set red and was restored byte-identical.
+
 ## [1.16.0] -- 2026-09
 
 ### Added

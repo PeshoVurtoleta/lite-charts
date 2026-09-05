@@ -1288,7 +1288,39 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
         colorFn?: (value: number, vMin: number, vMax: number) => string;
         /** Raster fill alpha. Default 0.5, clamped to [0, 1]. */
         opacity?: number;
+        /**
+         * v1.17.0: OPTIONAL contour/isoline overlay. When present, isolines are
+         * swept EXACTLY over the same TIN the raster sampled (not marching
+         * squares over the grid), so lines are resolution-independent under
+         * zoom. Drawn OVER the raster and UNDER the cells/markers, inside the
+         * plot clip, at 0 B/frame. Requires the field parent by construction.
+         */
+        contours?: FieldContoursSpec;
     };
+}
+
+/**
+ * v1.17.0: contour/isoline configuration nested inside {@link ScatterChartConfig}'s
+ * `field`. `levels` is REQUIRED -- either a count (that many levels resolved
+ * strictly inside the finite value range) or an explicit array of level values
+ * (finite numbers, sorted ascending, duplicates dropped). A count must be an
+ * integer in [1, 32]; an array may hold at most 32 entries. Out-of-range explicit
+ * levels are legal and simply produce 0 segments as the view pans. All levels
+ * share ONE color/width/dash (per-level styling is out of scope). A bad `levels`
+ * throws at construction; style fields fall back rather than throw.
+ */
+export interface FieldContoursSpec {
+    /** REQUIRED: a level count in [1, 32], or an array of finite level values. */
+    levels: number | number[];
+    /** Stroke color. Non-string falls back to `'#1e293b'` (slate-800). */
+    color?: string;
+    /** Stroke width. `+width`; non-positive -> 1, clamped to <= 16. */
+    width?: number;
+    /**
+     * Dash pattern (array of positive finite numbers). An invalid pattern
+     * falls back to a solid stroke. A valid pattern is copied + frozen.
+     */
+    dash?: number[];
 }
 
 export function createScatterChart(config: ScatterChartConfig): Chart;

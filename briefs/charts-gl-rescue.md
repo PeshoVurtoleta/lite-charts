@@ -6,6 +6,10 @@ LiteChartsGl REPO, not here -- this ledger row exists because the suite's
 cross-package briefs live with lite-charts (the #10 precedent). Run it as a
 LiteChartsGl session: `cd ../LiteChartsGl && claude`.
 
+UPDATE 2026-09-05 (user verdict, pre-session): "demo is bad and outdated.
+The module has potential." Demo work is now IN scope -- see the demo
+grounding note and task T7 below. Session confirmed as the next one.
+
 ## Goal
 
 `@zakkster/lite-charts-gl@0.1.0` on npm, eligible under suite law. The
@@ -37,6 +41,19 @@ release mechanics plus ONE real engineering task (the torture tiers).
   GLSL/scales/ticks instead, and lite-gl has since shipped 2.0.0 with exactly
   those sinks. The shader layer is entirely internal to the module, so
   publishing 0.1.0 forecloses nothing.
+- Demo grounding (2026-09-05 quick read of demo/index.html, 896 lines; user
+  verdict: bad and outdated): (a) importmap pins NOTHING -- lite-signal and
+  lite-chartforge load from bare `https://esm.sh/@zakkster/...` (no version,
+  esm.sh transforms code); the suite convention is a PINNED jsdelivr raw-ESM
+  URL (see LiteCharts demo: `lite-virtual@1.1.0/Virtual.js`). (b) chartforge
+  is soft-loaded with a hand-rolled OKLCh->RGB fallback for when esm.sh
+  fails -- fragile, offline-broken by design. (c) header hardcodes
+  `v0.1.0-alpha.1` (stale the moment 0.1.0 ships). (d) four scenes (series
+  showcase / interactions / streaming / chartforge palette) and NONE
+  showcases the module's actual reason to exist -- a high-point-count
+  (100k-1M) stress scene with a live fps/point counter is absent. (e) no
+  .claude/launch.json (charts precedent: name "demo" + static server) --
+  the footer says "npx serve .".
 
 ## Design decisions
 
@@ -90,6 +107,17 @@ release mechanics plus ONE real engineering task (the torture tiers).
 - T6: `/release 0.1.0` (the GL repo gets the same skill), then USER
   publishes + commits + `/sync-card lite-charts-gl` (fixes the `peers: []`
   card lie).
+- T7: demo refresh (demo-only, excluded from pack -- can land before or
+  after T6; the LiteCharts demo-refresh precedent says it needs no release).
+  Minimum: pin the importmap (jsdelivr, exact versions), drop or pin the
+  esm.sh chartforge soft-load, version tag reads reality, add the ONE scene
+  that justifies the package -- a 100k+ point stress panel with measured
+  fps/point-count readout (honest numbers; these can feed the README
+  Benchmarks section per D4), `.claude/launch.json` for the browser-pane
+  verification workflow. The library API is still frozen (D1) -- the demo
+  adapts to the module, never the reverse. Verification gotcha from the
+  charts demo session: a hidden browser pane freezes rAF, so verify via
+  DOM/readback and visible-pane screenshots, not blind screenshots.
 
 ## Scope fences (explicit OUT)
 

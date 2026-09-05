@@ -10,7 +10,33 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.16.0 (current): injected field-raster layer on createScatterChart --
+> v1.17.0 (current): contour/isoline layer on the scatter field raster --
+> field.contours: { levels: count | number[], color?, width?, dash? }.
+> Iso-value lines over the v1.16.0 heatmap, drawn between the raster and the
+> cells/markers at 0 B/frame. Computed COLD on the same postProject refresh by
+> sweeping the injected triangulation (triangleCount + triangleVertices + edge
+> interpolation -- locate/barycentric stay unconsumed, peer stays ^1.3.0):
+> strict z > v side rule, so every triangle yields exactly 0 or 2 crossings;
+> EXACT for the piecewise-linear interpolant (a planar field's contour is a
+> straight line -- pinned against an independent oracle). Count-form levels
+> (integer 1..32) spread strictly inside the FINITE sampled range and
+> re-derive per pan/zoom (a panned-out outlier never pins them); explicit
+> arrays are validated finite / sorted / deduped and out-of-range values
+> legally draw nothing. One color/width/dash for all levels; junk styles fall
+> back (#1e293b, width 1, solid), bad levels throw pre-signal. Segments pool
+> in a grow-by-double buffer; the draw walks prebuilt geometry (one
+> beginPath/stroke per level; dash reset via a module-level frozen empty --
+> getLineDash is never called, it allocates). exportSVG emits the strokes
+> between the field rects and cell polygons. THIRD independent fault domain:
+> reuses the field handle, gates on the field pass (field fault / no handle /
+> 0 finite cells -> silent skip, no rebuild), own error slot OR-ed into the
+> mount door, never disposes what it does not own. A field chart without
+> contours adds no node and is byte-identical. 490/490 (+8 CT tests: planar
+> oracle + hull confinement, level tracking, 11-door matrix, three-way fault
+> matrix, SVG parity/order, 50x retention, honest zeros incl. exact-tie
+> levels, source-scan). Torture A23 branch-parity storm; five reversion
+> proofs.
+> v1.16.0: injected field-raster layer on createScatterChart --
 > field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }. The
 > third rung of the injection ladder (spatialIndex -> cells -> field): the
 > primary series' per-point scalar value is rasterized into a smooth

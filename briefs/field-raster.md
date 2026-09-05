@@ -1,6 +1,6 @@
 # Brief -- field-raster layer: injected scattered-field interpolation (v1.16.0)
 
-Status: EXECUTED 2026-09-05 (release-pending as v1.16.0). Two as-executed
+Status: SHIPPED as v1.16.0 -- published + verified live on npm 2026-09-05. Two as-executed
 notes: (1) the brief's "+y-up bridge flips rows" was WRONG for a pixel-space
 consumer -- by0 = plotTop is the smaller pixel y, so the contract's "row 0 =
 by0" already lands row 0 on the TOP row; NO flip (planner correction, proven

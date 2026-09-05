@@ -962,4 +962,98 @@ export function run() {
         c.destroy();
         check(disposes === builds, () => `A22: ${builds - disposes} field handle(s) never disposed`);
     }
+
+    // --- 17. contour/isoline storm (A23, v1.17.0) ------------------------------
+    // v1.17.0 adds the contour layer: an EXACT TIN sweep REUSING the field
+    // handle (never rebuilds it), swept COLD once per scale/data change into a
+    // per-level pooled segment run; drawn as a per-level moveTo/lineTo/stroke
+    // walk OVER the raster. Structural claims mirror A22 with the contour lens:
+    // (1) a pan/zoom storm sweeps EXACTLY once per scale change -- never per
+    // frame, never per redraw -- and adds zero graph nodes; (2) the per-frame
+    // isoline DRAW walks the prebuilt segment pool: redraw with 6 live levels on
+    // a 2000-pt planar field stays inside <=16 B/op with maxMajor:0, within
+    // 2 B/op of a BRANCH-PARITY control (identical field WITHOUT contours -- the
+    // A21 lesson: the contour node must add ~0 B on the hot path); (3) the sweep
+    // reuses the field index (builds/disposes stay 1:1 with the view writes).
+    {
+        const N = 2000;
+        const xs = new Float32Array(N), ys = new Float32Array(N), zs = new Float32Array(N);
+        let seed = 20250905;
+        const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+        for (let i = 0; i < N; i++) {
+            xs[i] = rnd() * 1000; ys[i] = rnd() * 500;
+            zs[i] = 2 * xs[i] + 3 * ys[i] + 1;  // planar oracle
+        }
+        let builds = 0, disposes = 0, sweeps = 0;
+        const inner = createFieldIndex(N);
+        // Counting handle: passes through the field sampler AND the two TIN
+        // methods the contour sweep consumes; triangleCount is called ONCE per
+        // sweep, so it is an exact sweep-entry probe.
+        const counting = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                sampleField: (z, gw, gh, a, b, c2, d, o) => h.sampleField(z, gw, gh, a, b, c2, d, o),
+                triangleCount: () => { sweeps++; return h.triangleCount(); },
+                triangleVertices: (t, o) => h.triangleVertices(t, o),
+                dispose() { disposes++; h.dispose(); },
+            };
+        };
+        const mkScatter = (withContours, indexFactory) => {
+            const c = createScatterChart({
+                data: { xs, ys, zs },
+                zoom: true,
+                field: {
+                    index: indexFactory, value: 'z', opacity: 0.4,
+                    ...(withContours ? { contours: { levels: 6, color: '#1e293b', width: 1 } } : {}),
+                },
+                width: 800, height: 400, schedule: (fn) => fn(),
+            });
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const c = mkScatter(true, counting);
+        const ctrl = mkScatter(false, createFieldIndex(N));
+        check(builds === 1, () => `A23: expected 1 field build at mount, got ${builds}`);
+        check(sweeps === 1, () => `A23: expected 1 contour sweep at mount, got ${sweeps}`);
+
+        // View storm: every write is a scale change -> exactly one
+        // dispose+rebuild of the field handle and exactly one contour sweep.
+        const vA = { xMin: 100, xMax: 900, yMin: 50, yMax: 450 };
+        const vB = { xMin: 200, xMax: 800, yMin: 100, yMax: 400 };
+        for (let i = 0; i < 8; i++) c.setView(i & 1 ? vA : vB);
+        const b0 = builds, d0 = disposes, s0 = sweeps;
+        const before = graphSnapshot();
+        for (let i = 0; i < 208; i++) {
+            c.setView(i & 1 ? vA : vB);
+            c.redraw();
+        }
+        const after = graphSnapshot();
+        check(after.nodes - before.nodes === 0,
+            () => `A23: ${after.nodes - before.nodes} new signal-graph nodes across the view storm (expected 0)`);
+        check(builds - b0 === 208 && disposes - d0 === 208,
+            () => `A23: expected exactly 208 builds / 208 disposes across 208 view writes, got ${builds - b0}/${disposes - d0}`);
+        check(sweeps - s0 === 208,
+            () => `A23: expected exactly 208 contour sweeps (one per write, never per redraw), got ${sweeps - s0}`);
+
+        // Redraw budget: isoline walk vs no-contour control.
+        const sBefore = sweeps;
+        // 20000 ops (vs A22's 4000): the isoline draw's true per-op alloc is ~0,
+        // so the branch-parity delta must be read at a heap-step granularity fine
+        // enough that two near-zero field-bearing charts converge -- 4000 ops
+        // leaves a single ~20KB heap step straddling the 2 B/op tolerance.
+        const gContour = runOpsGate(() => { c.redraw(); }, { ops: 20000, warmup: 1000 });
+        const gCtrl = runOpsGate(() => { ctrl.redraw(); }, { ops: 20000, warmup: 1000 });
+        check(sweeps === sBefore, () => `A23: redraw storm re-swept the contour layer (${sweeps - sBefore}x)`);
+        if (!gContour.report.ok) die(allocFailMsg('A23.contour-redraw', gContour.report, gContour.summary));
+        check(gContour.bytesPerOp <= 16,
+            () => `A23: contour redraw ${gContour.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gContour.bytesPerOp - gCtrl.bytesPerOp) <= 2.0,
+            () => `A23: contour redraw ${gContour.bytesPerOp.toFixed(3)} B/op vs no-contour control ${gCtrl.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        ctrl.destroy();
+        c.destroy();
+        check(disposes === builds, () => `A23: ${builds - disposes} field handle(s) never disposed`);
+    }
 }

@@ -17,13 +17,32 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.16.0 -- injected field-raster layer on `createScatterChart`
-(minor). `field: { index, value, ... }` rasterizes the primary series' per-point
-scalar into a smooth barycentric-interpolated background heatmap, drawn under the
-cells layer and the markers at 0 B/frame, from an injected `FieldIndexFactory`
-(optional peer `@zakkster/lite-delaunay` `^1.3.0`). A scatter with no `field` key
-is byte-identical. **482/482 tests pass** plus a torture/stress gate
-(`npm run torture`).
+**Status:** v1.17.0 -- contour/isoline layer on the scatter field raster
+(minor). `field.contours: { levels, ... }` draws exact iso-value lines over the
+v1.16.0 interpolated heatmap -- computed cold on the same refresh from the same
+injected mesh (`triangleCount`/`triangleVertices` + edge interpolation), drawn
+at 0 B/frame between the raster and the cells layer. A field chart with no
+`contours` key is byte-identical. **490/490 tests pass** plus a torture/stress
+gate (`npm run torture`).
+
+**New in v1.17.0:**
+- **Contour lines over the field raster.** `field.contours: { levels, color?,
+  width?, dash? }` sweeps the injected triangulation for iso-value crossings
+  (exact for the piecewise-linear interpolant -- a planar field's contour is
+  exactly straight) and strokes them between the raster and the cells/markers,
+  inside the plot clip, at 0 B/frame. `levels` is a count (`1..32` lines spread
+  evenly strictly inside the finite sampled range -- they re-derive on every
+  pan/zoom, so a panned-out outlier never pins them) or an explicit array of
+  values (sorted, deduped; out-of-range values legally draw nothing). Segments
+  are precomputed cold into a pooled grow-only buffer on the same postProject
+  refresh as the raster; the per-frame draw walks prebuilt geometry only.
+  Styles fall back (junk `color`/`width`/`dash` never throw); bad `levels`
+  throw at construction before any owned signal. The contour pass is a third
+  independent fault domain: it reuses the field's mesh handle, skips silently
+  when the raster has nothing to show, and a fault in it never touches the
+  raster or cells. `exportSVG` emits the stroked paths between the field rects
+  and the cell polygons. `locate`/`barycentric` remain unconsumed -- no
+  delaunay-side change was needed.
 
 **New in v1.16.0:**
 - **Injected field-raster layer.** `field: { index: createFieldIndex(N), value,
@@ -1161,6 +1180,41 @@ like bubble's `rs`) or pass a FUNCTION accessor as `value` -- a string key
 cannot address per-point values on SoA input, so it fails CLOSED to no field
 (markers still draw, nothing throws).
 
+### Contour lines (v1.17.0)
+
+Add `contours` inside the `field` spec to draw iso-value lines over the raster:
+
+```js
+const chart = createScatterChart({
+    data: readings,                       // rows with x, y and a scalar (here 'temp')
+    field: {
+        index: createFieldIndex(10_000),
+        value: 'temp',
+        contours: {
+            levels: 6,                    // 6 lines spread inside the sampled range,
+                                          // OR explicit values: [10, 15, 20, 25]
+            color: '#1e293b',             // one stroke style for all levels (default shown)
+            width: 1,                     // clamped to (0, 16]
+            dash: [4, 3],                 // optional; solid when omitted
+        },
+    },
+});
+```
+
+The lines come from the same injected mesh as the raster -- each triangle is
+checked for an iso-value crossing and the crossing segment's endpoints are
+interpolated along its edges, which is **exact** for the piecewise-linear
+interpolant (a planar field's contour is a perfectly straight line; the test
+suite pins this against an independent oracle). Count-form `levels` sit
+strictly inside the finite sampled range and re-derive on every pan/zoom, so
+they track what is actually visible; explicit levels outside the current range
+simply draw nothing. Segments are computed cold on the same refresh as the
+raster and drawn from a pooled buffer at 0 B/frame; `exportSVG` emits the
+stroked paths. Contours skip silently whenever the raster itself has nothing
+to show (no finite cells, degenerate cloud, faulted mesh) -- no raster, no
+contours. Contour labels, filled isobands, and smoothing are out of scope by
+design: the mesh's piecewise-linear truth is the product.
+
 ## Performance
 
 All numbers are from `bench/line-100k.mjs` running on Node 22 against a
@@ -1886,8 +1940,9 @@ forward plan and the development history that led here. Headlines:
 | **v1.13.0** | Overnight sessions + holiday calendar. `shading.sessions` accepts `closeMinutes < openMinutes`: the session is split at the UTC midnight seam into an evening half + a next-day morning half (weekday bits rotated), so the single-cursor complement sweep is structurally unchanged and the seam never emits a band; `days` names the weekday the session opens. `shading.holidays: number[]` (epoch ms, truncated to UTC day starts) closes each whole UTC day and fuses it with the adjacent gaps into ONE band; holidays without sessions ride a synthesized full-day Mon-Fri calendar (weekends + holidays), validated identically. One fill for all gap bands (per-holiday fills would break the fusion -- use an `annotations` range). Fail-closed: zero-width sessions, `[]`, `null`/non-integer/`Date`/string holiday entries all throw at construction; pre-1970 dates floor to the correct UTC day. `_weekendBands` byte-identical (SHA-pinned). 453 tests (9 new: v1.11.0 behavioral identity, confinement pin, seam-never-emits, exact Globex 5-band fixture, holiday-fusion exact bounds + chart-level count, holidays-only equivalence, validator matrix, overnight edges + Saturday-wrap rotate + pre-1970 floor, 50x retention -- four reversions proven load-bearing: rotate wrap-drop, split removal, day-skip deletion, floor->% truncation) + a band-regeneration torture case (A19). |
 | **v1.14.0** | Fat hover + injected Voronoi cell layer on `createScatterChart`. `hitTolerance: 'nearest'` snaps the hover to the closest point from anywhere in the plot (finite plot-diagonal cap, linear and indexed paths agree). `cells: { index, colorKey?, fillOpacity?, stroke?, strokeWidth? }` tessellates the primary series with pixel-space bbox-clipped Voronoi polygons from an injected `CellIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.2.0`), rebuilt cold at a new `postProject` renderer seam (after projection -- extract-time would index stale pixels), drawn under the markers at 0 B/frame with a hover-cell highlight off the crosshair. Degenerate clouds draw markers with no cells; index faults fail closed (mount-time door / later runs skip cells); construction throws fire before any owned signal is allocated. 463 tests (10 new: independent half-plane oracle + exact plot-tiling invariant, indexed/linear fat-hover agreement, SVG parity with clipPath isolation, zero-node construction throws, retention, source-scan confinement -- five mechanisms reversion-proven) + torture A20 (one rebuild per scale change over a 208-write view storm, redraw within 2 B/op of a no-cells control, vs the real published `createCellIndex`). |
 | **v1.15.0** | Horizontal legend virtualization + early-close holidays + an earlier fail-closed point for bad legend config. A virtualized legend at `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling along X: supply `legend.width` + `legend.itemWidth` (positive integers) and the adapter receives `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. Size keys are orientation-exclusive -- `height`/`itemHeight` on top/bottom, or `width`/`itemWidth` on left/right, throw at construction; the left/right adapter opts + DOM path stay byte-identical. `shading.holidays` entries may be `{ ts, closeMinutes }` (early close): every session that UTC day clamps to close at `closeMinutes` (1..1439) and the trailing closed time fuses forward like a whole-day holiday's band; whole-day (number) entries are byte-identical. Early-close doors that throw at construction: object without `ts`; bad `ts`; `closeMinutes` null/non-integer/outside 1..1439; a duplicate UTC day across all entries; an early close on a weekday with no open session; an early close on a day carrying an overnight evening session. The clamp is one cold-path line in `_sessionBands` (`cutMs = Infinity` on non-early days). Legend position/container validation + `virtualize` normalization are hoisted above the first owned signal in `createBaseAxisChart`, so bad legend config throws with nothing allocated; when both chart-type options and legend are invalid, the `initOpts` error wins. 10 new tests (463->473) + torture A21 (horizontal scroll storm vs a vertical-storm branch-parity control, measured delta 0.000 B/op); five reversion proofs. |
-| **v1.16.0** (this) | Injected field-raster layer on `createScatterChart`. `field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }` rasterizes the primary series' per-point scalar into a smooth barycentric-interpolated background heatmap -- the third injection rung after `spatialIndex` and `cells`. The triangulated mesh + serpentine grid sampler come from an injected `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0`, `createFieldIndex(N)`; lite-charts imports nothing), built over pixel-space points and re-sampled cold on every data/scale change on the same `postProject` seam as cells, so it stays anisotropy-correct under pan/zoom. One `sampleField` per refresh fills a pooled grow-only grid; per-cell CSS colors are precomputed cold so the draw walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped) at 0 B/frame; `exportSVG` emits one `<rect>` per finite cell. `gridW`/`gridH` integers in `[8,256]` (default 64x48); `colors` `[low,high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v,vMin,vMax)` with extents over the FINITE cells only; `opacity` default 0.5. Independent fault domain from `cells` (own `try/catch`, own `ctx` error slot OR-ed into the mount door, own handle disposal); drawn UNDER the cells node. `interpolate` is never called. Construction throws before any owned signal: non-object `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps `gridW`/`gridH` (`== null` gated before any `+`). A scatter with no `field` is byte-identical. |
-| v1.16.x / v1.17.0 (candidates) | contour/isoline layer over the same `FieldIndex` mesh; band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
+| **v1.16.0** | Injected field-raster layer on `createScatterChart`. `field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }` rasterizes the primary series' per-point scalar into a smooth barycentric-interpolated background heatmap -- the third injection rung after `spatialIndex` and `cells`. The triangulated mesh + serpentine grid sampler come from an injected `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0`, `createFieldIndex(N)`; lite-charts imports nothing), built over pixel-space points and re-sampled cold on every data/scale change on the same `postProject` seam as cells, so it stays anisotropy-correct under pan/zoom. One `sampleField` per refresh fills a pooled grow-only grid; per-cell CSS colors are precomputed cold so the draw walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped) at 0 B/frame; `exportSVG` emits one `<rect>` per finite cell. `gridW`/`gridH` integers in `[8,256]` (default 64x48); `colors` `[low,high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v,vMin,vMax)` with extents over the FINITE cells only; `opacity` default 0.5. Independent fault domain from `cells` (own `try/catch`, own `ctx` error slot OR-ed into the mount door, own handle disposal); drawn UNDER the cells node. `interpolate` is never called. Construction throws before any owned signal: non-object `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps `gridW`/`gridH` (`== null` gated before any `+`). A scatter with no `field` is byte-identical. |
+| **v1.17.0** (this) | Contour/isoline layer over the field raster. `field.contours: { levels: count \| number[], color?, width?, dash? }` sweeps the injected triangulation for iso-value crossings (`triangleCount`/`triangleVertices` + edge interpolation -- exact for the piecewise-linear interpolant, proven against an independent planar oracle) and strokes them between the raster and the cells layer at 0 B/frame from a pooled cold-computed segment buffer. Count-form levels sit strictly inside the finite sampled range and re-derive per pan/zoom (outlier rule); explicit out-of-range levels legally draw nothing; strict `z > v` tie rule (every triangle yields 0 or 2 crossings). Third independent fault domain: reuses the field handle, skips when the raster shows nothing (no rebuild), never disposes what it does not own. Bad `levels` throw pre-signal; junk styles fall back. SVG parity free through the draw serializer. `locate`/`barycentric` remain unconsumed -- no delaunay-side change. |
+| v1.17.x / v1.18.0 (candidates) | demo field-raster + contour panel (demo-only); band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. |
 
 ## Ecosystem
 

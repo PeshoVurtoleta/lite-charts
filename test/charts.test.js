@@ -10170,3 +10170,386 @@ describe('v1.16.0 -- injected field-raster layer (vs REAL lite-delaunay 1.3.0)',
         assert.equal((src.match(/\.interpolate\(/g) || []).length, 0, 'interpolate never called');
     });
 });
+
+describe('v1.17.0 -- contour/isoline layer on the field raster (vs REAL lite-delaunay 1.3.0)', () => {
+    const W = 800, H = 400;
+    const OP = 0.37;            // field-pass globalAlpha key (FR precedent)
+    const CCOL = '#b45309';     // distinctive contour strokeStyle to key the pass
+    const DEF_CCOL = '#1e293b'; // the documented default contour color
+
+    // Same diamond planar cloud as FR: hull = the diamond, z = 2x+3y+1 exact
+    // in float32 (integer z <= 501).
+    const diamondData = (() => {
+        const rows = [];
+        for (let x = 0; x <= 100; x += 10) {
+            for (let y = 0; y <= 100; y += 10) {
+                if (Math.abs(x - 50) + Math.abs(y - 50) <= 50) {
+                    rows.push({ x, y, z: 2 * x + 3 * y + 1 });
+                }
+            }
+        }
+        return rows;
+    })();
+
+    const mkChart = (contours, extra, dataOverride) => createScatterChart(Object.assign({
+        data: dataOverride != null ? dataOverride : diamondData,
+        width: W, height: H, schedule: (fn) => fn(),
+        field: Object.assign({
+            index: createFieldIndex(1024), value: 'z', opacity: OP,
+        }, contours !== undefined ? { contours } : {}),
+    }, extra));
+
+    // Contour passes from ctx.calls: armed by set:strokeStyle === color, one
+    // group per beginPath..stroke, segments as [x0,y0,x1,y1]. The sync
+    // scheduler paints multiple passes at mount (FR5 lesson) -- return the
+    // LAST complete pass.
+    const lastContourPass = (ctx, color) => {
+        const passes = [];
+        let pass = null, group = null;
+        for (const [name, args] of ctx.calls) {
+            if (name === 'set:strokeStyle') {
+                if (args[0] === color) { pass = []; passes.push(pass); }
+                else pass = null;
+                continue;
+            }
+            if (pass == null) continue;
+            if (name === 'beginPath') { group = []; continue; }
+            if (name === 'moveTo' && group) { group.push([args[0], args[1], NaN, NaN]); continue; }
+            if (name === 'lineTo' && group && group.length) {
+                const seg = group[group.length - 1];
+                if (seg[2] !== seg[2]) { seg[2] = args[0]; seg[3] = args[1]; }
+                else group.push([seg[2], seg[3], args[0], args[1]]);
+                continue;
+            }
+            if (name === 'stroke' && group) { pass.push(group); group = null; }
+        }
+        return passes.length ? passes[passes.length - 1] : null;
+    };
+    // z value at a pixel endpoint via the planar formula in inverted data space.
+    const zAt = (chart, px, py) => 2 * chart.xScale.invert(px) + 3 * chart.yScale.invert(py) + 1;
+
+    // -- CT1: planar oracle + hull confinement --------------------------------
+    it('CT1: explicit levels on a planar field emit segments exactly on the iso-lines, confined to the hull', () => {
+        const levels = [120, 180, 250];
+        const chart = mkChart({ levels, color: CCOL });
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        const pass = lastContourPass(canvas.getContext('2d'), CCOL);
+        assert.ok(pass && pass.length === 3, 'three level groups drawn: ' + (pass && pass.length));
+        // Hull bbox in pixels (+0.5 slack for float32 endpoint storage).
+        const hx0 = chart.xScale.map(0) - 0.5, hx1 = chart.xScale.map(100) + 0.5;
+        const hyA = chart.yScale.map(0), hyB = chart.yScale.map(100);
+        const hy0 = Math.min(hyA, hyB) - 0.5, hy1 = Math.max(hyA, hyB) + 0.5;
+        for (let li = 0; li < 3; li++) {
+            const v = levels[li];  // spec sorts ascending; input already is
+            assert.ok(pass[li].length > 0, 'level ' + v + ' produced segments');
+            for (const [x0, y0, x1, y1] of pass[li]) {
+                // ORACLE: the TIN isoline of a planar field IS the line
+                // 2x+3y+1 = v. Endpoints are float64 lerps of float32-stored
+                // pxs/pys/zs (z integers <= 501 exact in f32; px/py f32 rel eps
+                // ~6e-8 => z error << 1e-2). 0.05 in z units = 1e-4 of the 500
+                // span; a flipped lerp or wrong edge errs by tens.
+                assert.ok(Math.abs(zAt(chart, x0, y0) - v) <= 0.05, `L${v} start on line: ${zAt(chart, x0, y0)}`);
+                assert.ok(Math.abs(zAt(chart, x1, y1) - v) <= 0.05, `L${v} end on line: ${zAt(chart, x1, y1)}`);
+                for (const [ex, ey] of [[x0, y0], [x1, y1]]) {
+                    assert.ok(ex >= hx0 && ex <= hx1 && ey >= hy0 && ey <= hy1,
+                        'endpoint inside hull bbox: ' + ex + ',' + ey);
+                }
+            }
+        }
+        chart.destroy();
+    });
+
+    // -- CT2: count-form levels are interior, ordered, and track pan/zoom -----
+    it('CT2: count-form levels sit strictly inside the finite sampled range, ordered ascending, and re-derive when an outlier pans out', () => {
+        const data = diamondData.concat([{ x: 200, y: 200, z: 1e6 }]);
+        const chart = mkChart({ levels: 4, color: CCOL }, {
+            pan: true, xScale: { domain: [0, 210] }, yScale: { domain: [0, 210] },
+        }, data);
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+
+        // Outlier visible: span ~1e6, so every interior level lives in the
+        // triangle fan between the diamond hull and (200, 200) -- the planar
+        // formula does NOT hold there, but the LOCATION does: contour
+        // endpoints must sit well outside the diamond (inverted x > 110).
+        const passA = lastContourPass(ctx, CCOL);
+        assert.ok(passA && passA.length === 4, 'four level groups');
+        let maxX = -Infinity;
+        for (const g of passA) for (const [x0, , x1] of g) {
+            maxX = Math.max(maxX, chart.xScale.invert(x0), chart.xScale.invert(x1));
+        }
+        assert.ok(maxX > 110, 'outlier-in-view contours live in the fan toward the outlier: ' + maxX);
+
+        // Zoom STRICTLY inside the diamond ([30,70]^2: its far corner is at
+        // |20|+|20| = 40 < 50, so every sampled cell is planar -- fan cells
+        // near the hull edge would otherwise legitimately inflate vMax).
+        // Levels must re-derive inside the planar view range (150..352).
+        ctx.calls.length = 0;
+        chart.setView({ xMin: 30, xMax: 70, yMin: 30, yMax: 70 });
+        const passB = lastContourPass(ctx, CCOL);
+        assert.ok(passB && passB.length === 4, 'four level groups after zoom');
+        const meansB = passB.map((g) => {
+            let s = 0, n = 0;
+            for (const [x0, y0, x1, y1] of g) { s += zAt(chart, (x0 + x1) / 2, (y0 + y1) / 2); n++; }
+            return n ? s / n : NaN;
+        });
+        for (const m of meansB) assert.ok(m === m && m > 150 && m < 355, 'level mean inside the zoomed planar range: ' + m);
+        for (let i = 1; i < meansB.length; i++) {
+            assert.ok(meansB[i] > meansB[i - 1], 'level groups ordered ascending');
+        }
+        chart.destroy();
+    });
+
+    // -- CT3: construction doors + zero node delta + style fallbacks ----------
+    it('CT3: every bad contours spec throws before any owned signal; junk styles fall back, never throw', () => {
+        const mk = (contours) => createScatterChart({
+            data: diamondData, schedule: (fn) => fn(),
+            field: { index: createFieldIndex(1024), value: 'z', contours },
+        });
+        const doors = [
+            ['non-object', 42, /field\.contours must be an object/],
+            ['levels missing', {}, /levels is required/],
+            ['count 0', { levels: 0 }, /integer in \[1, 32\]/],
+            ['count non-integer', { levels: 2.5 }, /integer in \[1, 32\]/],
+            ['count over cap', { levels: 33 }, /integer in \[1, 32\]/],
+            ['levels bool', { levels: true }, /count or an array/],
+            ['array empty', { levels: [] }, /must not be empty/],
+            ['array over cap', { levels: new Array(33).fill(0).map((_, i) => i) }, /at most 32/],
+            ['array null entry', { levels: [1, null, 3] }, /finite numbers/],
+            ['array NaN entry', { levels: [1, NaN] }, /finite numbers/],
+            ['array string entry', { levels: [1, '2'] }, /finite numbers/],
+        ];
+        for (const [label, contours, re] of doors) {
+            const before = stats().activeNodes;
+            assert.throws(() => mk(contours), re, label);
+            assert.equal(stats().activeNodes - before, 0, label + ': zero node delta');
+        }
+        // Fallbacks: junk color/width/dash never throw -- defaults land.
+        const chart = mk({ levels: [180], color: 42, width: -3, dash: [1, null] });
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        const pass = lastContourPass(canvas.getContext('2d'), DEF_CCOL);
+        assert.ok(pass && pass.length === 1 && pass[0].length > 0, 'default color pass drawn');
+        let sawWidth = false;
+        for (const [name, args] of canvas.getContext('2d').calls) {
+            if (name === 'set:lineWidth' && args[0] === 1) sawWidth = true;
+        }
+        assert.ok(sawWidth, 'junk width fell back to 1');
+        chart.destroy();
+    });
+
+    // -- CT4: fault domains ---------------------------------------------------
+    it('CT4: a later field fault silently skips contours; a later contour fault keeps the raster and never disposes the field handle', () => {
+        // (a) field faults on 2nd build -> contour pass must vanish WITH it
+        // (skip-not-rebuild gate), markers keep drawing, nothing throws.
+        const counting = (inner, faultOnBuild) => {
+            const rec = { builds: 0, disposes: 0 };
+            const factory = (pxs, pys, n) => {
+                rec.builds++;
+                if (rec.builds === faultOnBuild) throw new Error('boom-' + rec.builds);
+                const h = inner(pxs, pys, n);
+                return {
+                    sampleField: (...a) => h.sampleField(...a),
+                    triangleCount: () => h.triangleCount(),
+                    triangleVertices: (t, out) => h.triangleVertices(t, out),
+                    dispose: () => { rec.disposes++; h.dispose(); },
+                };
+            };
+            return { factory, rec };
+        };
+        const a = counting(createFieldIndex(1024), 2);
+        const chartA = createScatterChart({
+            data: diamondData, width: W, height: H, schedule: (fn) => fn(),
+            pan: true, field: { index: a.factory, value: 'z', opacity: OP, contours: { levels: [180], color: CCOL } },
+        });
+        const cvA = createMockCanvas(W, H);
+        chartA.mount(cvA);
+        const ctxA = cvA.getContext('2d');
+        assert.ok(lastContourPass(ctxA, CCOL), 'contours drawn pre-fault');
+        ctxA.calls.length = 0;
+        chartA.setView({ xMin: 10, xMax: 90, yMin: 10, yMax: 90 });  // 2nd build faults
+        assert.equal(lastContourPass(ctxA, CCOL), null, 'field fault -> contour pass gone (skip, no rebuild)');
+        let arcs = 0;
+        for (const [name] of ctxA.calls) if (name === 'arc') arcs++;
+        assert.ok(arcs > 0, 'markers still draw after the fault');
+        chartA.destroy();
+
+        // (b) contour-only later fault: triangleCount starts throwing AFTER
+        // mount -> raster survives, field handle NOT disposed by the contour
+        // catch (disposes stays 0 until destroy).
+        const recB = { builds: 0, disposes: 0, tcCalls: 0, arm: false };
+        const innerB = createFieldIndex(1024);
+        const factoryB = (pxs, pys, n) => {
+            recB.builds++;
+            const h = innerB(pxs, pys, n);
+            return {
+                sampleField: (...args) => h.sampleField(...args),
+                triangleCount: () => {
+                    recB.tcCalls++;
+                    if (recB.arm) throw new Error('contour-boom');
+                    return h.triangleCount();
+                },
+                triangleVertices: (t, out) => h.triangleVertices(t, out),
+                dispose: () => { recB.disposes++; h.dispose(); },
+            };
+        };
+        const chartB = createScatterChart({
+            data: diamondData, width: W, height: H, schedule: (fn) => fn(),
+            pan: true, field: { index: factoryB, value: 'z', opacity: OP, contours: { levels: [180], color: CCOL } },
+        });
+        const cvB = createMockCanvas(W, H);
+        chartB.mount(cvB);
+        recB.arm = true;
+        const ctxB = cvB.getContext('2d');
+        ctxB.calls.length = 0;
+        chartB.setView({ xMin: 10, xMax: 90, yMin: 10, yMax: 90 });
+        assert.equal(lastContourPass(ctxB, CCOL), null, 'faulted contour pass draws nothing');
+        let rasterRects = 0, alphaOn = false;
+        for (const [name, args] of ctxB.calls) {
+            if (name === 'set:globalAlpha') alphaOn = args[0] === OP;
+            else if (name === 'fillRect' && alphaOn) rasterRects++;
+        }
+        assert.ok(rasterRects > 0, 'raster survives a contour fault');
+        assert.equal(recB.disposes, recB.builds - 1, 'contour catch disposed nothing (only the data-change rebuild cycle did)');
+        chartB.destroy();
+        assert.equal(recB.disposes, recB.builds, 'destroy disposes the last handle');
+
+        // (c) foreign handle with no triangle surface at FIRST refresh -> the
+        // mount fail-closed door fires (contourError ORs into it). The stub's
+        // sampleField must report finite cells, or the finiteCount skip-gate
+        // (correctly) preempts the contour pass and nothing faults.
+        const chartC = createScatterChart({
+            data: diamondData, schedule: (fn) => fn(),
+            field: {
+                index: () => ({
+                    sampleField: (zs, gw, gh, bx0, by0, bx1, by1, out) => {
+                        out[0] = 1; out[1] = 2; return 2;
+                    },
+                    dispose: () => {},
+                }),
+                value: 'z', contours: { levels: [180] },
+            },
+        });
+        assert.throws(() => chartC.mount(createMockCanvas(W, H)), /triangleCount/);
+        chartC.destroy();
+    });
+
+    // -- CT5: SVG parity + layer order + no-contours isolation ----------------
+    it('CT5: exportSVG emits the contour stroke between field rects and cell paths; a contour-less field chart emits none', () => {
+        const cells = { index: createCellIndex(1024) };
+        const chart = mkChart({ levels: [180], color: CCOL }, { cells });
+        const canvas = createMockCanvas(W, H);
+        chart.mount(canvas);
+        const svg = chart.exportSVG().replace(/<defs>[\s\S]*?<\/defs>/g, '');  // FR5/VC6 lesson
+        const iField = svg.search(/<rect [^>]*fill="rgb\(/);  // FR5's pattern: attrs precede fill
+        const iContour = svg.indexOf(CCOL);
+        const iCells = svg.search(/<path [^>]*d="[^"]*Z"/);
+        assert.ok(iField >= 0, 'field rects present');
+        assert.ok(iContour > iField, 'contour stroke after field rects');
+        assert.ok(iCells > iContour, 'cell polygons after contour stroke');
+        chart.destroy();
+
+        const plain = mkChart(undefined);
+        const cv2 = createMockCanvas(W, H);
+        plain.mount(cv2);
+        const svg2 = plain.exportSVG();
+        assert.ok(svg2.indexOf(CCOL) < 0 && svg2.indexOf(DEF_CCOL) < 0, 'no contour stroke without contours');
+        assert.equal(lastContourPass(cv2.getContext('2d'), DEF_CCOL), null, 'no contour pass without contours');
+        plain.destroy();
+    });
+
+    // -- CT6: retention -------------------------------------------------------
+    it('CT6: 50x mount/write/destroy with contours leaks nothing (builds === disposes, stable node count)', () => {
+        let builds = 0, disposes = 0;
+        const inner = createFieldIndex(1024);
+        const factory = (pxs, pys, n) => {
+            builds++;
+            const h = inner(pxs, pys, n);
+            return {
+                sampleField: (...a) => h.sampleField(...a),
+                triangleCount: () => h.triangleCount(),
+                triangleVertices: (t, o) => h.triangleVertices(t, o),
+                dispose: () => { disposes++; h.dispose(); },
+            };
+        };
+        const before = stats().activeNodes;
+        for (let i = 0; i < 50; i++) {
+            const chart = createScatterChart({
+                data: diamondData, width: W, height: H, schedule: (fn) => fn(),
+                pan: true, field: { index: factory, value: 'z', contours: { levels: 3 } },
+            });
+            chart.mount(createMockCanvas(W, H));
+            chart.setView({ xMin: 10, xMax: 90, yMin: 10, yMax: 90 });
+            chart.destroy();
+        }
+        assert.equal(builds, disposes, 'every field handle disposed: ' + builds + '/' + disposes);
+        assert.equal(stats().activeNodes - before, 0, 'no graph-node growth across 50 cycles');
+    });
+
+    // -- CT7: honest zeros ----------------------------------------------------
+    it('CT7: out-of-range levels, zero-span fields, and exact-tie levels stay honest (0 segments or exact lines, never garbage)', () => {
+        // Out-of-range explicit level: legal, 0 segments, no throw.
+        const c1 = mkChart({ levels: [99999], color: CCOL });
+        const cv1 = createMockCanvas(W, H);
+        c1.mount(cv1);
+        assert.equal(lastContourPass(cv1.getContext('2d'), CCOL), null, 'out-of-range level draws nothing');
+        c1.destroy();
+
+        // Zero-span field (all z equal): count form emits nothing (span > 0
+        // guard); an exactly-equal explicit level emits nothing (strict >).
+        const flat = diamondData.map((r) => ({ x: r.x, y: r.y, z: 7 }));
+        for (const contours of [{ levels: 3, color: CCOL }, { levels: [7], color: CCOL }]) {
+            const c2 = mkChart(contours, undefined, flat);
+            const cv2 = createMockCanvas(W, H);
+            c2.mount(cv2);
+            assert.equal(lastContourPass(cv2.getContext('2d'), CCOL), null, 'zero-span field draws no contours');
+            c2.destroy();
+        }
+
+        // Field-domain gate: pan the view fully off the hull -> sampleField
+        // reports 0 finite cells -> the raster draws nothing AND the contour
+        // pass must vanish with it (no raster, no contours), even though the
+        // mesh still exists and explicit levels would otherwise cross it.
+        const c4 = mkChart({ levels: [180], color: CCOL }, { pan: true });
+        const cv4 = createMockCanvas(W, H);
+        c4.mount(cv4);
+        assert.ok(lastContourPass(cv4.getContext('2d'), CCOL), 'contours present on-hull');
+        cv4.getContext('2d').calls.length = 0;
+        c4.setView({ xMin: 300, xMax: 400, yMin: 300, yMax: 400 });
+        assert.equal(lastContourPass(cv4.getContext('2d'), CCOL), null,
+            'zero finite raster cells -> contour pass gone (field-domain gate)');
+        c4.destroy();
+
+        // Tie rule: a level exactly at interior vertex z values (251 = z at
+        // (50, 50), stored exactly in f32) still yields clean 2-crossing
+        // segments -- finite endpoints, on the line.
+        const c3 = mkChart({ levels: [251], color: CCOL });
+        const cv3 = createMockCanvas(W, H);
+        c3.mount(cv3);
+        const pass = lastContourPass(cv3.getContext('2d'), CCOL);
+        assert.ok(pass && pass[0].length > 0, 'tie level produces segments');
+        for (const seg of pass[0]) {
+            for (const v of seg) assert.ok(Number.isFinite(v), 'tie endpoints finite');
+            assert.ok(Math.abs(zAt(c3, seg[0], seg[1]) - 251) <= 0.05, 'tie start on line');
+            assert.ok(Math.abs(zAt(c3, seg[2], seg[3]) - 251) <= 0.05, 'tie end on line');
+        }
+        c3.destroy();
+    });
+
+    // -- CT8: source-scan confinement -----------------------------------------
+    it('CT8: locate/barycentric stay unconsumed; the hot draw allocates nothing it should not', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        assert.equal((src.match(/from ['"]@zakkster\/lite-delaunay['"]/g) || []).length, 0, 'no delaunay import');
+        assert.equal((src.match(/\.locate\(/g) || []).length, 0, 'locate unconsumed');
+        assert.equal((src.match(/\.barycentric\(/g) || []).length, 0, 'barycentric unconsumed');
+        // Dotted call sites only: the shim's own method definition (:3467) and
+        // the design comment mention the name without a receiver.
+        assert.equal((src.match(/\.getLineDash\(/g) || []).length, 0, 'getLineDash never called (it allocates)');
+        assert.ok(src.includes('setLineDash(_CONTOUR_NO_DASH)'), 'dash reset uses the frozen module-level empty');
+        assert.equal((src.match(/const makeScatterContourDrawFn =/g) || []).length, 1);
+        assert.equal((src.match(/makeScatterContourDrawFn\(/g) || []).length, 1, 'one contour draw-node site');
+        assert.equal((src.match(/_scatterRefreshContours\(/g) || []).length, 1, 'one contour refresh call site');
+    });
+});

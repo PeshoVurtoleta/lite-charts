@@ -4072,6 +4072,80 @@ const FIELD_GRID_MAX = 256;
 const FIELD_GRID_DEFAULT_W = 64;
 const FIELD_GRID_DEFAULT_H = 48;
 
+// v1.17.0 contour/isoline layer support.
+//
+// Construction-time validator for the nested `field.contours` spec. Returns null
+// when absent (every downstream branch stays dead). Fires from _normalizeFieldSpec
+// (pre-signal) so every throw is a construction fault, same guarantee as fieldSpec.
+// Levels: a count (k levels resolved COLD strictly inside the range) or an
+// explicit ascending Float64Array. Style guards fall back (never throw); a valid
+// dash is copied + frozen so the hot draw never touches caller memory. Cap 32.
+const _CONTOUR_MAX_LEVELS = 32;
+const _normalizeContoursSpec = (contours) => {
+    if (contours == null) return null;
+    if (typeof contours !== 'object') {
+        throw new Error('lite-charts: field.contours must be an object');
+    }
+    const levels = contours.levels;
+    if (levels == null) {
+        throw new Error('lite-charts: field.contours.levels is required (a count or an array of values)');
+    }
+    let levelCount = null;
+    let levelValues = null;
+    if (typeof levels === 'number') {
+        if (!Number.isInteger(levels) || levels < 1 || levels > _CONTOUR_MAX_LEVELS) {
+            throw new Error('lite-charts: field.contours.levels count must be an integer in [1, 32]');
+        }
+        levelCount = levels;
+    } else if (Array.isArray(levels)) {
+        if (levels.length === 0) {
+            throw new Error('lite-charts: field.contours.levels array must not be empty');
+        }
+        if (levels.length > _CONTOUR_MAX_LEVELS) {
+            throw new Error('lite-charts: field.contours.levels array must hold at most 32 levels');
+        }
+        // Validate (== null gated BEFORE any coercion), sort ascending, drop
+        // exact duplicates, into a Float64Array. Out-of-range values are legal:
+        // they simply produce 0 segments at runtime as the view pans.
+        const sorted = new Float64Array(levels.length);
+        for (let i = 0; i < levels.length; i++) {
+            const e = levels[i];
+            if (e == null || typeof e !== 'number' || !Number.isFinite(e)) {
+                throw new Error('lite-charts: field.contours.levels entries must be finite numbers');
+            }
+            sorted[i] = e;
+        }
+        sorted.sort();
+        let w = 0;
+        for (let i = 0; i < sorted.length; i++) {
+            if (w === 0 || sorted[i] !== sorted[w - 1]) sorted[w++] = sorted[i];
+        }
+        levelValues = w === sorted.length ? sorted : sorted.slice(0, w);
+    } else {
+        throw new Error('lite-charts: field.contours.levels must be a count or an array of numbers');
+    }
+    // Style fallbacks (FR3 ramp-fallback precedent -- never a throw).
+    const color = typeof contours.color === 'string' ? contours.color : '#1e293b';
+    let width = 1;
+    if (contours.width != null) {
+        const w = +contours.width;
+        width = !(w > 0) ? 1 : (w > 16 ? 16 : w);
+    }
+    let dash = null;
+    if (Array.isArray(contours.dash) && contours.dash.length > 0) {
+        let valid = true;
+        for (let i = 0; i < contours.dash.length; i++) {
+            const d = contours.dash[i];
+            if (d == null || typeof d !== 'number' || !Number.isFinite(d) || !(d > 0)) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) dash = Object.freeze(contours.dash.slice());
+    }
+    return { levelCount, levelValues, color, width, dash };
+};
+
 // Construction-time validator + one-time scratch grid. Returns null when no
 // field config was supplied (every downstream branch stays dead). Fails closed
 // on a non-object spec, a missing/non-function index factory, a missing value
@@ -4135,6 +4209,9 @@ const _normalizeFieldSpec = (field) => {
         hi,
         colorFn,
         opacity,
+        // v1.17.0: nested contour/isoline spec (null when absent). Validated
+        // here (pre-signal) so a bad contours config throws at construction.
+        contours: _normalizeContoursSpec(field.contours),
     };
 };
 
@@ -4947,7 +5024,7 @@ const _scatterRefreshField = (states, ctx) => {
     // D6: primary series only (a multi-series interpolation is ill-posed).
     const primary = states[0];
     if (primary == null || primary.n === 0) {
-        if (primary) primary.fieldFiniteCount = 0;
+        if (primary) { primary.fieldFiniteCount = 0; primary.fieldVMin = NaN; primary.fieldVMax = NaN; }
         return;
     }
     const n = primary.n;
@@ -4956,6 +5033,8 @@ const _scatterRefreshField = (states, ctx) => {
     const zs = primary.zs;
     if (pxs === null || pys === null || zs == null) {
         primary.fieldFiniteCount = 0;
+        primary.fieldVMin = NaN;
+        primary.fieldVMax = NaN;
         return;
     }
 
@@ -4985,7 +5064,11 @@ const _scatterRefreshField = (states, ctx) => {
         // ONE serpentine sampler pass -- never point-by-point interpolate.
         const finite = idx.sampleField(zs, gw, gh, bx0, by0, bx1, by1, grid) | 0;
         primary.fieldFiniteCount = finite;
-        if (finite <= 0) return;  // 0 finite cells -> draw nothing this pass
+        if (finite <= 0) {  // 0 finite cells -> draw nothing this pass
+            primary.fieldVMin = NaN;
+            primary.fieldVMax = NaN;
+            return;
+        }
 
         // vMin/vMax over FINITE cells only.
         let vMin = Infinity, vMax = -Infinity;
@@ -4996,6 +5079,10 @@ const _scatterRefreshField = (states, ctx) => {
                 if (v > vMax) vMax = v;
             }
         }
+        // v1.17.0: hoisted for the contour pass (count-form level resolve reads
+        // them). NaN sentinel = "no range"; the resolve guards span > 0.
+        primary.fieldVMin = vMin;
+        primary.fieldVMax = vMax;
         const span = vMax - vMin;
         const colorFn = spec.colorFn;
         const lo = spec.lo, hi = spec.hi;
@@ -5021,6 +5108,8 @@ const _scatterRefreshField = (states, ctx) => {
         // Any field-index / sample fault: fail closed to no-field (markers and
         // cells still draw) and surface at mount. Dispose ONLY the field handle.
         primary.fieldFiniteCount = 0;
+        primary.fieldVMin = NaN;
+        primary.fieldVMax = NaN;
         _disposeFieldIndex(primary);
         ctx.fieldError = err && err.message
             ? err.message
@@ -5028,13 +5117,193 @@ const _scatterRefreshField = (states, ctx) => {
     }
 };
 
-// v1.14.0 + v1.16.0: cold post-projection pass. Refreshes the cells layer then
-// the field layer as INDEPENDENT fault domains -- each has its own try/catch,
-// its own ctx error slot, and disposes only its own handle, so a fault in one
-// can never suppress or corrupt the other (both build from the same pxs/pys).
+// v1.17.0: cold contour/isoline refresh. A THIRD independent fault domain with
+// its own try/catch + ctx.contourError. It REUSES primary.fieldIndex (the same
+// TIN the field raster sampled) and therefore GATES on the field pass: a field
+// fault, a null handle, or 0 finite cells SKIPS silently (contourSegTotal = 0,
+// no error, no rebuild) -- rebuilding would resurrect a handle the field pass
+// deliberately disposed on fault, splitting truth. The sweep is EXACT for the
+// piecewise-linear TIN interpolant: for each level v, walk every triangle once,
+// classify vertices by strict `z > v`, and lerp the two crossing edges into a
+// per-level contiguous run in the pooled contourXY. NEVER calls interpolate.
+const _scatterRefreshContours = (states, ctx) => {
+    const opts = ctx.opts;
+    const spec = opts.fieldSpec;
+    if (spec == null || spec.contours == null) return;
+    ctx.contourError = null;
+    const primary = states[0];
+    if (primary == null || primary.n === 0) {
+        if (primary) primary.contourSegTotal = 0;
+        return;
+    }
+    // Field-domain gate (C4): reuse the field handle, never rebuild it. A field
+    // fault / null handle / 0 finite cells zeroes and returns -- no error.
+    if (ctx.fieldError != null || !primary.fieldIndex || (primary.fieldFiniteCount | 0) === 0) {
+        primary.contourSegTotal = 0;
+        return;
+    }
+    const cs = spec.contours;
+    // Pools: allocated once, grown never (counts/scratch) or grown-by-double
+    // (contourXY). contourCounts holds per-level segment counts (32 cap).
+    if (!primary.contourTriIdx) primary.contourTriIdx = new Int32Array(3);
+    if (!primary.contourCounts) primary.contourCounts = new Int32Array(_CONTOUR_MAX_LEVELS);
+    if (!primary.contourXY) primary.contourXY = new Float32Array(256);
+    try {
+        // Level resolve. Array form: normalized Float64Array as-is. Count form:
+        // k levels strictly inside (fieldVMin, fieldVMax); a NaN/zero span (no
+        // range) emits nothing (span > 0 guard) rather than a NaN level.
+        let levelVals, levelN;
+        if (cs.levelValues) {
+            levelVals = cs.levelValues;
+            levelN = levelVals.length;
+        } else {
+            const vMin = primary.fieldVMin, vMax = primary.fieldVMax;
+            const span = vMax - vMin;
+            if (!(span > 0)) {
+                primary.contourLevelCount = 0;
+                primary.contourSegTotal = 0;
+                return;
+            }
+            const k = cs.levelCount;
+            if (!primary.contourLevels) primary.contourLevels = new Float64Array(_CONTOUR_MAX_LEVELS);
+            const s = primary.contourLevels;
+            for (let i = 0; i < k; i++) s[i] = vMin + (i + 1) * span / (k + 1);
+            levelVals = s;
+            levelN = k;
+        }
+        const idx = primary.fieldIndex;
+        const T = idx.triangleCount() | 0;
+        const pxs = primary.pxs, pys = primary.pys, zs = primary.zs;
+        const tri = primary.contourTriIdx;
+        const counts = primary.contourCounts;
+        let xy = primary.contourXY;
+        let off = 0;      // float offset into contourXY (4 floats per segment)
+        let segTotal = 0;
+        for (let li = 0; li < levelN; li++) {
+            const v = levelVals[li];
+            let segCount = 0;
+            for (let t = 0; t < T; t++) {
+                idx.triangleVertices(t, tri);
+                const ia = tri[0], ib = tri[1], ic = tri[2];
+                const za = zs[ia], zb = zs[ib], zc = zs[ic];
+                // Strict side rule: a vertex with z exactly v is "not above",
+                // so every triangle yields exactly 0 or 2 edge crossings.
+                const sa = za > v, sb = zb > v, sc = zc > v;
+                if (sa === sb && sb === sc) continue;  // no crossing
+                // Two edges cross (those with differing endpoint sides). Lerp is
+                // safe: crossing endpoints are on strict opposite sides so the
+                // denominator is never 0.
+                let x0 = 0, y0 = 0, x1 = 0, y1 = 0, have = 0;
+                if (sa !== sb) {
+                    const tt = (v - za) / (zb - za);
+                    const px = pxs[ia] + tt * (pxs[ib] - pxs[ia]);
+                    const py = pys[ia] + tt * (pys[ib] - pys[ia]);
+                    x0 = px; y0 = py; have = 1;
+                }
+                if (sb !== sc) {
+                    const tt = (v - zb) / (zc - zb);
+                    const px = pxs[ib] + tt * (pxs[ic] - pxs[ib]);
+                    const py = pys[ib] + tt * (pys[ic] - pys[ib]);
+                    if (have === 0) { x0 = px; y0 = py; have = 1; }
+                    else { x1 = px; y1 = py; have = 2; }
+                }
+                if (have < 2 && sc !== sa) {
+                    const tt = (v - zc) / (za - zc);
+                    const px = pxs[ic] + tt * (pxs[ia] - pxs[ic]);
+                    const py = pys[ic] + tt * (pys[ia] - pys[ic]);
+                    x1 = px; y1 = py; have = 2;
+                }
+                if (have !== 2) continue;
+                if (off + 4 > xy.length) {
+                    let cap = xy.length || 256;
+                    while (cap < off + 4) cap = cap * 2;
+                    const grown = new Float32Array(cap);
+                    grown.set(xy);
+                    primary.contourXY = grown;
+                    xy = grown;
+                }
+                xy[off] = x0; xy[off + 1] = y0; xy[off + 2] = x1; xy[off + 3] = y1;
+                off += 4;
+                segCount++;
+            }
+            counts[li] = segCount;
+            segTotal += segCount;
+        }
+        primary.contourLevelCount = levelN;
+        primary.contourSegTotal = segTotal;
+    } catch (err) {
+        // A contour-pass fault zeroes segments + records the message; it disposes
+        // NOTHING (the field handle belongs to the field domain).
+        primary.contourSegTotal = 0;
+        ctx.contourError = err && err.message
+            ? err.message
+            : 'lite-charts: contour refresh failed';
+    }
+};
+
+// Module-level frozen empty dash -- solid stroke without a per-frame `[]` alloc.
+// getLineDash() ALLOCATES, so the draw never reads ambient dash: it sets its own
+// and resets to this after (no layer relies on ambient dash state).
+const _CONTOUR_NO_DASH = Object.freeze([]);
+
+// v1.17.0: contour/isoline draw. One node per chart, added AFTER the field node
+// and BEFORE the cells node, inside the plot clip. Walks the prebuilt per-level
+// segment runs at 0 B/frame: one beginPath/stroke per level, moveTo/lineTo per
+// segment. ONE color/width/dash for all levels. exportSVG parity rides the same
+// moveTo/lineTo/stroke serializer the mock canvas + SVG shim use.
+const makeScatterContourDrawFn = (state, refs, opts, ctx) => (c) => {
+    if (!refs.visibleRef.value) return;
+    if ((state.contourSegTotal | 0) === 0) return;
+    const xy = state.contourXY;
+    if (xy == null) return;
+    const counts = state.contourCounts;
+    const levelCount = state.contourLevelCount | 0;
+    const spec = opts.fieldSpec.contours;
+    const pb = ctx.plotBoundsBox;
+    const plotL = pb.x, plotT = pb.y, plotW = pb.w, plotH = pb.h;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    // Plot clip, identical idiom to the field/cells layers.
+    c.save();
+    c.beginPath();
+    c.rect(plotL, plotT, plotW, plotH);
+    c.clip();
+
+    const prevStroke = c.strokeStyle;
+    const prevWidth = c.lineWidth;
+    c.strokeStyle = spec.color;
+    c.lineWidth = spec.width;
+    c.setLineDash(spec.dash || _CONTOUR_NO_DASH);
+
+    let off = 0;
+    for (let li = 0; li < levelCount; li++) {
+        const segs = counts[li];
+        if (segs === 0) continue;
+        c.beginPath();
+        for (let s = 0; s < segs; s++) {
+            c.moveTo(xy[off], xy[off + 1]);
+            c.lineTo(xy[off + 2], xy[off + 3]);
+            off += 4;
+        }
+        c.stroke();
+    }
+
+    c.setLineDash(_CONTOUR_NO_DASH);
+    c.strokeStyle = prevStroke;
+    c.lineWidth = prevWidth;
+    c.restore();
+};
+
+// v1.14.0 + v1.16.0 + v1.17.0: cold post-projection pass. Refreshes the cells
+// layer, the field layer, then the contour layer as INDEPENDENT fault domains --
+// each has its own try/catch, its own ctx error slot, and disposes only its own
+// handle, so a fault in one can never suppress or corrupt the others. The
+// contour pass runs AFTER the field pass so fieldVMin/fieldVMax + fieldIndex are
+// current before it reads them (structural ordering, C5).
 const _scatterPostProject = (states, ctx) => {
     _scatterRefreshCells(states, ctx);
     _scatterRefreshField(states, ctx);
+    _scatterRefreshContours(states, ctx);
 };
 
 const _scatterHitTest = (canvasX, canvasY, primary, /*xScale*/_xs, ctx) => {
@@ -5110,6 +5379,12 @@ const _scatterCleanup = (states) => {
         _disposeFieldIndex(states[i]);
         states[i].fieldColors = null;
         states[i].fieldGrid = null;
+        // v1.17.0: release the contour pools (they reuse the field handle, so
+        // there is no separate handle to dispose -- just drop the geometry).
+        states[i].contourXY = null;
+        states[i].contourTriIdx = null;
+        states[i].contourCounts = null;
+        states[i].contourLevels = null;
     }
 };
 
@@ -5387,6 +5662,9 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.16.0: the field-raster refresh records a first-build fault here,
         // surfaced at mount alongside cellError (independent fault domain).
         fieldError: null,
+        // v1.17.0: the contour refresh records a first-build fault here,
+        // surfaced at mount alongside field/cellError (third fault domain).
+        contourError: null,
     };
     // seriesStates is declared above rendererCtx in source order; assign it
     // here now that rendererCtx exists.
@@ -6023,7 +6301,7 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.14.0: a cell-refresh overflow on the first sync run surfaces here
         // too (same unwind), mirroring the log fail-closed door. A later invalid
         // run only skips its cells (markers still draw); this check runs once.
-        const _mountError = _logDomainError || rendererCtx.cellError || rendererCtx.fieldError;
+        const _mountError = _logDomainError || rendererCtx.cellError || rendererCtx.fieldError || rendererCtx.contourError;
         if (_mountError) {
             for (let i = disposers.length - 1; i >= 0; i--) {
                 try { disposers[i](); } catch (_) { /* best-effort unwind */ }
@@ -6108,6 +6386,16 @@ const createBaseAxisChart = (config, renderer) => {
             const fieldDraw = makeScatterFieldDrawFn(
                 seriesStates[0], seriesRefs[0], chartOpts, rendererCtx);
             scene.root.add(pathNode({ draw: (ctx) => fieldDraw(ctx) }));
+        }
+
+        // v1.17.0: contour/isoline layer. One node per chart, added AFTER the
+        // field node (so isolines render OVER the raster) and BEFORE the cells
+        // node, inside the plot clip. Gated on its OWN nested spec; a chart with
+        // `field` but no `contours` adds NO node and stays byte-identical.
+        if (chartOpts && chartOpts.fieldSpec && chartOpts.fieldSpec.contours) {
+            const contourDraw = makeScatterContourDrawFn(
+                seriesStates[0], seriesRefs[0], chartOpts, rendererCtx);
+            scene.root.add(pathNode({ draw: (ctx) => contourDraw(ctx) }));
         }
 
         // v1.14.0: cell (Voronoi) layer. One node per chart, added BEFORE the
