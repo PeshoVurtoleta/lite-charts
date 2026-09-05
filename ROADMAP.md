@@ -741,13 +741,67 @@ not shipped in `files[]`). They are independent; pick by appetite.
   `field: { index, value }` barycentric background heatmap on scatter vs
   published lite-delaunay 1.3.0 `createFieldIndex`; brief
   `briefs/field-raster.md`). Closes the injection ladder's third rung.
-- **Contour / isoline layer** (candidate, NO brief yet) -- iso-value lines
-  over the same injected field mesh, composing delaunay 1.3.0's shipped
-  `locate`/`barycentric`/`triangleVertices`/`triangleCount` surface AS-IS
-  (no delaunay-side change; does NOT trigger their 1.4.0). Would ride the
-  field layer's cold postProject lifecycle.
-- **Demo: field-raster panel** (XS, demo-only, no release) -- the demo shows
-  the v1.14/15 Voronoi-cells panel but nothing exercises `field:` yet.
+- ~~**Contour / isoline layer**~~ -- **SHIPPED v1.17.0** (exact TIN sweep on
+  the injected field mesh via `triangleCount`/`triangleVertices` + edge
+  interpolation only -- `locate`/`barycentric` honestly unconsumed, no
+  delaunay-side change; brief `briefs/contour-isolines.md`).
+- ~~**Demo: field-raster + contour panel**~~ -- **DONE 2026-09-05** (demo-only,
+  no release): a "weather map" scatter panel exercising `field:` +
+  `field.contours` with pan/zoom, vs jsdelivr-pinned lite-delaunay 1.3.0
+  `createFieldIndex` (importmap bumped 1.2.0 -> 1.3.0; demo header/version
+  badges de-staled v1.12.0 -> v1.17.0).
+- **Cluster outlines** (v1.18.0 candidate, brief `briefs/cluster-outlines.md`;
+  lite-delaunay 1.4.0 PUBLISHED + npm-view-verified 2026-09-05, awaiting
+  their relay ping-back: sizing bound, hole-loop statement, duplicate-index
+  determinism, bench numbers) -- per-group convex-hull / alpha-shape
+  boundary outlines on scatter (`outlines: { index, groupKey, alpha? }`), the
+  fourth injection rung. The brief carries the consumer contract delaunay
+  1.4.0 (`convexHull` + `alphaShape`) is built against -- the 1.2.0/1.3.0
+  protocol; charts executes only against the PUBLISHED package.
+
+### Candidates absorbed from the 2026-09-05 external review
+
+An external review graded the library A- / high-A in its niche and listed
+gaps. Verified against the shipped surface before absorbing. Two factual
+errors REJECTED: radar EXISTS (one of the nine types, its own kernel,
+since the v1.2-1.4 line -- the review listed it as missing) and the core
+is ~6.9k lines, not "~1100". Several suggestions conflict with documented
+design decisions and stay OUT, recorded here so the refusal is on the
+ledger: renderer-backend abstraction (the companion-package split below
+IS the decision -- a `renderer:` switch doubles the test surface);
+exchange calendars / timezone-aware labeling (the shading engine is
+deliberately data-driven + TZ-agnostic -- pre-convert to UTC); shipped
+framework bindings (signals make them a consumer-side wrapper, not a
+package); Sankey / treemap / funnel (graph + hierarchy layouts, wrong
+library). The rest are REAL gaps, now candidates -- no briefs yet, each
+needs one before any cut:
+
+- **Candlestick / OHLC (+ volume)** -- highest leverage: the financial
+  substrate already exists (time-line preset, session shading, holidays,
+  log scale, pan/zoom). Likely a tenth chart type on the axis kernel
+  with SoA `{ts, o, h, l, c, v}` input.
+- **Chart chrome: title / subtitle / caption** that participates in the
+  reactive margin system (not user-DOM stacked around the canvas).
+- **Axis titles + tick-format callback** that survives pan/zoom without
+  per-frame allocation (pooled label buffers -- the charBufToString
+  precedent). A secondary y-axis is a SEPARATE, bigger candidate: two
+  y-scales touch every kernel seam; needs its own brief and appetite.
+- **Statistical series** -- error bars / confidence bands first (cheapest
+  cut: per-point lo/hi accessors riding the annotation-layer draw
+  idiom), then stacked area, then box plot.
+- **Linked-chart helpers** -- packaged linked brush / view sync. Today
+  this is an `effect()` recipe over the view/brush facades; the
+  candidate is a documented helper with dispose hygiene, not new
+  reactive machinery.
+- **A11y beyond the legend** -- ARIA live region announcing the
+  crosshair/tooltip snap; a screen-reader data-summary string.
+- **Data labels on bars/points** -- the heatmap value-label precedent
+  generalized; collision avoidance out of scope for a first cut.
+- **Low-GC transitions** -- tweened DOMAIN changes only (view
+  interpolation on the existing scale seam, pooled), never
+  enter/update/exit. Deferred with a named trigger: the tension with
+  the 0 B/frame identity is real, so this waits for a consumer who
+  needs it, not for completeness.
 
 ### Companion track -- `@zakkster/lite-charts-gl` (separate package)
 

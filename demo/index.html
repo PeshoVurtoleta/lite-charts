@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>@zakkster/lite-charts -- v1.12.0</title>
+    <title>@zakkster/lite-charts -- v1.17.0</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -834,7 +834,7 @@
         "@zakkster/lite-scene":  "https://cdn.jsdelivr.net/npm/@zakkster/lite-scene@1.0.0/Scene.js",
         "@zakkster/lite-axis":   "https://cdn.jsdelivr.net/npm/@zakkster/lite-axis@1.0.1/Axis.js",
         "@zakkster/lite-virtual": "https://cdn.jsdelivr.net/npm/@zakkster/lite-virtual@1.1.0/Virtual.js",
-        "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.2.0/Delaunay.js",
+        "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.3.0/Delaunay.js",
         "@zakkster/lite-charts": "../Charts.js"
     }
 }
@@ -848,7 +848,7 @@
         <div class="brand">
             <span class="brand-logo"></span>
             <span class="brand-name">@zakkster/lite-charts</span>
-            <span class="brand-version">v1.12.0</span>
+            <span class="brand-version">v1.17.0</span>
         </div>
         <button class="theme-toggle" id="theme-toggle">
             <span class="indicator"></span>
@@ -864,7 +864,7 @@
          ================================================================= -->
     <section>
         <div class="hero-intro">
-            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.12.0</span>
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.17.0</span>
             <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
             <p>
                 Single-file ESM. Three peer deps (two more optional, injected --
@@ -1176,7 +1176,7 @@
     <section>
         <div class="section-head">
             <div class="titles">
-                <span class="eyebrow">// voronoi cells -- cells x lite-delaunay 1.2.0</span>
+                <span class="eyebrow">// voronoi cells -- cells x lite-delaunay 1.3.0</span>
                 <h2>Every point owns a region.</h2>
                 <p>
                     The same scatter, tessellated. Pass
@@ -1184,7 +1184,7 @@
                     and each primary-series point owns a bbox-clipped Voronoi
                     polygon drawn UNDER the markers -- geometry from the REAL
                     published <span class="mono">@zakkster/lite-delaunay</span>
-                    1.2.0 <span class="mono">createCellIndex</span>, injected
+                    1.3.0 <span class="mono">createCellIndex</span>, injected
                     exactly like <span class="mono">spatialIndex</span>
                     (lite-charts imports no implementation). A per-point
                     <span class="mono">colorKey</span> tints each cell by its
@@ -1198,6 +1198,40 @@
         </div>
         <div class="card dashboard-card">
             <div class="chart-area" id="cell-scatter-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Field raster + contours (v1.16.0 field / v1.17.0 contours)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// field raster + contours -- field x lite-delaunay 1.3.0</span>
+                <h2>The weather map under the dots.</h2>
+                <p>
+                    Scattered samples of a continuous scalar. Pass
+                    <span class="mono">field: { index: createFieldIndex(N), value: 'z' }</span>
+                    and the primary series' per-point values rasterize into a
+                    smooth barycentric-interpolated heatmap UNDER the markers --
+                    the mesh and grid sampler injected from the published
+                    <span class="mono">@zakkster/lite-delaunay</span> 1.3.0
+                    <span class="mono">createFieldIndex</span>, third rung of the
+                    injection ladder. <span class="mono">field.contours: { levels: 10 }</span>
+                    adds iso-value lines over it: an exact sweep of the same
+                    triangulation (edge interpolation, EXACT for the
+                    piecewise-linear interpolant -- no marching-squares
+                    staircase), stroked between the raster and the dots at
+                    0 B/frame. Drag to pan, wheel to zoom: the raster resamples
+                    and the count-form levels re-derive from the FINITE cells in
+                    view, so a panned-out extreme never pins the ramp or the
+                    levels. Outside the convex hull both layers honestly paint
+                    nothing.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="field-contour-chart"></div>
         </div>
     </section>
 
@@ -1858,7 +1892,7 @@
     // The dense-bubble/scatter sections' spatial index. Same injection
     // pattern: lite-charts has ZERO references to lite-delaunay -- the
     // consumer imports the factory and passes it as `spatialIndex`.
-    import {createSpatialIndex, createCellIndex} from '@zakkster/lite-delaunay';
+    import {createSpatialIndex, createCellIndex, createFieldIndex} from '@zakkster/lite-delaunay';
 
     // ---------------------------------------------------------------------
     // Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
@@ -2654,7 +2688,7 @@
     // ---------------------------------------------------------------------
     //
     // The same two-cluster cloud, tessellated. `cells.index` is the REAL
-    // published lite-delaunay 1.2.0 createCellIndex -- injected exactly like
+    // published lite-delaunay 1.3.0 createCellIndex -- injected exactly like
     // spatialIndex; Charts.js contains no reference to it. A per-point
     // `colorKey` ('tone') tints each cell by its cluster, and
     // hitTolerance: 'nearest' turns the whole plot into each point's hit
@@ -2699,6 +2733,72 @@
     });
     cellScatterChart.mount(document.getElementById('cell-scatter-chart'));
     ALL_CHARTS.push(cellScatterChart);
+
+    // ---------------------------------------------------------------------
+    // FIELD RASTER + CONTOURS -- v1.16.0 field / v1.17.0 contours
+    // ---------------------------------------------------------------------
+    //
+    // 260 "stations" sampling a smooth pressure-like surface (two Gaussian
+    // bumps). `field.index` is the REAL published lite-delaunay 1.3.0
+    // createFieldIndex -- injected like spatialIndex/cells; Charts.js
+    // contains no reference to it. The raster resamples COLD on the
+    // postProject seam, so pan/zoom (enabled here) shows the count-form
+    // contour levels re-deriving from the finite cells in view. Contour
+    // color is a raw canvas stroke (no CSS-var resolution by design), so it
+    // is a mid amber that reads over the blue ramp on BOTH themes.
+
+    const fieldContourData = (() => {
+        const out = [];
+        const zAt = (x, y) => {
+            const a = ((x - 3) * (x - 3) + (y - 7) * (y - 7)) / 6;
+            const b = ((x - 7.5) * (x - 7.5) + (y - 3) * (y - 3)) / 8;
+            return 100 * Math.exp(-a) + 80 * Math.exp(-b);
+        };
+        for (let i = 0; i < 260; i++) {
+            const x = Math.random() * 10;
+            const y = Math.random() * 10;
+            out.push({x, y, z: zAt(x, y)});
+        }
+        return out;
+    })();
+
+    const fieldContourChart = createScatterChart({
+        data: fieldContourData,
+        markerSize: 2,
+        color: '--text-secondary',
+        fillOpacity: 0.85,
+        hitTolerance: 'nearest',
+        field: {
+            index: createFieldIndex(fieldContourData.length),
+            value: 'z',
+            gridW: 96,
+            gridH: 64,
+            colors: ['#dbeafe', '#1e3a8a'],
+            opacity: 0.45,
+            contours: {
+                levels: 10,
+                color: '#d97706',
+                width: 1.5,
+            },
+        },
+        pan: true,
+        zoom: true,
+        panBounds: 'data',
+        width: responsiveWidth('field-contour-chart', 800),
+        height: 420,
+        ...SHARED_OPTS,
+        grid: {x: false, y: false},
+        tooltip: {
+            background: '--tooltip-bg',
+            border: '--tooltip-border',
+            format: (info) => ({
+                header: 'z = ' + fieldContourData[info.snapIdx].z.toFixed(1),
+            }),
+        },
+        legend: false,
+    });
+    fieldContourChart.mount(document.getElementById('field-contour-chart'));
+    ALL_CHARTS.push(fieldContourChart);
 
     // ---------------------------------------------------------------------
     // MULTI-SERIES BUBBLE -- v1.2.0-alpha.2 (global size domain)
