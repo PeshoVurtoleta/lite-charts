@@ -17,14 +17,33 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.18.0 -- cluster-outlines layer on `createScatterChart`
-(minor). `outlines: { index, groupKey, alpha?, ... }` draws one boundary
-outline per point group -- a convex hull, or a concave alpha shape that
-actually hugs the cluster -- from an injected `ClusterIndexFactory`
-(optional peer `@zakkster/lite-delaunay` `^1.4.0`), computed cold per
-refresh and drawn above the cells, below the markers, at 0 B/frame. A
-scatter with no `outlines` key is byte-identical. **503/503 tests pass**
-plus a torture/stress gate (`npm run torture`).
+**Status:** v1.19.0 -- candlestick / OHLC chart (minor).
+`createCandlestickChart({ data, keys?, up?, down?, wick?, bodyRatio?,
+shading?, ... })` is the TENTH chart type: one candle per
+`{ ts, o, h, l, c }` row on the axis kernel -- forced time x-axis, median
+slot width, per-value log-safe price projection, fail-closed OHLC
+validation, O/H/L/C tooltip rows, and the market-hours shading engine
+reused by reference. Draws at 0 B/frame; a bundle importing only
+`createLineChart` gains nothing. **514/514 tests pass** plus a
+torture/stress gate (`npm run torture`).
+
+**New in v1.19.0:**
+- **Candlestick / OHLC chart.** `createCandlestickChart(config)` -- wick
+  `h..l` (1px centered), body `o..c`, up/down fills (`#16a34a`/`#dc2626`
+  defaults; `wick` defaults to the per-candle body color). Body width is
+  the MEDIAN adjacent ts delta in pixels x `bodyRatio` (default 0.7,
+  clamp `(0,1]`), recomputed cold per data/scale change -- one missing or
+  off-schedule bar never resizes the rest. Timestamps ride raw doubles
+  internally, so minute bars at 2026 epochs draw exactly. Corrupt rows
+  (null/NaN fields, `h < max(o,c)`, `l > min(o,c)`, equal or descending
+  `ts`) refuse the whole series -- `mount()` throws; a corrupt post-mount
+  swap draws nothing and a healthy re-swap recovers. `yScale:
+  { type: 'log' }` projects each of o/h/l/c independently. Doji
+  (`o === c`) paints a 1px tick. The tooltip carries four O/H/L/C rows.
+  `shading` (weekends / sessions / overnight / holidays / early close)
+  is the shipped `createTimeLineChart` engine, byte-identical. Candles
+  sit at TRUE time -- weekend gaps show as gaps (index-compact slots are
+  a named-trigger candidate, see the roadmap).
 
 **New in v1.18.0:**
 - **Cluster outlines on scatter.** `outlines: { index: createClusterIndex(N),
@@ -1275,6 +1294,49 @@ silently outlining a subset would lie. The factory's `maxPoints` bound is
 yours to size: a group larger than it faults the layer at refresh, not at
 construction.
 
+### Candlestick / OHLC chart (v1.19.0)
+
+The tenth chart type. One candle per `{ ts, o, h, l, c }` row: a 1px
+centered wick from high to low, a body rect from open to close, green up /
+red down by default.
+
+```js
+import { createCandlestickChart } from '@zakkster/lite-charts';
+
+const chart = createCandlestickChart({
+    data: bars,                        // [{ ts, o, h, l, c }, ...] -- epoch ms, strictly increasing
+    // keys: { ts: 'time', c: 'close' },  // remap row fields
+    up: '#16a34a', down: '#dc2626',    // body fills (defaults shown)
+    bodyRatio: 0.7,                    // body width vs the median slot, (0, 1]
+    pan: true, zoom: true,
+    yScale: { type: 'log' },           // log price axis: o/h/l/c project per value
+    shading: {                          // the createTimeLineChart engine, reused
+        sessions: [{ openMinutes: 570, closeMinutes: 960 }],
+    },
+});
+chart.mount(document.getElementById('chart'));
+```
+
+Time-first by construction: the factory forces a time x-scale (an explicit
+conflicting `xScale.type` throws) and defaults `panBounds` to `'data'`.
+One OHLC stream per chart (a `series` array throws; comparison overlays are
+a named-trigger candidate). The body width is the MEDIAN adjacent ts delta
+projected to pixels x `bodyRatio`, clamped `[1px, 64px]`, recomputed cold
+per data/scale change -- a missing bar or one off-schedule tick never
+resizes the rest. Corrupt data fails closed as a whole: any null/non-finite
+field, an impossible candle (`h < max(o, c)`, `l > min(o, c)`), or a
+non-increasing timestamp makes `mount()` throw; a corrupt post-mount swap
+draws nothing (never a partial series) and a healthy re-swap recovers.
+Doji candles (`o === c`) paint a 1px body tick; fully flat rows add no
+wick. The crosshair tooltip lists O/H/L/C for the bisected candle, and
+`exportSVG` emits the body rects and wick paths.
+
+Candles sit at their TRUE timestamps: weekend and holiday gaps show as
+gaps, which is what keeps session/holiday shading exact. The
+index-compact convention (gaps collapsed, equal slots -- what most trading
+UIs draw) is deliberately out for v1 and tracked in the roadmap with a
+named trigger.
+
 ## Performance
 
 All numbers are from `bench/line-100k.mjs` running on Node 22 against a
@@ -1302,6 +1364,44 @@ blending, and what else is on the compositor. The 60fps-at-100k claim is
 meaningful only when CPU + GPU together fit under 16.67ms. This bench
 validates the CPU side. The browser bench (`bench/browser/`, coming in
 v1.0.1) measures real paint.
+
+### Candlestick bench (v1.19.0)
+
+`npm run bench:candle` -- `bench/candle-10k.mjs`, 10,000 minute bars on a
+1600x800 mock canvas, Node 26 (same CPU-only disclaimer):
+
+```
+full update (validate+median+project+draw)     p50 = 0.62 ms    p95 = 0.96 ms
+view change (postProject: 4 pools + slot)      p50 = 0.56 ms    p95 = 0.59 ms
+draw only (cached pools)                       p50 = 0.16 ms    p95 = 0.17 ms
+```
+
+Extraction (OHLC validation + median sort), per-value projection, and the
+slot recompute are all cold paths -- a pan/zoom gesture at 10k candles pays
+~0.6ms CPU, and the steady-state frame walks prebuilt pools.
+
+### Scatter injection-ladder bench (v1.14.0-v1.18.0)
+
+`npm run bench:layers` -- `bench/scatter-layers-10k.mjs`, 10,000 points in
+8 groups against the REAL published `@zakkster/lite-delaunay` (not a mock),
+Node 26. Every injected layer rebuilds COLD per view write by design (pixel
+space is not affine-stable), so the numbers below are per GESTURE, not per
+frame:
+
+```
+view change: bare scatter                      p50 =  0.33 ms   p95 =  0.42 ms
+view change: + cells (Voronoi)                 p50 =  4.75 ms   p95 =  5.46 ms
+view change: + field + contours (64x48, 8 iso) p50 =  7.83 ms   p95 =  8.16 ms
+view change: + outlines (8 alpha shapes)       p50 =  2.89 ms   p95 =  3.07 ms
+draw only: ALL layers (cached geometry)        p50 =  2.29 ms   p95 =  2.33 ms
+```
+
+With ALL four layers on, a view write costs ~15.4ms p50 at 10k points --
+right at the 60fps edge, dominated by the injected delaunay rebuilds. Plan
+accordingly: at 10k+ points prefer a subset of layers during continuous
+gestures, or accept gesture-rate (not frame-rate) geometry. Steady-state
+redraw with everything on stays ~2.3ms (the layers walk prebuilt pooled
+geometry; the per-frame paths allocate nothing).
 
 ### Zero-GC discipline
 
@@ -2002,7 +2102,8 @@ forward plan and the development history that led here. Headlines:
 | **v1.15.0** | Horizontal legend virtualization + early-close holidays + an earlier fail-closed point for bad legend config. A virtualized legend at `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling along X: supply `legend.width` + `legend.itemWidth` (positive integers) and the adapter receives `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. Size keys are orientation-exclusive -- `height`/`itemHeight` on top/bottom, or `width`/`itemWidth` on left/right, throw at construction; the left/right adapter opts + DOM path stay byte-identical. `shading.holidays` entries may be `{ ts, closeMinutes }` (early close): every session that UTC day clamps to close at `closeMinutes` (1..1439) and the trailing closed time fuses forward like a whole-day holiday's band; whole-day (number) entries are byte-identical. Early-close doors that throw at construction: object without `ts`; bad `ts`; `closeMinutes` null/non-integer/outside 1..1439; a duplicate UTC day across all entries; an early close on a weekday with no open session; an early close on a day carrying an overnight evening session. The clamp is one cold-path line in `_sessionBands` (`cutMs = Infinity` on non-early days). Legend position/container validation + `virtualize` normalization are hoisted above the first owned signal in `createBaseAxisChart`, so bad legend config throws with nothing allocated; when both chart-type options and legend are invalid, the `initOpts` error wins. 10 new tests (463->473) + torture A21 (horizontal scroll storm vs a vertical-storm branch-parity control, measured delta 0.000 B/op); five reversion proofs. |
 | **v1.16.0** | Injected field-raster layer on `createScatterChart`. `field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }` rasterizes the primary series' per-point scalar into a smooth barycentric-interpolated background heatmap -- the third injection rung after `spatialIndex` and `cells`. The triangulated mesh + serpentine grid sampler come from an injected `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0`, `createFieldIndex(N)`; lite-charts imports nothing), built over pixel-space points and re-sampled cold on every data/scale change on the same `postProject` seam as cells, so it stays anisotropy-correct under pan/zoom. One `sampleField` per refresh fills a pooled grow-only grid; per-cell CSS colors are precomputed cold so the draw walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped) at 0 B/frame; `exportSVG` emits one `<rect>` per finite cell. `gridW`/`gridH` integers in `[8,256]` (default 64x48); `colors` `[low,high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v,vMin,vMax)` with extents over the FINITE cells only; `opacity` default 0.5. Independent fault domain from `cells` (own `try/catch`, own `ctx` error slot OR-ed into the mount door, own handle disposal); drawn UNDER the cells node. `interpolate` is never called. Construction throws before any owned signal: non-object `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps `gridW`/`gridH` (`== null` gated before any `+`). A scatter with no `field` is byte-identical. |
 | **v1.17.0** | Contour/isoline layer over the field raster. `field.contours: { levels: count \| number[], color?, width?, dash? }` sweeps the injected triangulation for iso-value crossings (`triangleCount`/`triangleVertices` + edge interpolation -- exact for the piecewise-linear interpolant, proven against an independent planar oracle) and strokes them between the raster and the cells layer at 0 B/frame from a pooled cold-computed segment buffer. Count-form levels sit strictly inside the finite sampled range and re-derive per pan/zoom (outlier rule); explicit out-of-range levels legally draw nothing; strict `z > v` tie rule (every triangle yields 0 or 2 crossings). Third independent fault domain: reuses the field handle, skips when the raster shows nothing (no rebuild), never disposes what it does not own. Bad `levels` throw pre-signal; junk styles fall back. SVG parity free through the draw serializer. `locate`/`barycentric` remain unconsumed -- no delaunay-side change. |
-| **v1.18.0** (this) | Cluster-outlines layer on `createScatterChart`. `outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?, fillOpacity?, dash? }` draws one boundary per point group -- convex hull (no `alpha`) or concave alpha shape (`alpha` = pixel radius, finite `> 0`, `Infinity` refused) -- via an injected `ClusterIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.4.0`, `createClusterIndex(maxPoints)`; zero imports). Fourth injection rung: rows partition by raw `groupKey` (SameValueZero, insertion-ordered; `== null` -> no group), per-group pixel subsets pack cold (non-finite rows skipped), one handle per group per refresh on the `postProject` seam, queries land in SAFE-bound pooled buffers (`3n`/`n` per their 1.4.0 docs), loops bake into flat pooled geometry walked at 0 B/frame above cells / below markers. Multi-loop shapes + hole loops draw as ordinary loops; per-group single-path fill + nonzero rule + opposite hole winding = correct holes. Fourth independent fault domain (own error slot in the mount-door OR); degenerate groups skip silently; > 64 groups faults fail-closed. Doors pre-signal; junk styles fall back; `typeof` handle probe at first refresh. 13 new tests (490->503: hull-oracle bijection w/ orientation, 2-loop split fixture, four-domain fault matrix both ways, build/dispose ledger, hole-winding fill, SVG Z-closure, absent-config parity) + torture A24 (208-write gesture storm, 416/416 builds/disposes, redraw within 2 B/op of a no-outlines control); five reversion proofs. |
+| **v1.19.0** (this) | Candlestick / OHLC chart. `createCandlestickChart({ data, keys?, up?, down?, wick?, bodyRatio?, shading?, ... })` -- the tenth chart type on the axis kernel via a fresh `CANDLE_RENDERER` (no sibling spread; a `createLineChart`-only bundle gains nothing). Forced time x, median-slot body width recomputed cold per data/scale change, raw-double timestamps (minute bars draw exactly despite the Float32 xs pools), per-value log-safe o/h/l/c projection, whole-series fail-closed OHLC validation (mount throws; corrupt swaps draw nothing), doji ticks, O/H/L/C tooltip rows via a new guarded `tooltipRows` renderer hook, `shading` engine reused by reference, SVG parity. +11 tests (503->514), five reversion proofs, torture A25 (1k branch-parity + 10k absolute + retention). |
+| v1.18.0 | Cluster-outlines layer on `createScatterChart`. `outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?, fillOpacity?, dash? }` draws one boundary per point group -- convex hull (no `alpha`) or concave alpha shape (`alpha` = pixel radius, finite `> 0`, `Infinity` refused) -- via an injected `ClusterIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.4.0`, `createClusterIndex(maxPoints)`; zero imports). Fourth injection rung: rows partition by raw `groupKey` (SameValueZero, insertion-ordered; `== null` -> no group), per-group pixel subsets pack cold (non-finite rows skipped), one handle per group per refresh on the `postProject` seam, queries land in SAFE-bound pooled buffers (`3n`/`n` per their 1.4.0 docs), loops bake into flat pooled geometry walked at 0 B/frame above cells / below markers. Multi-loop shapes + hole loops draw as ordinary loops; per-group single-path fill + nonzero rule + opposite hole winding = correct holes. Fourth independent fault domain (own error slot in the mount-door OR); degenerate groups skip silently; > 64 groups faults fail-closed. Doors pre-signal; junk styles fall back; `typeof` handle probe at first refresh. 13 new tests (490->503: hull-oracle bijection w/ orientation, 2-loop split fixture, four-domain fault matrix both ways, build/dispose ledger, hole-winding fill, SVG Z-closure, absent-config parity) + torture A24 (208-write gesture storm, 416/416 builds/disposes, redraw within 2 B/op of a no-outlines control); five reversion proofs. |
 | v1.17.x / v1.18.0 (candidates) | cluster outlines (per-group convex/alpha-shape hulls on scatter, injected -- awaits lite-delaunay 1.4.0); band-axis multi-select refinements + configurable brush modifier; brush IDs across all visible series. Longer arc (from the 2026-09-05 external review, see ROADMAP): candlestick/OHLC + volume; chart title/subtitle/caption in the layout system; axis titles + zero-alloc tick formatters; error bars / stacked area; linked-chart helpers; crosshair/tooltip ARIA. |
 
 ## Ecosystem

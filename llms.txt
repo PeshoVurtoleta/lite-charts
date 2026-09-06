@@ -10,7 +10,36 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.18.0 (current): cluster-outlines layer on createScatterChart --
+> v1.19.0 (current): createCandlestickChart -- the TENTH chart type, tenth
+> axis-kernel renderer (CANDLE_RENDERER, no sibling spread). One candle per
+> { ts, o, h, l, c } row: wick h..l (1px centered), body o..c, up/down
+> fills (defaults #16a34a/#dc2626; wick default = per-candle body color;
+> junk styles fall back). Time x FORCED at the factory (conflicting
+> xScale.type throws); panBounds 'data'; SINGLE OHLC stream (series array
+> throws); keys?: {ts?,o?,h?,l?,c?} remaps fields; bodyRatio? default 0.7
+> clamp (0,1] throws outside. Body width = MEDIAN adjacent ts delta in
+> pixels x bodyRatio, clamp [1,64]px, recomputed cold per data/scale
+> change (an off-schedule or missing bar never resizes the others).
+> Timestamps ride RAW doubles internally (Float32 xs would collapse
+> minute bars at 2026 epochs -- drawing is exact; crosshair snap keeps the
+> house Float32 bisect). FAIL-CLOSED extract: null/non-finite fields
+> (== null before any +), impossible candles (h < max(o,c), l > min(o,c),
+> h < l), equal/descending ts each refuse the WHOLE series -- mount()
+> throws; corrupt post-mount swaps draw nothing, healthy re-swaps recover.
+> log yScale projects o/h/l/c PER VALUE (exact log-space bodies/wicks).
+> Doji o===c paints a 1px tick; flat h===l===o===c adds no wick. Tooltip
+> shows O/H/L/C rows (new guarded tooltipRows renderer hook; the nine
+> shipped renderers keep their single-row path byte-identical). shading
+> reuses the createTimeLineChart engine BY REFERENCE (weekends/sessions/
+> overnight/holidays/early close; engine error strings keep that factory's
+> wording); exportSVG emits body rects + wick paths. Draw is 0 B/frame
+> (two style passes); torture A25 pins 1k parity vs time-line + 10k
+> absolute budget + zero retention. 514/514 (+11 CS tests, five reversion
+> proofs). INDEX-COMPACT x (gaps collapsed, the trading-UI convention) is
+> OUT for v1 with a named trigger -- candles sit at TRUE time, weekend/
+> holiday gaps show as gaps (the shading engine's premise); volume panes,
+> comparison overlays, hollow/heikin-ashi variants OUT (see README).
+> v1.18.0: cluster-outlines layer on createScatterChart --
 > outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?,
 > fillOpacity?, dash? }. The FOURTH rung of the injection ladder
 > (spatialIndex -> cells -> field -> outlines): rows partition by the RAW
@@ -696,7 +725,7 @@
 > size domain. v1.2.0-alpha.1: createScatterChart. v1.2.0-alpha.0:
 > spatial-index foundation. v1.1.0: bar layout polish. 259/259
 > tests pass.
-> ESM-only. Single-file ~11.2k lines. Four peer deps (lite-signal,
+> ESM-only. Single-file ~11.6k lines. Four peer deps (lite-signal,
 > lite-scene, lite-axis required; lite-delaunay optional), zero
 > runtime deps. MIT.
 > See ROADMAP.md for forward plan: v1.4 log scale + pan/zoom +
@@ -744,7 +773,7 @@ interface SpatialIndex {
 type SpatialIndexFactory = (pxs, pys, n) => SpatialIndex;
 ```
 
-Nine chart types across four strictly-independent kernels.
+Ten chart types across four strictly-independent kernels.
 
 `AreaChartConfig extends LineChartConfig` with three additional fields:
 

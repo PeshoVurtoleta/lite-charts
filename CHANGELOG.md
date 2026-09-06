@@ -5,6 +5,84 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] -- 2026-09
+
+### Added
+
+- **`createCandlestickChart(config)`** -- the TENTH chart type, the tenth
+  axis-kernel renderer (`CANDLE_RENDERER`, no spread from any sibling).
+  One candle per `{ ts, o, h, l, c }` row: 1px-centered wick `h..l`, body
+  rect `o..c`, up/down coloring (`up` default `#16a34a`, `down` `#dc2626`,
+  `wick` default = per-candle body color; junk styles fall back silently).
+  Time x-scale FORCED at the factory (explicit conflicting `xScale.type`
+  throws, the `createTimeLineChart` precedent); `panBounds` defaults to
+  `'data'`; single OHLC stream per chart (a `series` array throws).
+  `keys?: { ts?, o?, h?, l?, c? }` remaps row fields; `bodyRatio?` (default
+  0.7, `(0,1]`, throws outside) scales the body against the median slot.
+- **Median slot width** -- body width = median adjacent ts delta projected
+  to pixels x `bodyRatio`, clamped `[1px, 64px]`, recomputed COLD at the
+  postProject seam (per data/scale change, never per frame). Median, not
+  min: an off-schedule half-spacing bar or a missing bar leaves every
+  other body untouched (CS4, proven by reversion).
+- **Raw-double timestamp path** -- `state.xs` is Float32 house-wide, where
+  2026 epoch-ms rounds to ~131s: minute bars would collapse onto each
+  other. The candle renderer keeps raw doubles (`tss`) beside the Float32
+  xs and re-projects its pxs from them at postProject; `medianDt` and the
+  x-domain bounds come from the same raw doubles (CS3/CS4/CS5 + reversion
+  R5). Crosshair snapping still bisects Float32 xs (house-wide behavior).
+- **Fail-closed OHLC extract** -- every ts/o/h/l/c gated `== null` BEFORE
+  coercion, `Number.isFinite` after; impossible candles (`h < max(o,c)`,
+  `l > min(o,c)`, `h < l`), equal or descending ts all refuse the WHOLE
+  series (no per-row skip -- skipping lies): `ctx.candleError` + mount()
+  throws with full unwind; a corrupt post-mount swap draws nothing and a
+  healthy re-swap recovers (CS2/CS2b, reversions R3/R4). Accessor/signal
+  `data` is first-class (validated per extract); static junk data throws
+  at construction.
+- **Log price axis** -- `yScale: { type: 'log' }` projects each of o/h/l/c
+  through the scale PER VALUE (never a linearly derived body height); a
+  decade-spanning candle renders exact log-space proportions against a
+  manual-log oracle (CS5, reversion R2).
+- **Doji rendering** -- `o === c` paints a 1px body tick (`max(1, |po-pc|)`
+  in the draw); a fully flat candle (`h === l === o === c`) paints the
+  tick with no wick stroke (CS3).
+- **Tooltip OHLC rows** -- new optional renderer hook `tooltipRows` (guarded
+  exactly like `postExtract`/`postProject`; all nine shipped renderers keep
+  the original single-row path byte-identical): the bisected candle
+  tooltips four `O`/`H`/`L`/`C` rows (CS8).
+- **Shading reuse by reference** -- `shading` (weekends, market-hours
+  sessions, overnight, holidays, early close) wires the shipped
+  `createTimeLineChart` engine with ZERO engine edits; the same session
+  spec produces the same band list on both factories to sub-pixel
+  tolerance (CS6). The engine's error strings keep the createTimeLineChart
+  wording (documented, not parameterized).
+- `Charts.d.ts`: `CandlestickChartConfig`, `CandlestickKeys`,
+  `createCandlestickChart` declaration.
+- Tests: +11 (CS1-CS10, 503 -> 514) incl. construction/mount door
+  matrices at zero node delta, median-slot discriminators, log oracle,
+  shading parity, slot-recompute cadence, tooltip parity, SVG parity,
+  tree-shake source pins. Five measured reversion proofs (median->min,
+  linear body, null-gate, mount-door, pxs re-projection). Torture A25:
+  208-write gesture storm at 0 new graph nodes, 1k-candle redraw within
+  2 B/op of a time-line branch-parity control, 10k-candle redraw <= 16
+  B/op, 50x create/destroy at zero retention.
+
+- Bench refresh (bench/ was v1.6-era): `bench/candle-10k.mjs`
+  (`npm run bench:candle` -- 10k minute bars: full update 0.62 ms p50,
+  view change 0.56 ms, draw 0.16 ms) and `bench/scatter-layers-10k.mjs`
+  (`npm run bench:layers` -- 10k pts vs the published lite-delaunay:
+  per-GESTURE layer rebuild costs, cells 4.75 ms / field+contours
+  7.83 ms / outlines 2.89 ms / all four ~15.4 ms, steady-state redraw
+  2.29 ms). README Performance section carries the measured numbers and
+  the gesture-vs-frame guidance.
+
+### Changed
+
+- TS11/TS20 source pins now allow exactly TWO call sites of
+  `_shadingAnnotationsAcc`/`_normalizeSessionSpec` (createTimeLineChart +
+  createCandlestickChart); `_weekendBands`/`_sessionBands` stay
+  engine-internal at exactly one.
+- `llms.txt` line-count note refreshed (~11.6k lines).
+
 ## [1.18.0] -- 2026-09
 
 ### Added

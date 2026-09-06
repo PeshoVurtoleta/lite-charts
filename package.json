@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-charts",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "description": "Reactive, zero-GC chart library. Signal-native data, scales, and dimensions; 60fps at 100k points; zero allocations in steady-state render. Built on @zakkster/lite-scene.",
   "type": "module",
   "main": "./Charts.js",
@@ -44,7 +44,9 @@
     "torture": "node --expose-gc test/torture.mjs",
     "torture:logfuzz": "node --expose-gc test/torture-logfuzz.mjs",
     "verify": "npm test && npm run torture",
-    "bench": "node --expose-gc bench/line-100k.mjs"
+    "bench": "node --expose-gc bench/line-100k.mjs",
+    "bench:candle": "node --expose-gc bench/candle-10k.mjs",
+    "bench:layers": "node --expose-gc bench/scatter-layers-10k.mjs"
   },
   "devDependencies": {
     "@zakkster/lite-axis": "^1.0.1",

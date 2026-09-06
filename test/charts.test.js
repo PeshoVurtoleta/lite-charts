@@ -30,7 +30,7 @@ import { signal, createRegistry, setDefaultRegistry, stats, effect } from '@zakk
 // for a single app session but not enough for an exhaustive test suite that
 // runs every chart variant back-to-back. Bump to 32k for headroom.
 setDefaultRegistry(createRegistry({ maxNodes: 32768 }));
-import { createLineChart, createTimeLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, _testHelpers } from '../Charts.js';
+import { createLineChart, createTimeLineChart, createAreaChart, createBarChart, createPieChart, createDonutChart, createBubbleChart, createRadarChart, createScatterChart, createHeatmap, createCandlestickChart, _testHelpers } from '../Charts.js';
 // v1.14.0: the REAL published cell index (devDep) -- the tessellation tests run
 // end-to-end against the actual consumer contract, not a mock.
 import { createCellIndex, createFieldIndex, createClusterIndex } from '@zakkster/lite-delaunay';
@@ -8199,7 +8199,7 @@ describe('v1.10.0 -- time-series variants', () => {
     });
 
     // -- TS11: tree-shake confinement (source proxy; no esbuild in harness) --
-    it('TS11: the weekend generator is reachable only through createTimeLineChart', () => {
+    it('TS11: the weekend generator is reachable only through the time-first factories', () => {
         const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
         // Match an immediate `(` -- a real call-site, never `name (` prose in a
         // comment (this codebase puts no space before a call paren). The defs are
@@ -8207,9 +8207,12 @@ describe('v1.10.0 -- time-series variants', () => {
         const wbCalls = src.match(/_weekendBands\(/g) || [];
         assert.equal(wbCalls.length, 1,
             'the only _weekendBands() call-site is inside _shadingAnnotationsAcc');
+        // v1.19.0: createCandlestickChart is the SECOND (and last) legitimate
+        // call-site -- C6 shading reuse by reference. Anything beyond 2 means
+        // the engine leaked into shared kernel code (tree-shake regression).
         const saCalls = src.match(/_shadingAnnotationsAcc\(/g) || [];
-        assert.equal(saCalls.length, 1,
-            'the only _shadingAnnotationsAcc() call-site is inside createTimeLineChart');
+        assert.equal(saCalls.length, 2,
+            '_shadingAnnotationsAcc() call-sites: createTimeLineChart + createCandlestickChart only');
         assert.ok(
             /export const createLineChart = \(config\) => createBaseAxisChart\(config, LINE_RENDERER\);/.test(src),
             'createLineChart stays a plain one-liner with no shading reference');
@@ -8415,10 +8418,13 @@ describe('v1.11.0 -- market-hours session shading', () => {
     });
 
     // -- TS20: tree-shake source confinement (extends TS11) ------------------
-    it('TS20: session helpers reachable only through createTimeLineChart', () => {
+    it('TS20: session helpers reachable only through the time-first factories', () => {
         const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
-        for (const [name, n] of [['_sessionBands', 1], ['_normalizeSessionSpec', 1],
-                                 ['_weekendBands', 1], ['_shadingAnnotationsAcc', 1]]) {
+        // v1.19.0: _normalizeSessionSpec + _shadingAnnotationsAcc gained their
+        // second call-site in createCandlestickChart (C6 reuse by reference);
+        // _sessionBands/_weekendBands stay engine-internal at exactly 1.
+        for (const [name, n] of [['_sessionBands', 1], ['_normalizeSessionSpec', 2],
+                                 ['_weekendBands', 1], ['_shadingAnnotationsAcc', 2]]) {
             const calls = src.match(new RegExp(name + '\\(', 'g')) || [];
             assert.equal(calls.length, n, `exactly ${n} immediate-paren call-site(s) of ${name}`);
         }
@@ -10966,5 +10972,405 @@ describe('v1.18.0 -- cluster outlines layer (vs REAL lite-delaunay 1.4.0)', () =
         assert.equal(nOutlined, nPlain, 'outlines add ZERO reactive nodes (cold layer, no signals)');
         outlined.mount(createMockCanvas(W, H));
         outlined.unmount();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// v1.19.0 -- candlestick / OHLC chart (CANDLE_RENDERER, tenth axis-kernel type)
+// ---------------------------------------------------------------------------
+
+describe('v1.19.0 -- candlestick chart', () => {
+    const CUP = '#16a34a';
+    const CDOWN = '#dc2626';
+    const T0 = Date.UTC(2026, 0, 5); // Mon 2026-01-05 00:00 UTC
+    const MIN = 60000;
+
+    // Minute-granularity epoch-ms fixtures ON PURPOSE: state.xs is Float32
+    // house-wide, where 2026 epoch values round to ~131s -- these rows pin the
+    // raw-double medianDt/domain path (a Float32-derived delta would be 0).
+    const mkRows = (n, stepMs) => {
+        const rows = new Array(n);
+        let price = 100;
+        for (let i = 0; i < n; i++) {
+            const o = price;
+            const c = o + ((i % 3) - 1) * 2 + 0.5;   // deterministic up/down mix
+            const h = Math.max(o, c) + 1;
+            const l = Math.min(o, c) - 1;
+            rows[i] = { ts: T0 + i * (stepMs || MIN), o, h, l, c };
+            price = c;
+        }
+        return rows;
+    };
+
+    const mkChart = (cfg) => createCandlestickChart({
+        data: mkRows(10), width: 800, height: 400, schedule: (fn) => fn(), ...cfg,
+    });
+
+    // Candle bodies are the fillRects issued while fillStyle is CUP/CDOWN.
+    // Mock records [name, argsArray]; property sets as ['set:fillStyle',[v]].
+    const bodyRects = (ctx) => {
+        const out = [];
+        let fill = null;
+        for (const c of ctx.calls) {
+            if (c[0] === 'set:fillStyle') fill = c[1][0];
+            else if (c[0] === 'fillRect' && (fill === CUP || fill === CDOWN)) {
+                out.push({ x: c[1][0], y: c[1][1], w: c[1][2], h: c[1][3], fill });
+            }
+        }
+        return out;
+    };
+    // Wick segments: moveTo/lineTo pairs issued while strokeStyle is CUP/CDOWN.
+    const wickSegs = (ctx) => {
+        const out = [];
+        let stroke = null;
+        let pending = null;
+        for (const c of ctx.calls) {
+            if (c[0] === 'set:strokeStyle') stroke = c[1][0];
+            else if (c[0] === 'moveTo' && (stroke === CUP || stroke === CDOWN)) pending = c[1];
+            else if (c[0] === 'lineTo' && pending !== null) {
+                out.push({ x: pending[0], y0: pending[1], y1: c[1][1], stroke });
+                pending = null;
+            }
+        }
+        return out;
+    };
+
+    // -- CS1: construction doors, all at zero reactive-node delta ------------
+    it('CS1: construction door matrix throws before any owned signal', () => {
+        const bad = [
+            [null, 'null config'],
+            [{ width: 800 }, 'missing data'],
+            [{ data: [] }, 'empty data'],
+            [{ data: { xs: new Float32Array(4) } }, 'SoA shape refused'],
+            [{ data: mkRows(5), keys: 'ts' }, 'keys non-object'],
+            [{ data: mkRows(5), keys: { o: 5 } }, 'keys.o non-string'],
+            [{ data: mkRows(5), bodyRatio: 0 }, 'bodyRatio 0'],
+            [{ data: mkRows(5), bodyRatio: 1.5 }, 'bodyRatio > 1'],
+            [{ data: mkRows(5), bodyRatio: NaN }, 'bodyRatio NaN'],
+            [{ data: mkRows(5), xScale: { type: 'linear' } }, 'conflicting xScale.type'],
+            [{ data: mkRows(5), series: [{ data: mkRows(5) }] }, 'series array refused'],
+            [{ data: mkRows(5), shading: 42 }, 'shading junk'],
+        ];
+        for (const [cfg, label] of bad) {
+            const before = stats().activeNodes;
+            assert.throws(() => createCandlestickChart(cfg === null ? null : {
+                width: 800, height: 400, schedule: (fn) => fn(), ...cfg,
+            }), /lite-charts:/, label + ' must throw');
+            assert.equal(stats().activeNodes - before, 0, label + ' leaked reactive nodes');
+        }
+        // bodyRatio null/absent is the DEFAULT, not a throw (null is not zero,
+        // and it is not 0.0001 either).
+        const ok = mkChart({ bodyRatio: null });
+        ok.mount(createMockCanvas(800, 400));
+        ok.destroy();
+    });
+
+    // -- CS2: corrupt-candle matrix fails the MOUNT closed -------------------
+    it('CS2: corrupt OHLC rows fail the mount closed (no partial series, no leak)', () => {
+        const corrupt = (patch, i) => {
+            const rows = mkRows(8);
+            rows[i == null ? 4 : i] = { ...rows[i == null ? 4 : i], ...patch };
+            return rows;
+        };
+        const cases = [
+            [corrupt({ h: 90 }), 'high < max(open, close)'],
+            [corrupt({ l: 900 }), 'low > min(open, close)'],
+            [corrupt({ ts: T0 + 3 * MIN }), 'equal timestamp'],
+            [corrupt({ ts: T0 }), 'descending timestamp'],
+            [corrupt({ o: null }), 'null open'],
+            [corrupt({ h: null }), 'null high'],
+            [corrupt({ l: null }), 'null low'],
+            [corrupt({ c: null }), 'null close'],
+            [corrupt({ ts: null }), 'null ts'],
+            [corrupt({ o: NaN }), 'NaN open'],
+            [corrupt({ c: 'x' }), 'string close'],
+        ];
+        for (const [rows, label] of cases) {
+            const before = stats().activeNodes;
+            const chart = createCandlestickChart({
+                data: rows, width: 800, height: 400, schedule: (fn) => fn(),
+            });
+            assert.throws(() => chart.mount(createMockCanvas(800, 400)),
+                /lite-charts:/, label + ' must fail the mount');
+            // Construction-owned signals live until destroy(); the C0 unwind
+            // claim is that the REJECTED MOUNT itself pinned nothing extra.
+            chart.destroy();
+            assert.equal(stats().activeNodes - before, 0,
+                label + ': rejected mount leaked reactive nodes past destroy');
+        }
+    });
+
+    // -- CS2b: post-mount corrupt swap sheds to nothing (never throws) -------
+    it('CS2b: a corrupt post-mount data swap draws no candles and does not throw', () => {
+        const dataSig = signal(mkRows(8));
+        const canvas = createMockCanvas(800, 400);
+        const chart = createCandlestickChart({
+            data: dataSig, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        assert.ok(bodyRects(ctx).length > 0, 'healthy series draws bodies');
+        const rows = mkRows(8);
+        rows[3] = { ...rows[3], l: null };
+        dataSig.set(rows);            // must not throw
+        ctx.calls.length = 0;
+        chart.redraw();
+        assert.equal(bodyRects(ctx).length, 0, 'corrupt swap must draw zero candles');
+        // A healthy re-swap recovers (candleError cleared at extract top).
+        dataSig.set(mkRows(8));
+        ctx.calls.length = 0;
+        chart.redraw();
+        assert.ok(bodyRects(ctx).length > 0, 'healthy re-swap draws again');
+        chart.destroy();
+    });
+
+    // -- CS3: doji / flat candles paint a 1px tick ---------------------------
+    it('CS3: doji paints a 1px body tick; all-flat paints the tick with no wick', () => {
+        const rows = [
+            { ts: T0, o: 100, h: 103, l: 97, c: 102 },            // normal up
+            { ts: T0 + MIN, o: 100, h: 101, l: 99, c: 100 },      // doji o===c, has wick
+            { ts: T0 + 2 * MIN, o: 100, h: 100, l: 100, c: 100 }, // fully flat
+        ];
+        const canvas = createMockCanvas(800, 400);
+        const chart = createCandlestickChart({
+            data: rows, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        const bodies = bodyRects(ctx).sort((a, b) => a.x - b.x);
+        assert.equal(bodies.length, 3, 'three bodies');
+        assert.ok(bodies[0].h > 1, 'normal candle body has real height');
+        assert.equal(bodies[1].h, 1, 'doji body is exactly the 1px tick');
+        assert.equal(bodies[2].h, 1, 'flat candle body is exactly the 1px tick');
+        const wicks = wickSegs(ctx);
+        assert.equal(wicks.length, 2, 'flat candle (h===l) strokes no wick');
+        chart.destroy();
+    });
+
+    // -- CS4: median slot width survives a missing bar -----------------------
+    it('CS4: slot width uses the MEDIAN ts delta -- one missing bar changes nothing', () => {
+        const full = mkRows(21);
+        const gapped = full.filter((_, i) => i !== 10);   // one missing bar
+        const widths = (rows) => {
+            const canvas = createMockCanvas(800, 400);
+            const chart = createCandlestickChart({
+                data: rows, width: 800, height: 400, schedule: (fn) => fn(),
+            });
+            chart.mount(canvas);
+            const ctx = canvas.getContext('2d');
+            ctx.calls.length = 0;
+            chart.redraw();
+            const ws = bodyRects(ctx).map((r) => r.w);
+            const expected = Math.abs(chart.xScale.map(T0 + MIN) - chart.xScale.map(T0)) * 0.7;
+            chart.destroy();
+            return { ws, expected };
+        };
+        const f = widths(full);
+        const g = widths(gapped);
+        assert.ok(f.expected > 2, 'fixture sanity: a minute maps to a visible slot');
+        for (const w of f.ws) assert.ok(Math.abs(w - f.expected) < 1e-6, 'full-series width = median slot');
+        for (const w of g.ws) {
+            assert.ok(Math.abs(w - g.expected) < 1e-6,
+                'gapped width ' + w + ' must equal the median slot ' + g.expected +
+                ' (a mean-based rule would widen it; a Float32-derived medianDt would clamp to 1)');
+        }
+        // The min-vs-median discriminator: one OFF-SCHEDULE bar at half spacing.
+        // min(dt) halves every body; the median must not move.
+        const mid = full[10];
+        const inserted = [...full.slice(0, 10),
+            { ts: mid.ts - MIN / 2, o: mid.o, h: mid.h, l: mid.l, c: mid.o },
+            ...full.slice(10)];
+        const ins = widths(inserted);
+        for (const w of ins.ws) {
+            assert.ok(Math.abs(w - ins.expected) < 1e-6,
+                'off-schedule inserted bar: width ' + w + ' must stay the median slot ' +
+                ins.expected + ' (a min-based rule would halve every body)');
+        }
+    });
+
+    // -- CS5: log yScale projects o/h/l/c per value --------------------------
+    it('CS5: log price axis projects each of o/h/l/c independently (manual log oracle)', () => {
+        const rows = [
+            { ts: T0, o: 20, h: 30, l: 15, c: 25 },
+            { ts: T0 + MIN, o: 10, h: 100, l: 1, c: 50 },   // spans two decades
+            { ts: T0 + 2 * MIN, o: 40, h: 60, l: 30, c: 35 },
+        ];
+        const canvas = createMockCanvas(800, 400);
+        const chart = createCandlestickChart({
+            data: rows, yScale: { type: 'log', nice: false },
+            width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        // Manual oracle from the live scale's endpoints, computed in log space
+        // INDEPENDENTLY of yScale.map's internals.
+        const ys = chart.yScale;
+        const L = Math.log10;
+        const proj = (v) => ys.rMin + (L(v) - L(ys.dMin)) / (L(ys.dMax) - L(ys.dMin)) * (ys.rMax - ys.rMin);
+        const bodies = bodyRects(ctx).sort((a, b) => a.x - b.x);
+        const wicks = wickSegs(ctx).sort((a, b) => a.x - b.x);
+        assert.equal(bodies.length, 3);
+        assert.equal(wicks.length, 3);
+        // The decade-spanning candle: body top = map(50) (up candle), height =
+        // map(10) - map(50); wick = map(100)..map(1). Log-space proportions --
+        // a linear-derived body would miss by tens of px.
+        const b = bodies[1], w = wicks[1];
+        assert.ok(Math.abs(b.y - proj(50)) <= 0.5, 'body top at log(50), got ' + b.y + ' vs ' + proj(50));
+        assert.ok(Math.abs((b.y + b.h) - proj(10)) <= 0.5, 'body bottom at log(10)');
+        const wTop = Math.min(w.y0, w.y1), wBot = Math.max(w.y0, w.y1);
+        assert.ok(Math.abs(wTop - proj(100)) <= 0.5, 'wick top at log(100)');
+        assert.ok(Math.abs(wBot - proj(1)) <= 0.5, 'wick bottom at log(1)');
+        chart.destroy();
+    });
+
+    // -- CS6: shading engine byte-parity vs createTimeLineChart --------------
+    it('CS6: the same session spec shades candle and time-line charts identically', () => {
+        const rows = mkRows(24 * 14, 3600000);   // hourly, two weeks
+        const shading = { sessions: [{ openMinutes: 570, closeMinutes: 960 }] };
+        const candle = createCandlestickChart({
+            data: rows, shading, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        const line = createTimeLineChart({
+            data: rows, x: 'ts', y: 'c', shading, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        candle.mount(createMockCanvas(800, 400));
+        line.mount(createMockCanvas(800, 400));
+        // Same engine, same spec -> same band list. Compared numerically at
+        // sub-pixel tolerance, not string-identical: the candle x-domain keeps
+        // RAW double ts while the line domain derives from Float32 xs, so the
+        // projections legally differ by a few thousandths of a px (the candle
+        // side is the more accurate one); clip-path ids are a global counter.
+        const bandRects = (svg) =>
+            (svg.match(/<rect [^>]*fill="rgba\(0,0,0,0\.05\)"[^>]*\/?>/g) || []).map((r) => ({
+                x: +/x="([-\d.]+)"/.exec(r)[1],
+                y: +/y="([-\d.]+)"/.exec(r)[1],
+                w: +/width="([-\d.]+)"/.exec(r)[1],
+                h: +/height="([-\d.]+)"/.exec(r)[1],
+            }));
+        const cb = bandRects(candle.exportSVG());
+        const lb = bandRects(line.exportSVG());
+        assert.ok(cb.length >= 10, 'two weeks of sessions produce gap bands, got ' + cb.length);
+        assert.equal(cb.length, lb.length, 'same band COUNT across the two factories');
+        for (let i = 0; i < cb.length; i++) {
+            assert.ok(Math.abs(cb[i].x - lb[i].x) < 0.02 && Math.abs(cb[i].w - lb[i].w) < 0.02,
+                'band ' + i + ' geometry diverges: ' + JSON.stringify(cb[i]) + ' vs ' + JSON.stringify(lb[i]));
+            assert.equal(cb[i].y, lb[i].y, 'band ' + i + ' y');
+            assert.equal(cb[i].h, lb[i].h, 'band ' + i + ' height');
+        }
+        candle.destroy();
+        line.destroy();
+    });
+
+    // -- CS7: slot width is recomputed per scale change, stable per frame ----
+    it('CS7: zooming to half the domain doubles the slot; plain redraws leave it alone', () => {
+        const canvas = createMockCanvas(800, 400);
+        const chart = createCandlestickChart({
+            data: mkRows(40), pan: true, zoom: true,
+            width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        const w0 = bodyRects(ctx)[0].w;
+        ctx.calls.length = 0;
+        chart.redraw();
+        assert.equal(bodyRects(ctx)[0].w, w0, 'redraw without a scale change keeps the slot');
+        // Halve the visible x-domain -> every ts delta doubles in pixels.
+        // (view() is null before any gesture -- derive from the live scales.)
+        const xs = chart.xScale, ysc = chart.yScale;
+        chart.setView({
+            xMin: xs.dMin, xMax: xs.dMin + (xs.dMax - xs.dMin) / 2,
+            yMin: ysc.dMin, yMax: ysc.dMax,
+        });
+        ctx.calls.length = 0;
+        chart.redraw();
+        const w1 = bodyRects(ctx)[0].w;
+        assert.ok(Math.abs(w1 / w0 - 2) < 0.01, 'half domain -> double slot, got x' + (w1 / w0));
+        chart.destroy();
+    });
+
+    // -- CS8: tooltip carries O/H/L/C rows (and only candles do) -------------
+    it('CS8: the bisected candle tooltips four O/H/L/C rows; line keeps one row', () => {
+        const rows = [
+            { ts: T0, o: 111.5, h: 222.5, l: 33.5, c: 144.5 },
+            { ts: T0 + MIN, o: 144.5, h: 155.5, l: 122.5, c: 133.5 },
+        ];
+        const canvas = createMockCanvas(800, 400);
+        const chart = createCandlestickChart({
+            data: rows, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        const pb = chart._internal.plotBoundsBox;
+        chart.moveCrosshair(chart.xScale.map(T0), pb.y + pb.h / 2);
+        ctx.calls.length = 0;
+        chart.redraw();
+        const texts = callsOf(ctx, 'fillText').map((c) => String(c[1][0]));
+        for (const needle of ['111.5', '222.5', '33.5', '144.5']) {
+            assert.ok(texts.some((t) => t.includes(needle)),
+                'tooltip must surface ' + needle + ' -- got: ' + texts.join(' | '));
+        }
+        // Rows render as one 'label: value' string; candle labels end ' O' etc.
+        for (const lbl of [' O: ', ' H: ', ' L: ', ' C: ']) {
+            assert.ok(texts.some((t) => t.includes(lbl)),
+                'tooltip must carry a row labelled "' + lbl.trim() + '" -- got: ' + texts.join(' | '));
+        }
+        chart.destroy();
+        // Hook-absent parity: the same rows on a time-line chart keep ONE value row.
+        const lc = createTimeLineChart({
+            data: rows, x: 'ts', y: 'c', width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        const cv2 = createMockCanvas(800, 400);
+        lc.mount(cv2);
+        const ctx2 = cv2.getContext('2d');
+        lc.moveCrosshair(lc.xScale.map(T0), pb.y + pb.h / 2);
+        ctx2.calls.length = 0;
+        lc.redraw();
+        const t2 = callsOf(ctx2, 'fillText').map((c) => String(c[1][0]));
+        assert.ok(!t2.some((t) => t.endsWith(' O')), 'line tooltip has no OHLC rows');
+        lc.destroy();
+    });
+
+    // -- CS9: SVG parity ------------------------------------------------------
+    it('CS9: exportSVG emits one body rect per candle in the up/down fill + stroked wicks', () => {
+        const rows = mkRows(5);   // deterministic mix: 2 down (i%3===0), 3 up
+        const chart = createCandlestickChart({
+            data: rows, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        chart.mount(createMockCanvas(800, 400));
+        const svg = chart.exportSVG();
+        const nUp = (svg.match(/<rect [^>]*fill="#16a34a"/g) || []).length;
+        const nDown = (svg.match(/<rect [^>]*fill="#dc2626"/g) || []).length;
+        const expUp = rows.filter((r) => r.c >= r.o).length;
+        assert.equal(nUp, expUp, 'up body rects');
+        assert.equal(nDown, rows.length - expUp, 'down body rects');
+        assert.ok(/<path [^>]*stroke="#16a34a"/.test(svg), 'up wick path stroked');
+        assert.ok(/<path [^>]*stroke="#dc2626"/.test(svg), 'down wick path stroked');
+        chart.destroy();
+    });
+
+    // -- CS10: tree-shake source proxies -------------------------------------
+    it('CS10: CANDLE_RENDERER stays factory-confined; shared paths stay guarded', () => {
+        const src = readFileSync(new URL('../Charts.js', import.meta.url), 'utf8');
+        // Code references only (comments also name the const): exactly one
+        // definition and exactly one consumer -- the factory.
+        assert.equal((src.match(/const CANDLE_RENDERER = \{/g) || []).length, 1,
+            'exactly one CANDLE_RENDERER definition');
+        assert.equal((src.match(/, CANDLE_RENDERER\)/g) || []).length, 1,
+            'exactly one CANDLE_RENDERER consumer (createCandlestickChart)');
+        assert.ok(
+            /export const createLineChart = \(config\) => createBaseAxisChart\(config, LINE_RENDERER\);/.test(src),
+            'createLineChart stays a plain one-liner');
+        const hookCalls = src.match(/renderer\.tooltipRows\(/g) || [];
+        assert.equal(hookCalls.length, 1, 'exactly one guarded tooltipRows call site');
+        const doorTerms = src.match(/rendererCtx\.candleError/g) || [];
+        assert.ok(doorTerms.length >= 1, 'candleError reaches the mount door');
     });
 });

@@ -5,7 +5,25 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.18.0 (current)
+## v1.19.0 (current)
+
+Candlestick / OHLC chart (brief #16, `briefs/candlestick.md`, incl. the
+AS-EXECUTED block). `createCandlestickChart` -- the TENTH chart type,
+tenth axis-kernel renderer (fresh CANDLE_RENDERER, no sibling spread).
+Forced time x + panBounds 'data'; median-slot body width cold per
+data/scale change; RAW-double timestamp path (minute bars draw exactly
+over the house Float32 xs pools); whole-series fail-closed OHLC
+validation (mount throws, corrupt swaps shed); per-value log-safe
+projection; doji ticks; O/H/L/C tooltip via the new guarded tooltipRows
+renderer hook (nine shipped renderers byte-identical on their row path);
+shading engine reused by reference (zero engine edits). 514/514 tests +
+torture A25 + five reversion proofs; reviewer APPROVED zero blockers.
+Volume pane, index-compact x, comparison overlays all OUT with named
+triggers (see the candidates list).
+
+---
+
+## v1.18.0
 
 Cluster-outlines layer on createScatterChart (brief #14,
 `briefs/cluster-outlines.md`, incl. the AS-EXECUTED block). `outlines:
@@ -766,8 +784,8 @@ not shipped in `files[]`). They are independent; pick by appetite.
   badges de-staled v1.12.0 -> v1.17.0).
 - **Cluster outlines** (v1.18.0, brief `briefs/cluster-outlines.md`;
   EXECUTED 2026-09-05 against the published lite-delaunay 1.4.0 --
-  503/503 tests, torture A24, five reversion proofs; awaiting `/release
-  1.18.0` + user publish) -- per-group convex-hull / alpha-shape
+  503/503 tests, torture A24, five reversion proofs; SHIPPED, npm-verified
+  2026-09-06) -- per-group convex-hull / alpha-shape
   boundary outlines on scatter (`outlines: { index, groupKey, alpha? }`), the
   fourth injection rung. The brief carries the consumer contract delaunay
   1.4.0 (`convexHull` + `alphaShape`) is built against -- the 1.2.0/1.3.0
@@ -790,12 +808,15 @@ package); Sankey / treemap / funnel (graph + hierarchy layouts, wrong
 library). The rest are REAL gaps, now candidates -- no briefs yet, each
 needs one before any cut:
 
-- **Candlestick / OHLC (+ volume)** -- highest leverage: the financial
-  substrate already exists (time-line preset, session shading, holidays,
-  log scale, pan/zoom). BRIEF WRITTEN 2026-09-05: `briefs/candlestick.md`
-  (v1.19.0 candidate) -- tenth axis-kernel type via a new CANDLE_RENDERER
-  hook object; time-continuous x, median-slot width, fail-closed OHLC
-  rows, shading-engine reuse; volume pane deferred with a named trigger.
+- **Candlestick / OHLC** -- EXECUTED as v1.19.0 (brief #16,
+  `briefs/candlestick.md`, incl. AS-EXECUTED). Deferred WITH NAMED
+  TRIGGERS: volume pane/overlay (trigger: a consumer asking for a volume
+  pane or volume-at-price); index-compact x -- gaps collapsed, the
+  trading-UI slot convention (trigger: a consumer for whom true-time gaps
+  are a blocker; it contradicts the shading engine's premise, so it would
+  ship shading-less); comparison overlays / multi-series OHLC;
+  hollow-candle and OHLC-bar visual variants; heikin-ashi (derived-candle
+  math belongs upstream).
 - **Chart chrome: title / subtitle / caption** that participates in the
   reactive margin system (not user-DOM stacked around the canvas).
 - **Axis titles + tick-format callback** that survives pan/zoom without

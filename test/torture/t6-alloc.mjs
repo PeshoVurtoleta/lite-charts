@@ -26,7 +26,7 @@
  * plain `npm run torture` already proves the gate bites.
  */
 
-import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, createBarChart, createScatterChart } from '../../Charts.js';
+import { _testHelpers, createLineChart, createTimeLineChart, createDonutChart, createBarChart, createScatterChart, createCandlestickChart } from '../../Charts.js';
 import { signal } from '@zakkster/lite-signal';
 // v1.14.0: the REAL published cell index (devDep) -- A20 gates the injected
 // tessellation end-to-end, not against a mock.
@@ -1142,5 +1142,101 @@ export function run() {
         ctrl.destroy();
         c.destroy();
         check(disposes === builds, () => `A24: ${builds - disposes} cluster handle(s) never disposed`);
+    }
+
+    // --- 19. candlestick storm (A25, v1.19.0) ---------------------------------
+    // The tenth renderer: per-value o/h/l/c pixel projection + median slot width
+    // are COLD (postProject, per data/scale change); the draw closure walks
+    // prebuilt Float64 pools (two style passes, fillRect bodies + one stroked
+    // wick path) at 0 B/frame. Claims: (1) a 208-write gesture storm adds zero
+    // signal-graph nodes; (2) redraw at 1k candles stays <=16 B/op and within
+    // 2 B/op of a BRANCH-PARITY control (createTimeLineChart, same rows, closes
+    // as the line y -- the A21 lesson); (3) redraw at 10k candles holds the same
+    // absolute budget (no decimation regime exists for candles -- every candle
+    // draws); (4) 50 create/mount/destroy cycles retain zero graph nodes.
+    // Fixture ts are REAL epoch ms at minute granularity: state.xs is Float32
+    // (house-wide), so this pins the raw-double medianDt/domain path -- a
+    // Float32-derived medianDt would quantize 60000ms deltas to 0 and clamp
+    // every body to 1px (invisible to an alloc gate, load-bearing for qa).
+    {
+        const mkRows = (n) => {
+            const rows = new Array(n);
+            let seed = 20260906;
+            const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+            const t0 = Date.UTC(2026, 0, 5);   // Mon 2026-01-05 00:00 UTC
+            let price = 100;
+            for (let i = 0; i < n; i++) {
+                const o = price;
+                const c = o + (rnd() - 0.5) * 4;
+                const h = (o > c ? o : c) + rnd() * 2;
+                const l = (o < c ? o : c) - rnd() * 2;
+                rows[i] = { ts: t0 + i * 60000, o, h, l, c };
+                price = c;
+            }
+            return rows;
+        };
+        const mount = (chart) => {
+            const cv = createEventCanvas(800, 400);
+            chart.mount(cv);
+            quietCanvas(cv);
+            return chart;
+        };
+        const rows1k = mkRows(1000);
+        const c1k = mount(createCandlestickChart({
+            data: rows1k, zoom: true, width: 800, height: 400, schedule: (fn) => fn(),
+        }));
+        const ctrl = mount(createTimeLineChart({
+            data: rows1k, x: 'ts', y: 'c', zoom: true, width: 800, height: 400,
+            schedule: (fn) => fn(),
+        }));
+
+        // Gesture storm: every write is a scale change (cold re-projection of
+        // 4 pools + slot recompute) -- zero new graph nodes.
+        const t0 = Date.UTC(2026, 0, 5);
+        const vA = { xMin: t0 + 100 * 60000, xMax: t0 + 900 * 60000, yMin: 60, yMax: 140 };
+        const vB = { xMin: t0 + 200 * 60000, xMax: t0 + 800 * 60000, yMin: 70, yMax: 130 };
+        for (let i = 0; i < 8; i++) c1k.setView(i & 1 ? vA : vB);
+        const before = graphSnapshot();
+        for (let i = 0; i < 208; i++) {
+            c1k.setView(i & 1 ? vA : vB);
+            c1k.redraw();
+        }
+        const after = graphSnapshot();
+        check(after.nodes - before.nodes === 0,
+            () => `A25: ${after.nodes - before.nodes} new signal-graph nodes across the gesture storm (expected 0)`);
+
+        // Redraw budget at 1k vs the branch-parity time-line control.
+        const gCandle = runOpsGate(() => { c1k.redraw(); }, { ops: 20000, warmup: 1000 });
+        const gCtrl = runOpsGate(() => { ctrl.redraw(); }, { ops: 20000, warmup: 1000 });
+        if (!gCandle.report.ok) die(allocFailMsg('A25.candle-redraw', gCandle.report, gCandle.summary));
+        check(gCandle.bytesPerOp <= 16,
+            () => `A25: candle redraw ${gCandle.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gCandle.bytesPerOp - gCtrl.bytesPerOp) <= 2.0,
+            () => `A25: candle redraw ${gCandle.bytesPerOp.toFixed(3)} B/op vs time-line control ${gCtrl.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        ctrl.destroy();
+        c1k.destroy();
+
+        // 10k candles: absolute budget only (fewer ops -- the walk is 10x).
+        const c10k = mount(createCandlestickChart({
+            data: mkRows(10000), zoom: true, width: 800, height: 400, schedule: (fn) => fn(),
+        }));
+        const g10k = runOpsGate(() => { c10k.redraw(); }, { ops: 4000, warmup: 400 });
+        if (!g10k.report.ok) die(allocFailMsg('A25.candle-10k-redraw', g10k.report, g10k.summary));
+        check(g10k.bytesPerOp <= 16,
+            () => `A25: 10k-candle redraw ${g10k.bytesPerOp.toFixed(3)} B/op > 16`);
+        c10k.destroy();
+
+        // Create/mount/destroy retention: 50 cycles, zero retained graph nodes.
+        const rowsR = mkRows(200);
+        const rBefore = graphSnapshot();
+        for (let i = 0; i < 50; i++) {
+            const c = mount(createCandlestickChart({
+                data: rowsR, width: 800, height: 400, schedule: (fn) => fn(),
+            }));
+            c.destroy();
+        }
+        const rAfter = graphSnapshot();
+        check(rAfter.nodes - rBefore.nodes === 0,
+            () => `A25: ${rAfter.nodes - rBefore.nodes} signal-graph nodes retained across 50 create/destroy cycles`);
     }
 }

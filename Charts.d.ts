@@ -1380,6 +1380,107 @@ export interface FieldContoursSpec {
 
 export function createScatterChart(config: ScatterChartConfig): Chart;
 
+// ---------------------------------------------------------------------------
+// Candlestick / OHLC chart (v1.19.0)
+// ---------------------------------------------------------------------------
+//
+// The tenth chart type: one candle per row (wick h..l, body o..c, up/down
+// coloring) on the axis kernel. Time-first BY CONSTRUCTION (the factory forces
+// a time x-scale); a single OHLC stream per chart. Inherits pan/zoom, brush,
+// crosshair + tooltip (O/H/L/C rows), annotations, log yScale, exportSVG, and
+// theme refresh from the kernel. Reuses the createTimeLineChart shading engine.
+
+/** OHLC field key map. Each key names the row field; all optional. */
+export interface CandlestickKeys {
+    /** Timestamp field (epoch ms or Date). Default 'ts'. */
+    ts?: string;
+    /** Open field. Default 'o'. */
+    o?: string;
+    /** High field. Default 'h'. */
+    h?: string;
+    /** Low field. Default 'l'. */
+    l?: string;
+    /** Close field. Default 'c'. */
+    c?: string;
+}
+
+export interface CandlestickChartConfig extends PanZoomConfig, BrushConfig {
+    /**
+     * The OHLC stream: an array of `{ ts, o, h, l, c }` rows (AoS only -- OHLC
+     * has no SoA shape). Timestamps must be finite and strictly increasing;
+     * each candle must satisfy high >= max(open, close) and low <= min(open,
+     * close). A null/undefined or non-finite field, an impossible candle, or a
+     * non-increasing timestamp fails closed: mount() throws, and a corrupt
+     * post-mount data swap draws nothing (never a partial series).
+     */
+    data: DataAccessor;
+
+    /** Field key overrides. Defaults: ts 'ts', o 'o', h 'h', l 'l', c 'c'. */
+    keys?: CandlestickKeys;
+
+    /** Up (close >= open) body fill. Default '#16a34a'. Junk falls back silently. */
+    up?: string;
+    /** Down (close < open) body fill. Default '#dc2626'. Junk falls back silently. */
+    down?: string;
+    /**
+     * Wick/border stroke color. Default: the per-candle body color (up/down).
+     * Junk falls back to that default silently.
+     */
+    wick?: string;
+    /**
+     * Body width as a fraction of the median candle slot (projected pixels),
+     * clamped to [1px, 64px]. Default 0.7. Non-finite or outside (0, 1] throws.
+     */
+    bodyRatio?: number;
+
+    /** Static or reactive width in CSS pixels. Default 800. */
+    width?: Accessor<number>;
+    /** Static or reactive height in CSS pixels. Default 400. */
+    height?: Accessor<number>;
+
+    margin?: MarginConfig;
+    background?: string | null;
+    axisColor?: string;
+    labelColor?: string;
+    font?: string;
+    dpr?: number;
+
+    /** Gridlines through the plot rect at each tick. Default false. */
+    grid?: boolean | GridConfig;
+
+    /**
+     * createCandlestickChart forces a time x-scale. `type` must be omitted or
+     * 'time'; an explicit conflicting type throws at construction.
+     */
+    xScale?: Omit<XScaleConfig, 'type'> & { type?: 'time' };
+    /** Value (price) axis. `{ type: 'log' }` projects o/h/l/c per-value in log space. */
+    yScale?: YScaleConfig;
+
+    /**
+     * Annotations pinned to data coordinates. A static array or a
+     * `() => Annotation[]` thunk. Composes with shading bands (bands first).
+     */
+    annotations?: Annotation[] | (() => Annotation[]);
+
+    /**
+     * Market-hours / weekend background shading -- the createTimeLineChart
+     * engine, reused. Omit (or `false`) for none. See {@link TimeShadingConfig}.
+     */
+    shading?: boolean | 'weekends' | TimeShadingConfig;
+
+    /** Crosshair: vertical line at the snapped candle. Default true. */
+    crosshair?: boolean | CrosshairConfig;
+    /** Tooltip: O/H/L/C rows for the bisected candle. Default true. */
+    tooltip?: boolean | TooltipConfig;
+    /** Legend. Default 'bottom'. Pass false to disable. */
+    legend?: boolean | LegendPosition | LegendConfig;
+
+    /** Frame scheduler. Default rAF in browser, synchronous in Node. */
+    schedule?: (fn: () => void) => void;
+}
+
+export function createCandlestickChart(config: CandlestickChartConfig): Chart;
+
 /**
  * v1.14.0: a Voronoi cell index over pixel-space points. Structurally
  * identical to what `@zakkster/lite-delaunay`'s `createCellIndex` returns,

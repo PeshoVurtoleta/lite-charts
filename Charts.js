@@ -95,6 +95,18 @@ const ensureUint8 = (arr, needed) => {
     return new Uint8Array(nextPow2(needed > 0 ? needed : 1));
 };
 
+// v1.19.0: grow-only Float64 pool, mirrors ensureFloat32. Cold only (candle
+// extract + the module-level median-sort scratch). Float64 because OHLC price
+// fields keep full double precision through the median-delta sort and the
+// per-value log projection (a Float32 round-trip would drift the slot width).
+const ensureFloat64 = (arr, needed) => {
+    if (arr && arr.length >= needed) return arr;
+    const cap = nextPow2(needed > 0 ? needed : 1);
+    const next = new Float64Array(cap);
+    if (arr) next.set(arr.subarray(0, Math.min(arr.length, cap)));
+    return next;
+};
+
 // ---------------------------------------------------------------------------
 // Decimation kernel
 // ---------------------------------------------------------------------------
@@ -415,6 +427,23 @@ const createSeriesState = () => ({
     domainXMax: 1,
     domainYMin: 0,
     domainYMax: 1,
+    // v1.19.0: candlestick OHLC buffers. Domain o/h/l/c (Float64Array, grow-only)
+    // and their per-value pixel projections (pos/phs/pls/pcs). null until the
+    // candle renderer extracts; every other renderer leaves them null. medianDt
+    // is the median adjacent-ts delta (domain units); bodyW is the per-refresh
+    // pixel body width (cold at postProject). Kept on the shared state so the
+    // 0-alloc draw closure reads them by reference.
+    os: null,
+    hs: null,
+    ls: null,
+    cs: null,
+    pos: null,
+    phs: null,
+    pls: null,
+    pcs: null,
+    tss: null,
+    medianDt: 0,
+    bodyW: 1,
 });
 
 /**
@@ -5875,6 +5904,358 @@ const SCATTER_RENDERER = {
 };
 
 
+// ---------------------------------------------------------------------------
+// Candlestick renderer (v1.19.0)
+// ---------------------------------------------------------------------------
+//
+// The tenth axis-kernel renderer: one candle per row (wick h..l, body o..c,
+// up/down coloring), a time x-axis, a price y-axis. Rides every kernel service
+// the line renderer already proves -- pan/zoom, crosshair + tooltip, single
+// series, annotations, log yScale, exportSVG, theme refresh -- but paints FOUR
+// values per x with its own hit/tooltip shape.
+//
+// OHLC has no SoA contract: a candle is an array of { ts, o, h, l, c } rows,
+// read AoS-only through five RAW accessors (buildRawAccessor). Raw, not
+// coercing, so a per-row null field is gated BEFORE any unary + (null is not
+// zero). extractData runs cold (data change only); the draw closure allocates
+// nothing per frame; slot width + the per-value pixel projections are cold at
+// postProject (data OR scale change, never per frame). A bundle importing only
+// createLineChart must not gain a byte -- CANDLE_RENDERER is a separate
+// top-level const with no spread from any sibling (the :3600 tree-shake law).
+
+// Module-level grow-only scratch for the median adjacent-ts-delta sort. Cold
+// only (candle extract). Mirrors the ensureFloat32 pool idiom; sized to the
+// largest series seen so far and never shrunk.
+let _candleDtScratch = null;
+
+// Five RAW accessors + resolved style/geometry opts. Runs at construction,
+// BEFORE any owned signal (fail-closed matrix, _initScatterOpts style):
+//   - data non-array/empty          -> throw
+//   - keys non-object, or any of ts/o/h/l/c present but non-string -> throw
+//   - bodyRatio (== null gated) non-finite / <= 0 / > 1            -> throw
+//   - up/down/wick non-string junk  -> silent fallback to defaults
+const _candleInitOpts = (config) => {
+    const data = config.data;
+    // Static data is door-checked here; accessor/signal data (a function --
+    // reactive data is a first-class kernel service) is validated at every
+    // extract instead (non-array/corrupt -> ctx.candleError, mount door).
+    if (typeof data !== 'function' && (!Array.isArray(data) || data.length === 0)) {
+        throw new Error('lite-charts: createCandlestickChart requires a non-empty `data` array ' +
+            '(or an accessor/signal yielding one)');
+    }
+    let tsKey = 'ts', oKey = 'o', hKey = 'h', lKey = 'l', cKey = 'c';
+    const keys = config.keys;
+    if (keys != null) {
+        if (typeof keys !== 'object') {
+            throw new Error('lite-charts: createCandlestickChart `keys` must be an object { ts?, o?, h?, l?, c? }');
+        }
+        if (keys.ts !== undefined) {
+            if (typeof keys.ts !== 'string') throw new Error('lite-charts: createCandlestickChart `keys.ts` must be a string');
+            tsKey = keys.ts;
+        }
+        if (keys.o !== undefined) {
+            if (typeof keys.o !== 'string') throw new Error('lite-charts: createCandlestickChart `keys.o` must be a string');
+            oKey = keys.o;
+        }
+        if (keys.h !== undefined) {
+            if (typeof keys.h !== 'string') throw new Error('lite-charts: createCandlestickChart `keys.h` must be a string');
+            hKey = keys.h;
+        }
+        if (keys.l !== undefined) {
+            if (typeof keys.l !== 'string') throw new Error('lite-charts: createCandlestickChart `keys.l` must be a string');
+            lKey = keys.l;
+        }
+        if (keys.c !== undefined) {
+            if (typeof keys.c !== 'string') throw new Error('lite-charts: createCandlestickChart `keys.c` must be a string');
+            cKey = keys.c;
+        }
+    }
+    // bodyRatio: == null gated first (+null === 0 is a finite ratio, not "unset").
+    let bodyRatio = 0.7;
+    if (config.bodyRatio != null) {
+        const br = +config.bodyRatio;
+        if (!Number.isFinite(br) || br <= 0 || br > 1) {
+            throw new Error('lite-charts: createCandlestickChart `bodyRatio` must be a finite number in (0, 1]');
+        }
+        bodyRatio = br;
+    }
+    // Colors: raw hex defaults, both-theme-safe. Junk falls back silently (C5);
+    // wick null means "per-candle body color" (resolved in the draw pass).
+    const up = typeof config.up === 'string' ? config.up : '#16a34a';
+    const down = typeof config.down === 'string' ? config.down : '#dc2626';
+    const wick = typeof config.wick === 'string' ? config.wick : null;
+    return {
+        tsKey,
+        oAcc: buildRawAccessor(oKey),
+        hAcc: buildRawAccessor(hKey),
+        lAcc: buildRawAccessor(lKey),
+        cAcc: buildRawAccessor(cKey),
+        up,
+        down,
+        wick,
+        bodyRatio,
+    };
+};
+
+// buildXAccessor hook: the RAW ts accessor. The factory forces `config.x` to the
+// resolved ts key, so the kernel builds this on the right field; extract gates a
+// per-row null ts before coercing (Date -> getTime, else +raw).
+const _candleBuildXAccessor = (xKey) => buildRawAccessor(xKey);
+
+// Cold extraction (data change only; runs under an effect -- surfaces faults via
+// ctx.candleError, never throws). AoS only. Fills xs=ts, ys=closes (kernel
+// services see a well-formed single-value series), os/hs/ls/cs domain buffers;
+// y-extent covers wicks (min(l)..max(h)); medianDt = median adjacent ts delta.
+const _extractCandleData = (state, data, xAcc, /*yAcc*/_y, ctx) => {
+    ctx.candleError = null;
+    if (!Array.isArray(data)) {
+        // OHLC has no SoA contract -- a non-array shape is a door failure.
+        ctx.candleError = 'lite-charts: createCandlestickChart requires an array of { ts, o, h, l, c } rows';
+        state.n = 0;
+        state.domainXMin = 0; state.domainXMax = 1;
+        state.domainYMin = 0; state.domainYMax = 1;
+        state.medianDt = 0;
+        return;
+    }
+    const n = data.length;
+    const need = n > 0 ? n : 1;
+    state.xs = ensureFloat32(state.xs, need);
+    state.ys = ensureFloat32(state.ys, need);
+    state.os = ensureFloat64(state.os, need);
+    state.hs = ensureFloat64(state.hs, need);
+    state.ls = ensureFloat64(state.ls, need);
+    state.cs = ensureFloat64(state.cs, need);
+    // Raw double timestamps, kept beside the Float32 xs: epoch-ms rounds to
+    // ~131s granularity in Float32, which collapses minute bars -- the PRIMARY
+    // candlestick use case. postProject re-projects pxs from these.
+    state.tss = ensureFloat64(state.tss, need);
+    const opts = ctx.opts;
+    const oAcc = opts.oAcc, hAcc = opts.hAcc, lAcc = opts.lAcc, cAcc = opts.cAcc;
+    const xs = state.xs, ys = state.ys;
+    const os = state.os, hs = state.hs, ls = state.ls, cs = state.cs;
+    const tss = state.tss;
+    let yMin = Infinity, yMax = -Infinity;
+    let prevTs = -Infinity;
+    // Adjacent ts deltas are collected from the RAW doubles here in the loop,
+    // never recomputed from state.xs afterwards: xs is Float32 (house-wide),
+    // and epoch-ms values round to ~131s granularity there -- minute-scale
+    // deltas would quantize to 0. prevTs holds the full double.
+    _candleDtScratch = ensureFloat64(_candleDtScratch, n > 1 ? n - 1 : 1);
+    const sc = _candleDtScratch;
+    let firstTs = 0, lastTs = 0;
+    for (let i = 0; i < n; i++) {
+        const row = data[i];
+        const rts = xAcc(row, i);
+        const ro = oAcc(row, i);
+        const rh = hAcc(row, i);
+        const rl = lAcc(row, i);
+        const rc = cAcc(row, i);
+        // null is not zero: gate EACH field before any unary + coercion.
+        if (rts == null || ro == null || rh == null || rl == null || rc == null) {
+            ctx.candleError = 'lite-charts: candle row ' + i +
+                ' has a null/undefined ts/o/h/l/c field (null is not zero)';
+            state.n = 0;
+            return;
+        }
+        const ts = rts instanceof Date ? rts.getTime() : +rts;
+        const o = +ro, h = +rh, l = +rl, c = +rc;
+        if (!Number.isFinite(ts) || !Number.isFinite(o) || !Number.isFinite(h) ||
+            !Number.isFinite(l) || !Number.isFinite(c)) {
+            ctx.candleError = 'lite-charts: candle row ' + i +
+                ' has a non-finite ts/o/h/l/c value';
+            state.n = 0;
+            return;
+        }
+        // An impossible candle is corrupt data -- fail closed, no per-row skip
+        // (skipping would lie about the series).
+        const bodyHi = o > c ? o : c;
+        const bodyLo = o < c ? o : c;
+        if (!(h >= bodyHi)) {
+            ctx.candleError = 'lite-charts: candle row ' + i + ' has high < max(open, close)';
+            state.n = 0;
+            return;
+        }
+        if (!(l <= bodyLo)) {
+            ctx.candleError = 'lite-charts: candle row ' + i + ' has low > min(open, close)';
+            state.n = 0;
+            return;
+        }
+        if (!(h >= l)) {
+            ctx.candleError = 'lite-charts: candle row ' + i + ' has high < low';
+            state.n = 0;
+            return;
+        }
+        // The bisect hit-test + slot-width math both assume strictly increasing
+        // timestamps; equal ts is refused.
+        if (!(ts > prevTs)) {
+            ctx.candleError = 'lite-charts: candle timestamps must be strictly increasing (row ' + i + ')';
+            state.n = 0;
+            return;
+        }
+        if (i > 0) sc[i - 1] = ts - prevTs;
+        else firstTs = ts;
+        lastTs = ts;
+        prevTs = ts;
+        tss[i] = ts;
+        xs[i] = ts;
+        ys[i] = c;
+        os[i] = o; hs[i] = h; ls[i] = l; cs[i] = c;
+        if (l < yMin) yMin = l;
+        if (h > yMax) yMax = h;
+    }
+    state.n = n;
+    if (n === 0) {
+        state.domainXMin = 0; state.domainXMax = 1;
+        state.domainYMin = 0; state.domainYMax = 1;
+        state.medianDt = 0;
+        return;
+    }
+    // Strictly increasing -> first row is min, last is max. Domain bounds keep
+    // the RAW double ts (state.xs is Float32; epoch-ms rounds there). y-domain
+    // covers wicks.
+    state.domainXMin = firstTs;
+    state.domainXMax = lastTs;
+    state.domainYMin = yMin;
+    state.domainYMax = yMax;
+    // Median adjacent ts delta (domain units, raw doubles collected in the loop
+    // above). median, not min: one missing bar must not halve every body.
+    // n < 2 -> 0 (postProject clamps the slot to 1px).
+    if (n < 2) {
+        state.medianDt = 0;
+    } else {
+        const m = n - 1;
+        sc.subarray(0, m).sort();
+        state.medianDt = sc[(m / 2) | 0];
+    }
+};
+
+// Cold post-projection (data OR scale change, never per frame). Projects each of
+// o/h/l/c through ctx.yScale.map PER VALUE (log correctness by construction --
+// the body height is never derived linearly) and recomputes the pixel slot
+// width from the median ts delta x bodyRatio, clamped [1, 64].
+const _candlePostProject = (states, ctx) => {
+    const yScale = ctx.yScale;
+    const xScale = ctx.xScale;
+    const opts = ctx.opts;
+    for (let si = 0; si < states.length; si++) {
+        const state = states[si];
+        const n = state.n;
+        if (n === 0) continue;
+        state.pos = ensureFloat64(state.pos, n);
+        state.phs = ensureFloat64(state.phs, n);
+        state.pls = ensureFloat64(state.pls, n);
+        state.pcs = ensureFloat64(state.pcs, n);
+        const os = state.os, hs = state.hs, ls = state.ls, cs = state.cs;
+        const pos = state.pos, phs = state.phs, pls = state.pls, pcs = state.pcs;
+        for (let i = 0; i < n; i++) {
+            pos[i] = yScale.map(os[i]);
+            phs[i] = yScale.map(hs[i]);
+            pls[i] = yScale.map(ls[i]);
+            pcs[i] = yScale.map(cs[i]);
+        }
+        // Re-project pxs from the RAW double timestamps. The kernel projection
+        // maps Float32 xs, where 2026 epoch-ms rounds to ~131s -- minute bars
+        // would collapse onto each other. Pixel values fit Float32 fine; only
+        // the domain input needed the precision. Cold (this seam), never per
+        // frame. Crosshair snapping still bisects Float32 xs (house-wide), so
+        // sub-minute hover snap keeps ~131s granularity -- drawing does not.
+        const pxs = state.pxs, tss = state.tss;
+        if (pxs !== null && tss !== null) {
+            for (let i = 0; i < n; i++) pxs[i] = xScale.map(tss[i]);
+        }
+        const x0 = state.domainXMin;
+        const px0 = xScale.map(x0);
+        const px1 = xScale.map(x0 + state.medianDt);
+        let w = Math.abs(px1 - px0) * opts.bodyRatio;
+        if (!(w >= 1)) w = 1;         // NaN / < 1 -> 1px minimum
+        else if (w > 64) w = 64;
+        state.bodyW = w;
+    }
+};
+
+// 0 B/frame draw. Two passes (up then down) so fillStyle/strokeStyle are set
+// once per pass; per candle: cull outside the plot x-range, stroke a 1px-centered
+// wick (h..l), fill the body rect (o..c) with a max(1px) height so a doji still
+// paints a tick (C3). A zero-length wick (h == l) strokes nothing.
+const _makeCandleDraw = (state, refs, plotBoundsBox, /*seriesIdx*/_si, /*totalSeries*/_ts, ctx) => {
+    const opts = ctx.opts;
+    return (c) => {
+        if (!refs.visibleRef.value) return;
+        const n = state.n;
+        if (n === 0) return;
+        const pxs = state.pxs;
+        if (pxs === null) return;
+        const pos = state.pos, phs = state.phs, pls = state.pls, pcs = state.pcs;
+        if (pos === null || phs === null || pls === null || pcs === null) return;
+        const os = state.os, cs = state.cs;
+        const pb = plotBoundsBox;
+        const plotL = pb.x;
+        const plotR = pb.x + pb.w;
+        const bodyW = state.bodyW;
+        const halfW = bodyW * 0.5;
+        const up = opts.up, down = opts.down, wick = opts.wick;
+        for (let pass = 0; pass < 2; pass++) {
+            const upPass = pass === 0;
+            const fill = upPass ? up : down;
+            c.fillStyle = fill;
+            c.strokeStyle = wick !== null ? wick : fill;
+            c.lineWidth = 1;
+            c.beginPath();
+            for (let i = 0; i < n; i++) {
+                if ((cs[i] >= os[i]) !== upPass) continue;
+                const px = pxs[i];
+                if (px !== px) continue;
+                if (px + halfW < plotL || px - halfW > plotR) continue;
+                const po = pos[i], pc = pcs[i];
+                if (po !== po || pc !== pc) continue;
+                const ph = phs[i], pl = pls[i];
+                // Wick accumulates into the current path (stroked once below).
+                // fillRect below emits independently and never disturbs it.
+                if (ph === ph && pl === pl && ph !== pl) {
+                    const wx = (px | 0) + 0.5;
+                    c.moveTo(wx, ph);
+                    c.lineTo(wx, pl);
+                }
+                const top = po < pc ? po : pc;
+                let bh = po < pc ? pc - po : po - pc;
+                if (bh < 1) bh = 1;   // C3: doji / flat body still paints a tick
+                c.fillRect(px - halfW, top, bodyW, bh);
+            }
+            c.stroke();
+        }
+    };
+};
+
+// Tooltip rows for the bisected candle: O / H / L / C. Cold (mousemove rate),
+// so the row pushes are fine.
+const _candleTooltipRows = (s, myIdx, label, color, rows /*, ctx*/) => {
+    rows.push({ color, label: label + ' O', value: formatTooltipValue(s.os[myIdx]) });
+    rows.push({ color, label: label + ' H', value: formatTooltipValue(s.hs[myIdx]) });
+    rows.push({ color, label: label + ' L', value: formatTooltipValue(s.ls[myIdx]) });
+    rows.push({ color, label: label + ' C', value: formatTooltipValue(s.cs[myIdx]) });
+};
+
+const CANDLE_RENDERER = {
+    buildXAccessor: _candleBuildXAccessor,
+    forceXType: null,
+    createXScale: makeLinearScale,
+    initOpts: _candleInitOpts,
+    extractData: _extractCandleData,
+    postProject: _candlePostProject,
+    yDefaults: { nice: true },
+    updateXScale: _updateXScaleLinear,
+    projectToPixels: true,
+    enableXGrid: true,
+    buildXAxis: _buildAxisX,
+    makeDrawFn: _makeCandleDraw,
+    hitTest: _bisectHitTest,
+    drawPerSeriesMarkers: false,
+    lookupRow: _bisectLookupRow,
+    formatTooltipHeader: _numericTooltipHeader,
+    tooltipRows: _candleTooltipRows,
+};
+
+
 // ===========================================================================
 // Base x/y axis chart kernel
 // ===========================================================================
@@ -6134,6 +6515,9 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.18.0: the cluster-outline refresh records a first-build / over-cap
         // fault here, surfaced at mount alongside the others (fourth fault domain).
         outlineError: null,
+        // v1.19.0: candlestick extract records a corrupt-row / door fault here
+        // (runs under an effect, cannot throw), surfaced at mount below.
+        candleError: null,
     };
     // seriesStates is declared above rendererCtx in source order; assign it
     // here now that rendererCtx exists.
@@ -6770,7 +7154,7 @@ const createBaseAxisChart = (config, renderer) => {
         // v1.14.0: a cell-refresh overflow on the first sync run surfaces here
         // too (same unwind), mirroring the log fail-closed door. A later invalid
         // run only skips its cells (markers still draw); this check runs once.
-        const _mountError = _logDomainError || rendererCtx.cellError || rendererCtx.fieldError || rendererCtx.contourError || rendererCtx.outlineError;
+        const _mountError = _logDomainError || rendererCtx.cellError || rendererCtx.fieldError || rendererCtx.contourError || rendererCtx.outlineError || rendererCtx.candleError;
         if (_mountError) {
             for (let i = disposers.length - 1; i >= 0; i--) {
                 try { disposers[i](); } catch (_) { /* best-effort unwind */ }
@@ -7643,11 +8027,15 @@ const createBaseAxisChart = (config, renderer) => {
             if (s.n === 0) continue;
             const myIdx = renderer.lookupRow(s, state.snapIdx, state.snapDomainX, rendererCtx);
             if (myIdx < 0) continue;
-            rows.push({
-                color: seriesRefs[i].colorRef.value,
-                label: normalized[i].name,
-                value: formatTooltipValue(s.ys[myIdx]),
-            });
+            if (renderer.tooltipRows) {
+                renderer.tooltipRows(s, myIdx, normalized[i].name, seriesRefs[i].colorRef.value, rows, rendererCtx);
+            } else {
+                rows.push({
+                    color: seriesRefs[i].colorRef.value,
+                    label: normalized[i].name,
+                    value: formatTooltipValue(s.ys[myIdx]),
+                });
+            }
         }
         if (rows.length === 0) return;
 
@@ -10388,6 +10776,61 @@ export const createDonutChart = (config) =>
 // v1.2.0-alpha.1: scatter is bubble's simpler sibling on the axis kernel.
 // Same kernel, simpler renderer (no size dimension, constant marker).
 export const createScatterChart = (config) => createBaseAxisChart(config, SCATTER_RENDERER);
+
+// ---------------------------------------------------------------------------
+// v1.19.0 -- createCandlestickChart (OHLC on the axis kernel)
+// ---------------------------------------------------------------------------
+//
+// Modeled on createTimeLineChart (time-first + shading reuse) but NOT calling
+// it -- candles run CANDLE_RENDERER, not LINE_RENDERER. The factory forces a
+// time x-scale (candles are time-first BY CONSTRUCTION), defaults panBounds to
+// 'data', reuses the shading engine BY REFERENCE (zero edits -- C6 accepts the
+// createTimeLineChart wording in the shipped engine's error strings), and pins
+// `config.x` to the resolved ts key so the kernel's buildXAccessor + the shading
+// extent scan both read the right timestamp field. Single OHLC stream per chart:
+// a `series` array is refused (comparison overlays are a later minor).
+export const createCandlestickChart = (config) => {
+    if (!config || typeof config !== 'object') {
+        throw new Error('lite-charts: createCandlestickChart requires a config object');
+    }
+    // Single series only -- one OHLC stream per chart.
+    if (Array.isArray(config.series)) {
+        throw new Error('lite-charts: createCandlestickChart takes a single OHLC `data` stream, ' +
+            'not a `series` array');
+    }
+    // Force a time x-scale, preserving any other xScale fields. Fail closed on a
+    // conflicting explicit request (mirrors createTimeLineChart): `type` absent
+    // or 'time' is fine, an explicit other type throws.
+    if (config.xScale && config.xScale.type !== undefined && config.xScale.type !== 'time') {
+        throw new Error('lite-charts: createCandlestickChart forces a time x-scale; ' +
+            'xScale.type must be omitted or \'time\'');
+    }
+    const xScale = config.xScale
+        ? Object.assign({}, config.xScale, { type: 'time' })
+        : { type: 'time' };
+    const panBounds = config.panBounds != null ? config.panBounds : 'data';
+    // Resolve the ts key once (default 'ts'); the kernel builds the x accessor
+    // off `config.x`, and the shading extent scan uses the same key.
+    const tsKey = (config.keys != null && typeof config.keys === 'object' &&
+        typeof config.keys.ts === 'string') ? config.keys.ts : 'ts';
+    // Optional market-hours / weekend shading, wrapped over the user's
+    // annotations. The engine is reused BY REFERENCE, byte-identical to the
+    // createTimeLineChart wiring (its error strings keep that wording -- C6).
+    let annotations = config.annotations;
+    if (config.shading != null && config.shading !== false) {
+        const sh = config.shading;
+        if (sh !== true && sh !== 'weekends' && typeof sh !== 'object') {
+            throw new Error('lite-charts: createCandlestickChart `shading` must be a boolean, ' +
+                '\'weekends\', or a config object { fill? } -- got ' + typeof sh);
+        }
+        const xAccessor = buildRawAccessor(tsKey);
+        const dataAccs = [asAccessor(config.data)];
+        const sessionSpec = _normalizeSessionSpec(sh);
+        annotations = _shadingAnnotationsAcc(sh, config.annotations, dataAccs, xAccessor, sessionSpec);
+    }
+    const merged = Object.assign({}, config, { x: tsKey, xScale, panBounds, annotations });
+    return createBaseAxisChart(merged, CANDLE_RENDERER);
+};
 
 // ===========================================================================
 // createBaseGridChart -- 2D categorical grid kernel (v1.2.0-alpha.3)

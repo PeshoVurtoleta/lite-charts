@@ -4,14 +4,23 @@ Local working scratch. **Not shipped** -- `briefs/` is absent from
 package.json `files[]`, so nothing here reaches npm. Each brief is a
 self-contained plan for one future `cd LiteCharts && claude` session.
 
-Current state: **v1.18.0 release in progress** (cluster-outlines layer on
-scatter, brief #14 executed 2026-09-05 -- version sites synced, npm publish
-pending). Last npm-verified publish: **v1.17.0** (contour/isoline layer on the scatter
+Current state: **v1.19.0 release pending** -- candlestick/OHLC chart, brief
+#16 executed 2026-09-06 (`createCandlestickChart`, tenth axis-kernel type
+via CANDLE_RENDERER; forced time x, median slot, RAW-double ts path over
+the Float32 xs pools, whole-series fail-closed OHLC, per-value log
+projection, tooltipRows hook, shading engine by reference; 514/514 + A25 +
+5 reversion proofs, reviewer APPROVED zero blockers). Awaiting /release
+1.19.0 + user publish. Last npm-verified publish: **v1.18.0** (npm-view
+2026-09-06, latest=1.18.0 -- cluster-outlines layer on scatter, brief #14
+executed 2026-09-05 -- `outlines: { index, groupKey, alpha?, ... }`, fourth
+injection rung + fourth fault domain, per-group hull/alpha-shape vs the
+published lite-delaunay 1.4.0, 503/503 + A24 + 5 reversion proofs).
+Prior: v1.17.0 (contour/isoline layer on the scatter
 field raster -- `field.contours: { levels, color?, width?, dash? }`, exact
 TIN sweep via triangleCount/triangleVertices + edge lerp, locate/barycentric
 unconsumed, third independent fault domain with field-domain skip gate;
 brief #13, published + npm-view-verified 2026-09-05; demo "weather map"
-field+contour panel added same day, demo-only). Prior: v1.16.0 (injected
+field+contour panel added same day, demo-only). Earlier: v1.16.0 (injected
 field-raster layer on scatter --
 `field: { index, value, ... }` consuming published lite-delaunay 1.3.0
 `createFieldIndex`; ONE sampleField per cold postProject refresh, NO row flip,
@@ -46,8 +55,8 @@ The forward plan in `../ROADMAP.md` points here.
 | ~~11~~ | ~~`charts-gl-rescue.md`~~ | **EXECUTED -- 0.1.0 SHIPPED 2026-09-05** (published + npm-view-verified, card synced) | S-M | Gate the July orphan and publish: git init, reprove the 117 mock-GL tests, build the missing torture tiers (T0/T6/T7/T9 -- the one real engineering task; zero-GC claim currently UNPROVEN), fix the version lies (llms.txt "v1.0.0", stale sibling note, no VERSION const), blueprint README + missing ROADMAP.md + ASCII scrub. No feature work; the lite-gl-migration question is explicitly deferred to 1.0.0. Written 2026-09-03; amended 2026-09-05 with the user's demo verdict ("bad and outdated") -- demo refresh now IN scope as T7 (pinned importmap, real version tag, a 100k+ stress scene w/ measured fps; grounding in the brief). Confirmed as the NEXT session. AS-EXECUTED: 118 tests, tiers T0/T6/T7/T9 + BREAK control, ONE real leak found + fixed (unmount never disposed the 4 handle signals -- lite-signal reclaims only on explicit dispose), truth pass incl. dangling `types` refs removed, demo scene 05 measured the instanced-quad fill wall (1M @ 2px sub-50fps at dpr 2) -- the grounding that feeds #15. |
 | 15 | `charts-gl-1.0.0-core.md` | decision, lite-charts-gl 1.0.0 -- EXECUTES IN LiteChartsGl AFTER the user records its DECISION block | M-L | The D5 gate #11 deferred, now decidable: lite-gl 2.0.0's real surface read side by side with the 0.1.0 internals (2026-09-05). Grounded on three defects 0.1.0 measured or carries latently -- the 1M fill wall (observed), float32 epoch-ms collapse (ULP 131,072 ms; latent, demos use synthetic ranges), zero context-loss handling -- ALL pre-solved + torture-gated in lite-gl (POINT_HI camera, sink-owned restore, zero-alloc pick). Mapping: scatter -> createPointHiSink, heatmap -> createQuadSink (live setValues lands), line STAYS hairline (no LINE_HI exists). Costs disclosed: x5 scatter memory, lite-raf peer baggage, pointShape parity. Recommendation option 1 at sinks-only depth, falsifiable by a T1 spike A/B with a written 2b bail-out; both lanes carry full tasks + gates. |
 | 12 | `field-raster.md` | feature, v1.16.0 -- **SHIPPED 2026-09-05, live on npm (verified)** | M | THE field consumer brief the dormancy protocol anticipated: `field: { index }` on scatter, third rung of the injection ladder, consuming the published lite-delaunay 1.3.0 `createFieldIndex` (locked contract + perf grounding recorded above). sampleField-only batching (never hot interpolate), postProject cold lifecycle per the cells precedent; as-executed: NO row flip (by0 = plotTop already lands row 0 on top -- orientation proven by fixture + reversion), independent cells/field fault domains, reviewer's coverage-only REJECTED discharged by qa (FR1-9 + A22 + 5 reversions). Peer bump ^1.3.0. |
-| 14 | `cluster-outlines.md` | feature, v1.18.0 -- **EXECUTED 2026-09-05** vs the published delaunay 1.4.0 (503/503, torture A24, five reversion proofs, reviewer APPROVED zero blockers; zero contract deviations -- see the brief's AS-EXECUTED block; awaiting /release + publish) | M | Fourth injection rung: per-group convex-hull / alpha-shape outlines on scatter (`outlines: { index, groupKey, alpha? }`). THIS brief carries the consumer contract 1.4.0 is built against (the 1.2.0/1.3.0 protocol): `convexHull(outIndices)->count` + `alphaShape(alpha, outIndices, outLoopEnds)->loopCount`, ORIGINAL indices, CCW, multi-loop via exclusive end-offsets, zero-alloc, documented sizing bound, alpha finite >0 in pixel units. alphaShape is the wake trigger -- convexHull alone is caller-computable. Relay the contract section to the lite-delaunay session; execute charts-side only against the PUBLISHED 1.4.0. |
-| 16 | `candlestick.md` | feature, v1.19.0 candidate -- DRAFT 2026-09-05 (Branch B session; top external-review absorption) | M-L | Tenth axis-kernel type: `createCandlestickChart` as a new CANDLE_RENDERER hook object (no spread from siblings -- the closure-pinning lesson). Time-continuous x (C1 lean; index-compact deferred), median-ts-delta slot width (C2), fail-closed OHLC row validation h/l vs body + strictly-increasing ts (C4), raw hex up/down styles (C5), shading-engine reuse with time-line byte-identical (C6), volume pane OUT (C7, named trigger). Tree-shake proof mandatory. |
+| 14 | `cluster-outlines.md` | feature, v1.18.0 -- **EXECUTED 2026-09-05** vs the published delaunay 1.4.0 (503/503, torture A24, five reversion proofs, reviewer APPROVED zero blockers; zero contract deviations -- see the brief's AS-EXECUTED block; SHIPPED, npm-verified 2026-09-06) | M | Fourth injection rung: per-group convex-hull / alpha-shape outlines on scatter (`outlines: { index, groupKey, alpha? }`). THIS brief carries the consumer contract 1.4.0 is built against (the 1.2.0/1.3.0 protocol): `convexHull(outIndices)->count` + `alphaShape(alpha, outIndices, outLoopEnds)->loopCount`, ORIGINAL indices, CCW, multi-loop via exclusive end-offsets, zero-alloc, documented sizing bound, alpha finite >0 in pixel units. alphaShape is the wake trigger -- convexHull alone is caller-computable. Relay the contract section to the lite-delaunay session; execute charts-side only against the PUBLISHED 1.4.0. |
+| 16 | `candlestick.md` | feature -- **EXECUTED 2026-09-06 as v1.19.0** (see the AS-EXECUTED block: Float32-ts collapse + signal-data door caught in qa; C4 amended to the error-slot model; C6 settled by-reference) | M-L | Tenth axis-kernel type: `createCandlestickChart` as a new CANDLE_RENDERER hook object (no spread from siblings -- the closure-pinning lesson). Time-continuous x (C1 lean; index-compact deferred), median-ts-delta slot width (C2), fail-closed OHLC row validation h/l vs body + strictly-increasing ts (C4), raw hex up/down styles (C5), shading-engine reuse with time-line byte-identical (C6), volume pane OUT (C7, named trigger). Tree-shake proof mandatory. |
 | 13 | `contour-isolines.md` | feature, v1.17.0 -- SHIPPED 2026-09-05 (npm-view-verified) | M | The v1.16.0 out-of-scope follow-on: iso-value lines over the field raster, computed cold on the same postProject refresh. KEY grounding: exact TIN isolines need ONLY triangleCount+triangleVertices (+ caller edge-lerp over pxs/pys/zs) -- locate/barycentric stay unconsumed; NO delaunay change, does NOT trigger their 1.4.0. Planner owns: TIN sweep vs marching-squares-over-fieldGrid; nested field.contours config; fault-domain placement (C4). Oracle: planar field -> segments exactly on the mapped line. |
 | 10 | `voronoi-cells.md` | feature, v1.14.0 -- EXECUTED 2026-09-03 (SHIPPED, live on npm) | M | Fat hover (`hitTolerance: 'nearest'` -- charts-side ONLY, rides the existing findNearest k=1) + injected Voronoi cell tessellation layer on scatter (`cells: { index }` per the spatialIndex precedent). Carried THE CONSUMER CONTRACT for delaunay's `createCellIndex`; delaunay 1.2.0 published 2026-09-03, charts built + gated against it (463/463, A20, 5 reversion proofs). One as-executed deviation recorded in the brief: postProject seam, not extract-time. |
 | ~~9~~ | ~~`overnight-holidays.md`~~ | **SHIPPED v1.13.0** | S-M | Overnight sessions (midnight-split normalization -- the sweep survived byte-structurally unchanged, planner falsified the brief's synth site into _normalizeSessionSpec) + holiday calendar (UTC-day-skip, gap fusion). qa added the Saturday-wrap rotate fixture the planner fixtures missed; four reversions proven. 453 tests + A19. Kept for reference. |
@@ -56,10 +65,10 @@ The forward plan in `../ROADMAP.md` points here.
 PLANNED ORDER (2026-09-02, user-confirmed): ~~#7 market-hours -> v1.11.0~~
 SHIPPED; ~~#5 legend-virtualization -> v1.12.0~~ SHIPPED. Both feed the
 upcoming back-office build (time-series KPI panel + many-series dashboards).
-Remaining: #14 (v1.18.0 cluster outlines -- FULLY UNBLOCKED 2026-09-05,
-next charts session executes it against the published delaunay 1.4.0),
-#16 (v1.19.0 candlestick, drafted 2026-09-05, needs its planner pass
-after #14 ships), #15 (the charts-gl 1.0.0 render-core decision --
+~~#14 cluster outlines -> v1.18.0~~ SHIPPED (published + verified
+2026-09-06); ~~#16 candlestick -> v1.19.0~~ EXECUTED 2026-09-06 (release
+pending).
+Remaining: #15 (the charts-gl 1.0.0 render-core decision --
 awaiting the user's DECISION record; item 6's fate is decided there),
 and the
 v1.13.x candidates in ../ROADMAP.md (horizontal legend virt -- charts-side

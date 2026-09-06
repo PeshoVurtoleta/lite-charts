@@ -160,3 +160,77 @@ derived-candle math (compute upstream); dual/secondary y-axis;
 multi-pane layout; drawing tools; ANY change to shipped renderers
 beyond the C6 shading wiring -- scope creep on the kernel is the
 reviewer's to refuse.
+
+---
+
+## AS-EXECUTED (2026-09-06, shipped as v1.19.0)
+
+Pipeline: planner (2 attempts -- first died at its turn limit on grounding;
+re-run with a pre-grounded map) -> coder (hit the 40-turn limit after
+T1-T13; I finished T15 + fixes) -> reviewer APPROVED zero blockers (R1-R8
+all PASS; second attempt, with the diff pre-extracted to one file) -> qa
+mine (CS1-CS10, 503 -> 514; five reversion proofs R1-R5). Gate: 514/514,
+torture ok incl. A25, ASCII clean.
+
+Planner rulings vs the brief (all held):
+- C1 time-continuous CONFIRMED; index-compact deferred, trigger named in
+  ROADMAP.
+- C4 AMENDED: extract runs under an effect, so corrupt rows set
+  ctx.candleError + n=0 (never throw mid-effect); the mount door surfaces
+  it (the v1.14/16/18 error-slot precedent). Post-mount corruption sheds;
+  healthy re-swap recovers (candleError cleared per extract).
+- C6 settled as reuse BY REFERENCE, zero engine edits -- time-line
+  byte-identity is proof by construction; the engine's error strings keep
+  the createTimeLineChart wording (documented in llms.txt). TS11/TS20
+  source pins re-pinned 1 -> 2 call sites.
+- Tooltip body: no hook existed; added optional renderer.tooltipRows
+  guarded like postExtract/postProject -- the nine shipped renderers keep
+  their single-row path byte-identical (CS8 asserts the parity).
+
+DEFECTS CAUGHT AFTER THE CODER (both mine to find, both load-bearing):
+1. FLOAT32 TIMESTAMP COLLAPSE -- the kernel projects pxs from Float32
+   state.xs; 2026 epoch-ms rounds to ~131s there, so minute bars (the
+   PRIMARY candlestick case) collapsed onto each other (three candles
+   drew as two at one x). Fix: extract keeps RAW doubles in state.tss,
+   computes medianDt + x-domain bounds from them, and _candlePostProject
+   re-projects pxs from tss (cold). Crosshair snap still bisects Float32
+   xs -- house-wide behavior, documented. Reversion R5 (drop the
+   re-projection) reddens CS3+CS5. The coder's original medianDt also
+   read Float32 xs deltas -- fixed pre-review.
+2. SIGNAL DATA REFUSED AT THE DOOR -- _candleInitOpts demanded
+   Array.isArray(config.data), rejecting accessor/signal data (a
+   first-class kernel service). Door now admits functions; extract
+   validates every yield (CS2b).
+
+QA LESSONS:
+- The min-vs-median discriminator is an INSERTED off-schedule bar (min
+  halves, median holds), not a MISSING bar (min == median there). CS4's
+  first fixture proved nothing against sc[0]; reversion testing caught my
+  own test again (the TS22/V4 class, third instance).
+- Rejected-mount node-delta checks must destroy() first: construction
+  owns signals until destroy; the C0-unwind claim is about the mount's
+  OWN allocations.
+- Shading parity across factories is sub-pixel, not string-identical:
+  the candle x-domain keeps raw doubles while line domains derive from
+  Float32 xs -- the bands legally differ by ~0.005px (candle side more
+  accurate), and SVG clip ids are a global counter.
+- Reviewer/planner agents die on open-ended reading: pre-extract the
+  diff to one file / pre-ground the map, and they finish inside their
+  turn budgets.
+
+Reversion ledger (each restored byte-for-byte, sha dbd9665e...):
+R1 median -> sc[0]: CS4 red (2). R2 log per-value -> wick-interpolated
+body: CS5 red. R3 null-gate dropped: CS2 red (l:null coerces to a
+"valid" 0). R4 mount-door term dropped: CS2 red. R5 pxs re-projection
+dropped: CS3+CS5 red (4).
+
+Coverage: CS1 doors (12-case matrix, zero node delta); CS2 corrupt-mount
+matrix (11 cases + destroy-after); CS2b corrupt-swap shed/recover; CS3
+doji/flat op-log; CS4 median (missing bar + inserted half-spacing bar);
+CS5 manual-log oracle at 0.5px; CS6 shading parity vs time-line at
+0.02px; CS7 slot doubles on half-domain, stable across plain redraws;
+CS8 O/H/L/C rows + hook-absent line parity; CS9 SVG body/wick counts by
+fill; CS10 source pins (one def, one consumer, one guarded hook call).
+Torture A25: 208-write storm 0 nodes; 1k redraw within 2 B/op of the
+time-line branch-parity control; 10k <= 16 B/op; 50x create/destroy
+zero retention. Canary-proven to execute.
