@@ -808,8 +808,9 @@ package); Sankey / treemap / funnel (graph + hierarchy layouts, wrong
 library). The rest are REAL gaps, now candidates -- no briefs yet, each
 needs one before any cut:
 
-- **Candlestick / OHLC** -- EXECUTED as v1.19.0 (brief #16,
-  `briefs/candlestick.md`, incl. AS-EXECUTED). Deferred WITH NAMED
+- **Candlestick / OHLC** -- SHIPPED as v1.19.0 (published + npm-verified
+  2026-09-06; brief #16, `briefs/candlestick.md`, incl. AS-EXECUTED).
+  Deferred WITH NAMED
   TRIGGERS: volume pane/overlay (trigger: a consumer asking for a volume
   pane or volume-at-price); index-compact x -- gaps collapsed, the
   trading-UI slot convention (trigger: a consumer for whom true-time gaps
@@ -839,6 +840,79 @@ needs one before any cut:
   enter/update/exit. Deferred with a named trigger: the tension with
   the 0 B/frame identity is real, so this waits for a consumer who
   needs it, not for completeness.
+
+### Queue (2026-09-06, user-confirmed order)
+
+Post-v1.19.0 the user confirmed the remaining candidates and this order.
+Each still needs a grounded brief before its cut (only #1 has one so far,
+`briefs/brush-refinements.md`); descriptions for #2-#7 live in the absorbed
+list above.
+
+1. **Brush v2** (v1.20.0 candidate, brief WRITTEN) -- three cuts on the
+   brush surface plus one fix: configurable brush modifier (`shift` is
+   hardcoded at the two gesture gates, Charts.js:7472/:7629); brush IDs
+   across all visible series (`_commitBrush` reads `seriesStates[0]`
+   only, :7677/:7691); horizontal-bar band multi-select (the commit walks
+   a contiguous `bandMin..bandMax` span, :7665-7675 -- non-contiguous
+   band sets are inexpressible); and a FAIL-CLOSED FIX -- the vertical
+   `brushFacade.set` coerces `+v.xMin` with no `== null` gate and no
+   finite check (:6810-6816), so `setBrush({xMin: null})` silently
+   becomes 0 (the horizontal branch was fixed in v1.9.0; the vertical
+   never was).
+2. **Error bars / confidence bands** -- first statistical series cut.
+3. **Axis titles + tick-format callback** (secondary y-axis stays a
+   separate, bigger candidate).
+4. **Chart chrome** -- title / subtitle / caption in the reactive margin
+   system.
+5. **Linked-chart helpers** -- packaged linked brush / view sync.
+6. **A11y beyond the legend** -- crosshair/tooltip ARIA live region.
+7. **Data labels on bars/points**.
+
+Parallel, not in this queue: brief #15 (the lite-charts-gl 1.0.0
+render-core decision) executes in LiteChartsGl once the user records its
+DECISION block. Deferred-with-trigger items (volume pane, index-compact x,
+candlestick variants, low-GC transitions) stay out until their triggers
+fire.
+
+### External input -- lite-headless composition (2026-09-08)
+
+Non-binding note from the `@zakkster/lite-headless` side; no lite-charts code
+change is proposed. Recorded here so queue items #5 and #6 can be weighed against
+work that now exists OUTSIDE this package.
+
+lite-charts is already an ideal substrate for a headless/DOM overlay layer: the
+signal facades (`crosshair`, `seriesVisibility`, `view`, `plotBounds`, `brush`)
+plus scale projection (`xScale.map`/`invert` in CSS pixels) are exactly the seams
+an external UI needs, and `refreshTheme()` lets a themed DOM layer re-color the
+canvas on a light/dark switch. The "signals make bindings a consumer-side wrapper,
+not a package" stance holds up -- a wrapper composes cleanly on shipped APIs.
+
+lite-headless now documents that wrapper as a recipe family (in the lite-headless
+repo, `docs/recipes/lite-charts-*.md`), each verified against lite-charts v1.19.0:
+
+- **lite-charts-tooltip** -- a DOM tooltip via lite-headless `hover-card` on a
+  `lite-floating` `virtualRef`, driven off the `crosshair` signal. Adds the
+  collision-aware (flip/shift) DOM tooltip the canvas tooltip does not attempt.
+- **lite-charts-accessible-shell** -- the consumer-side realization of **queue #6
+  (a11y beyond the legend)**: canvas `role`/`aria-label`, keyboard exploration
+  that drives `moveCrosshair`, an `aria-live` announcer off `crosshair`, and a
+  data-table alternative (via lite-table). This lands #6 without lite-charts
+  shipping any of it -- #6 could be satisfied by REFERENCE to this recipe.
+- **lite-charts-legend** -- a `checkbox-group` bound to `seriesVisibility`.
+- **lite-charts-time-range** -- a datepicker driving `setView`, plus
+  `refreshTheme()` on a theme toggle. Related to **queue #5 (linked-chart
+  helpers)**: the linked brush/view sync is an `effect()` over the existing
+  facades, which this recipe pattern covers consumer-side.
+
+The one thing a headless layer CANNOT supply from outside, and the only place a
+small lite-charts addition would materially help integration: a public pick /
+hit-test for non-line marks (scatter / bar / pie) returning `{series, index}` at a
+client point, and/or a per-point select event. `crosshair` already covers
+line/time (x-snap on the primary series); the other kernels expose no public
+"what datum is at (x, y)?" (the spatial index is injected but internal, and
+selection is range-only via `brush`). If per-point interaction on those marks is
+ever wanted, that API is the enabler -- but it is a lite-charts decision, out of
+scope for the external layer. No brief is proposed here; flagged for your call.
 
 ### Companion track -- `@zakkster/lite-charts-gl` (separate package)
 
