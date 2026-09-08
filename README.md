@@ -17,15 +17,30 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.19.0 -- candlestick / OHLC chart (minor).
-`createCandlestickChart({ data, keys?, up?, down?, wick?, bodyRatio?,
-shading?, ... })` is the TENTH chart type: one candle per
-`{ ts, o, h, l, c }` row on the axis kernel -- forced time x-axis, median
-slot width, per-value log-safe price projection, fail-closed OHLC
-validation, O/H/L/C tooltip rows, and the market-hours shading engine
-reused by reference. Draws at 0 B/frame; a bundle importing only
-`createLineChart` gains nothing. **514/514 tests pass** plus a
-torture/stress gate (`npm run torture`).
+**Status:** v1.20.0 -- brush v2 (minor). A configurable
+`brushModifier` (`'shift' | 'alt' | 'ctrl' | 'meta'`); every gesture
+commit now carries `idsBySeries`, a per-series row-index snapshot beside
+the primary `ids`; the horizontal-bar brush gains band multi-select
+(modifier+click toggles a band, non-contiguous `bands`, hull
+`bandMin`/`bandMax`, one overlay rect per contiguous run); and the
+vertical `setBrush` null-bound path is now fail-closed. Draws at 0 B/frame.
+**543/543 tests pass** plus a torture/stress gate (`npm run torture`).
+
+**New in v1.20.0:**
+- **Brush v2.** `brushModifier` selects the gesture modifier (default
+  `'shift'`, resolved cold to one predicate; an unknown value throws at
+  construction). Each gesture-driven commit gains `idsBySeries` -- a
+  commit-time per-series snapshot, one slot per series, `null` for a
+  hidden or empty series (visibility read untracked, never recomputed on a
+  later toggle); the primary `ids` is unchanged. The horizontal-bar brush
+  gains a band multi-select: a modifier+click TOGGLES the clicked band
+  in/out (modifier+drag still replaces with a contiguous range), toggling
+  the last band off clears; `bands` may be NON-contiguous, `bandMin` /
+  `bandMax` are the HULL, and the overlay draws one rect per contiguous
+  run (byte-identical to the one-rect path for a single run).
+  `setBrush({ bands })` validates each key against the categories and
+  re-derives the hull. Fixed: `setBrush({ xMin: null })` on a vertical
+  brush now throws instead of coercing to bound 0.
 
 **New in v1.19.0:**
 - **Candlestick / OHLC chart.** `createCandlestickChart(config)` -- wick
@@ -1465,16 +1480,22 @@ chart.setBrush({ ... });
 chart.clearBrush();
 ```
 
-The selection shape is `{ xMin, xMax, yMin, yMax, ids }`:
+The selection shape is `{ xMin, xMax, yMin, yMax, ids, idsBySeries }`:
 
 - `xMin/xMax/yMin/yMax` are data-space bounds.
 - `ids` is an array of indices into the **primary series** (the
   first series in `series[]`, or the single-series `data`). It's
   freshly allocated each time the user releases a brush gesture.
-- Programmatic `setBrush()` does NOT recompute `ids` -- if you set
-  the brush imperatively, `ids` stays as whatever you pass (or null).
-  Pass your own array if you want them; or compute from the bounds
-  yourself.
+- `idsBySeries` (v1.20.0) is the per-series snapshot, one entry per
+  series; `null` for a hidden or empty series. See the brush caveats.
+- Programmatic `setBrush()` does NOT recompute `ids` or `idsBySeries`
+  -- if you set the brush imperatively, both stay as whatever you pass
+  (or null). Pass your own arrays if you want them; or compute from the
+  bounds yourself.
+- Fail-closed bounds (v1.20.0): `setBrush({ xMin: null })` (or any of
+  `xMax` / `yMin` / `yMax` set to `null` or a non-finite value) now
+  THROWS -- each bound is `== null`-gated then `Number.isFinite`-checked.
+  Before 1.20 a `null` bound silently anchored at 0.
 
 `setBrush` / `clearBrush` throw if `brush: true` was not in config --
 the throw is intentional, it tells the caller to opt in.
@@ -1505,16 +1526,31 @@ in user code if needed for very large datasets.
 
 ### Modifier routing -- coexists with pan/zoom
 
-Bare drag = pan (when `pan: true`). Shift+drag = brush (when
+Bare drag = pan (when `pan: true`). Modifier+drag = brush (when
 `brush: true`). Wheel = zoom (when `zoom: true`, regardless of
-modifier). The pointerdown handler checks `ev.shiftKey` and routes
-the gesture accordingly; pan exits early when shift is held AND
-brush is enabled. If brush is NOT enabled, the modifier is ignored
-and shift+drag falls through to pan.
+modifier). The pointerdown handler checks the resolved modifier and
+routes the gesture accordingly; pan exits early when the modifier is
+held AND brush is enabled. If brush is NOT enabled, the modifier is
+ignored and modifier+drag falls through to pan.
 
-Click-to-clear: a shift+click with total drag distance under 3
-pixels is treated as a click and clears the existing brush. This
-matches d3-brush's default.
+**`brushModifier`** (v1.20.0) picks the modifier: `'shift'` (default),
+`'alt'`, `'ctrl'`, or `'meta'`. Any other value throws at construction.
+The property name is resolved ONCE to a predicate at build time, so the
+hot pointerdown gate is a single bracket read -- no per-event string
+compare. Default `'shift'` is byte-identical to the pre-1.20 behavior.
+
+```js
+createLineChart({ brush: true, brushModifier: 'alt' });
+```
+
+Platform notes (docs only): on macOS `alt` is the Option key; `ctrl`+drag
+raises the native context menu on some platforms, so `'ctrl'` is best
+paired with a `contextmenu` `preventDefault` in your own code.
+
+Click-to-clear / toggle: a modifier+click with total drag distance under
+3 pixels is treated as a click. On the vertical / line / scatter brush it
+CLEARS the existing selection (matches d3-brush's default). On the
+horizontal-bar brush it TOGGLES the clicked band (see below).
 
 ### Visual
 
@@ -1529,14 +1565,19 @@ accent outline. Override via `brushStyle`:
 | `lineDash` | `[4, 4]` | Pass `[]` for a solid outline. |
 | `lineWidth` | `1` | Stroke width. |
 
-### Caveats (alpha.3)
+### Caveats
 
-- **IDs from primary series only.** Multi-series filtering is up to
-  the caller -- the brush bounds are the universal hook; compute
-  your own per-series indices from them.
-- **Fixed modifier.** alpha.3 ships with shift as the modifier; a
-  configurable modifier is a follow-up.
-- **No bar / polar / radar / heatmap.** Brushing is on axis-kernel
+- **Primary `ids` are primary-series only.** The top-level `ids` stays
+  the primary series (idx 0), visibility-blind -- the brush bounds are
+  the universal hook.
+- **`idsBySeries`** (v1.20.0) is the per-series answer: a gesture commit
+  emits `idsBySeries[i]` for every series, `null` when that series is
+  empty (`n === 0`) or hidden (`seriesVisibility[i]` false at commit).
+  It is a COMMIT-TIME snapshot -- read untracked, never recomputed when a
+  series is toggled after the commit. A programmatic `setBrush` does NOT
+  recompute it: `idsBySeries` echoes the array you pass (or `null`), the
+  same caller-verbatim asymmetry as `ids`.
+- **No polar / radar / heatmap.** Brushing is on axis-kernel
   charts only. Different interaction models -- pie has no x/y
   rect to select; heatmap selection would be cell-based, not
   bounds-based.
@@ -1684,16 +1725,28 @@ chart.mount(document.querySelector('#bars'));
 // after a shift-drag, read the selection (chart.brush() is a tracked accessor):
 // chart.brush() -> {
 //   valueMin, valueMax,      // value bounds (from yScale.invert of the X extent)
-//   bandMin, bandMax,        // inclusive band-index span (from the Y extent)
-//   bands,                   // the selected category keys, e.g. ['Mon','Tue']
+//   bandMin, bandMax,        // inclusive band-index HULL (min/max of `bands`)
+//   bands,                   // selected category keys, may be NON-contiguous
 //   ids,                     // primary-series row indices inside the selection
+//   idsBySeries,             // (v1.20.0) per-series snapshot, null per hidden/empty
 // }
 ```
 
 - **A distinct payload.** The vertical / line / scatter brush keeps its
-  `{ xMin, xMax, yMin, yMax, ids }` shape; the horizontal bar emits
-  `{ valueMin, valueMax, bandMin, bandMax, bands, ids }`. `chart.brush()` returns
-  whichever matches the chart, and `setBrush` validates the matching shape.
+  `{ xMin, xMax, yMin, yMax, ids, idsBySeries }` shape; the horizontal bar emits
+  `{ valueMin, valueMax, bandMin, bandMax, bands, ids, idsBySeries }`.
+  `chart.brush()` returns whichever matches the chart, and `setBrush` validates
+  the matching shape.
+- **Band multi-select (v1.20.0).** A modifier+click toggles the clicked band
+  in or out of the current selection: toggling the last selected band off clears
+  to `null`; a fresh click on an empty selection selects that band across the
+  full value span; an existing drag selection's value range is preserved when a
+  band is toggled. `bands` is therefore free to be NON-contiguous, `bandMin` /
+  `bandMax` report only the HULL (its min/max band index), and the overlay draws
+  one rect per contiguous run of selected bands (byte-identical to the single
+  -rect path when the run count is 1). `setBrush({ bands })` validates every
+  entry against the current category keys -- an unknown key or a `null` entry
+  throws -- and re-derives the hull from the validated set.
 - **The overlay tracks band edges.** The selection rect spans the value pixels
   and the full band rows it covers (`leftEdge(bandMin)` to `leftEdge(bandMax) +
   bandWidth`), so it aligns with the drawn bars rather than their centers.
@@ -2102,9 +2155,10 @@ forward plan and the development history that led here. Headlines:
 | **v1.15.0** | Horizontal legend virtualization + early-close holidays + an earlier fail-closed point for bad legend config. A virtualized legend at `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling along X: supply `legend.width` + `legend.itemWidth` (positive integers) and the adapter receives `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. Size keys are orientation-exclusive -- `height`/`itemHeight` on top/bottom, or `width`/`itemWidth` on left/right, throw at construction; the left/right adapter opts + DOM path stay byte-identical. `shading.holidays` entries may be `{ ts, closeMinutes }` (early close): every session that UTC day clamps to close at `closeMinutes` (1..1439) and the trailing closed time fuses forward like a whole-day holiday's band; whole-day (number) entries are byte-identical. Early-close doors that throw at construction: object without `ts`; bad `ts`; `closeMinutes` null/non-integer/outside 1..1439; a duplicate UTC day across all entries; an early close on a weekday with no open session; an early close on a day carrying an overnight evening session. The clamp is one cold-path line in `_sessionBands` (`cutMs = Infinity` on non-early days). Legend position/container validation + `virtualize` normalization are hoisted above the first owned signal in `createBaseAxisChart`, so bad legend config throws with nothing allocated; when both chart-type options and legend are invalid, the `initOpts` error wins. 10 new tests (463->473) + torture A21 (horizontal scroll storm vs a vertical-storm branch-parity control, measured delta 0.000 B/op); five reversion proofs. |
 | **v1.16.0** | Injected field-raster layer on `createScatterChart`. `field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }` rasterizes the primary series' per-point scalar into a smooth barycentric-interpolated background heatmap -- the third injection rung after `spatialIndex` and `cells`. The triangulated mesh + serpentine grid sampler come from an injected `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0`, `createFieldIndex(N)`; lite-charts imports nothing), built over pixel-space points and re-sampled cold on every data/scale change on the same `postProject` seam as cells, so it stays anisotropy-correct under pan/zoom. One `sampleField` per refresh fills a pooled grow-only grid; per-cell CSS colors are precomputed cold so the draw walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped) at 0 B/frame; `exportSVG` emits one `<rect>` per finite cell. `gridW`/`gridH` integers in `[8,256]` (default 64x48); `colors` `[low,high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v,vMin,vMax)` with extents over the FINITE cells only; `opacity` default 0.5. Independent fault domain from `cells` (own `try/catch`, own `ctx` error slot OR-ed into the mount door, own handle disposal); drawn UNDER the cells node. `interpolate` is never called. Construction throws before any owned signal: non-object `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps `gridW`/`gridH` (`== null` gated before any `+`). A scatter with no `field` is byte-identical. |
 | **v1.17.0** | Contour/isoline layer over the field raster. `field.contours: { levels: count \| number[], color?, width?, dash? }` sweeps the injected triangulation for iso-value crossings (`triangleCount`/`triangleVertices` + edge interpolation -- exact for the piecewise-linear interpolant, proven against an independent planar oracle) and strokes them between the raster and the cells layer at 0 B/frame from a pooled cold-computed segment buffer. Count-form levels sit strictly inside the finite sampled range and re-derive per pan/zoom (outlier rule); explicit out-of-range levels legally draw nothing; strict `z > v` tie rule (every triangle yields 0 or 2 crossings). Third independent fault domain: reuses the field handle, skips when the raster shows nothing (no rebuild), never disposes what it does not own. Bad `levels` throw pre-signal; junk styles fall back. SVG parity free through the draw serializer. `locate`/`barycentric` remain unconsumed -- no delaunay-side change. |
-| **v1.19.0** (this) | Candlestick / OHLC chart. `createCandlestickChart({ data, keys?, up?, down?, wick?, bodyRatio?, shading?, ... })` -- the tenth chart type on the axis kernel via a fresh `CANDLE_RENDERER` (no sibling spread; a `createLineChart`-only bundle gains nothing). Forced time x, median-slot body width recomputed cold per data/scale change, raw-double timestamps (minute bars draw exactly despite the Float32 xs pools), per-value log-safe o/h/l/c projection, whole-series fail-closed OHLC validation (mount throws; corrupt swaps draw nothing), doji ticks, O/H/L/C tooltip rows via a new guarded `tooltipRows` renderer hook, `shading` engine reused by reference, SVG parity. +11 tests (503->514), five reversion proofs, torture A25 (1k branch-parity + 10k absolute + retention). |
+| **v1.20.0** (this) | Brush v2 on axis-kernel charts. `brushModifier: 'shift' \| 'alt' \| 'ctrl' \| 'meta'` (default `'shift'`) picks the gesture modifier, resolved cold to one predicate (no per-event string compare). Every gesture-driven brush commit now carries `idsBySeries` -- a commit-time per-series snapshot (null slot for an empty or hidden series; visibility read untracked, never recomputed on a later toggle) alongside the visibility-blind primary `ids`. Horizontal-bar brush gains a band multi-select: a modifier+click TOGGLES the clicked band in/out of the selection (modifier+drag still replaces with a contiguous range); toggling the last band off clears to `null`; the payload's `bands` may now be NON-contiguous, `bandMin`/`bandMax` are the HULL, and the overlay walks baked contiguous runs (one rect per run, byte-identical to the one-rect path for a single run). `setBrush({ bands })` validates every entry is an existing category key (else throws) and re-derives the hull. Fixed: the vertical `setBrush` null-bound path now fails closed (`setBrush({ xMin: null })` previously coerced to bound 0). 543 tests + torture gate. |
+| **v1.19.0** | Candlestick / OHLC chart. `createCandlestickChart({ data, keys?, up?, down?, wick?, bodyRatio?, shading?, ... })` -- the tenth chart type on the axis kernel via a fresh `CANDLE_RENDERER` (no sibling spread; a `createLineChart`-only bundle gains nothing). Forced time x, median-slot body width recomputed cold per data/scale change, raw-double timestamps (minute bars draw exactly despite the Float32 xs pools), per-value log-safe o/h/l/c projection, whole-series fail-closed OHLC validation (mount throws; corrupt swaps draw nothing), doji ticks, O/H/L/C tooltip rows via a new guarded `tooltipRows` renderer hook, `shading` engine reused by reference, SVG parity. +11 tests (503->514), five reversion proofs, torture A25 (1k branch-parity + 10k absolute + retention). |
 | v1.18.0 | Cluster-outlines layer on `createScatterChart`. `outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?, fillOpacity?, dash? }` draws one boundary per point group -- convex hull (no `alpha`) or concave alpha shape (`alpha` = pixel radius, finite `> 0`, `Infinity` refused) -- via an injected `ClusterIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.4.0`, `createClusterIndex(maxPoints)`; zero imports). Fourth injection rung: rows partition by raw `groupKey` (SameValueZero, insertion-ordered; `== null` -> no group), per-group pixel subsets pack cold (non-finite rows skipped), one handle per group per refresh on the `postProject` seam, queries land in SAFE-bound pooled buffers (`3n`/`n` per their 1.4.0 docs), loops bake into flat pooled geometry walked at 0 B/frame above cells / below markers. Multi-loop shapes + hole loops draw as ordinary loops; per-group single-path fill + nonzero rule + opposite hole winding = correct holes. Fourth independent fault domain (own error slot in the mount-door OR); degenerate groups skip silently; > 64 groups faults fail-closed. Doors pre-signal; junk styles fall back; `typeof` handle probe at first refresh. 13 new tests (490->503: hull-oracle bijection w/ orientation, 2-loop split fixture, four-domain fault matrix both ways, build/dispose ledger, hole-winding fill, SVG Z-closure, absent-config parity) + torture A24 (208-write gesture storm, 416/416 builds/disposes, redraw within 2 B/op of a no-outlines control); five reversion proofs. |
-| v1.19.x / v1.20.0 (candidates) | Brush v2 (next, brief written): configurable brush modifier (shift is hardcoded today); brush IDs across all visible series (primary-only today); horizontal-bar band multi-select (non-contiguous band sets); plus a fail-closed fix for the vertical `setBrush` null-bound path. Then, in confirmed order (see ROADMAP): error bars / confidence bands; axis titles + zero-alloc tick formatters; chart title/subtitle/caption in the layout system; linked-chart helpers; crosshair/tooltip ARIA; data labels on bars/points. Deferred with named triggers: volume pane, index-compact x, candlestick variants, low-GC transitions. |
+| v1.21.0+ (candidates) | In confirmed order (see ROADMAP): error bars / confidence bands; axis titles + zero-alloc tick formatters; chart title/subtitle/caption in the layout system; linked-chart helpers; crosshair/tooltip ARIA; data labels on bars/points. Deferred with named triggers: volume pane, index-compact x, candlestick variants, low-GC transitions. |
 
 ## Ecosystem
 

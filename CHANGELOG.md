@@ -5,6 +5,51 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] -- 2026-09-08
+
+### Added
+
+- **`brushModifier`** -- `'shift' | 'alt' | 'ctrl' | 'meta'`, default
+  `'shift'`. Selects the brush gesture modifier; resolved cold to one
+  predicate. An unknown value throws at construction. macOS `alt` is the
+  Option key; `ctrl`+drag can raise the native context menu (documented,
+  not special-cased).
+- **`idsBySeries`** on every gesture-driven brush commit -- a per-series
+  row-index snapshot, one slot per series, `null` for a hidden or empty
+  series. Commit-time snapshot: the visibility read is untracked and it is
+  not recomputed on a later visibility toggle. `setBrush` echoes the
+  caller's `ids` / `idsBySeries` verbatim, never recomputes.
+- **Horizontal band multi-select** -- on `createBarChart({ orientation:
+  'horizontal', brush: true })` a modifier+click toggles the clicked band
+  in or out of the selection (toggling the last band off clears to `null`;
+  a fresh click selects that band across the full value span; a drag
+  selection's value range is preserved on toggle). `bands` may be
+  NON-contiguous; `bandMin` / `bandMax` are the HULL (min/max band index);
+  the overlay draws one rect per contiguous run of selected bands.
+- **`setBrush({ bands })` validation** -- every entry is checked against the
+  current category keys; an unknown key or a `null` entry throws, and the
+  hull is re-derived from the validated set.
+
+### Changed
+
+- A drag that ends within the 3px click threshold of its origin now commits
+  as a drag if it ever left the threshold during the gesture. Pre-1.20 it
+  was judged by the release distance and counted as a click (which cleared).
+- An ABORTED sub-threshold gesture (`pointercancel` / `pointerleave`) now
+  leaves the selection untouched. Pre-1.20 it ran the click branch and
+  cleared; under v1.20 toggle semantics it would have mutated the selection
+  on a gesture the user never completed. A latched (dragged) gesture still
+  commits its last rect on abort, as before.
+
+### Fixed
+
+- Vertical `setBrush` null-bound fail-open: `xMin` / `xMax` / `yMin` / `yMax`
+  are now `== null`-gated and `Number.isFinite`-checked and throw on a
+  `null` or non-finite bound. Previously a `null` bound silently became
+  bound 0.
+- The README "candidates" roadmap-table row shipped stale in the 1.19.0
+  tarball; it is corrected in this release.
+
 ## [1.19.0] -- 2026-09
 
 ### Added

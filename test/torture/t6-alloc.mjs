@@ -1239,4 +1239,53 @@ export function run() {
         check(rAfter.nodes - rBefore.nodes === 0,
             () => `A25: ${rAfter.nodes - rBefore.nodes} signal-graph nodes retained across 50 create/destroy cycles`);
     }
+
+    // --- A26 (v1.20.0): brush v2 -- multi-select frame path + commit storms ---
+    // (a) HARD gate: redraw with a NON-CONTIGUOUS selection active. The
+    // overlay walks runs pre-baked at commit; the frame path must stay
+    // zero-alloc (maxMajor:0 / maxArrayBuffersGrowth:0) exactly like every
+    // other draw loop in this tier. A per-frame run derivation -- the trap
+    // named in the brief -- shows up here as ArrayBuffer or heap growth.
+    {
+        const data = [];
+        for (let i = 0; i < 8; i++) data.push({ x: 'c' + i, y: 10 + i });
+        const chart = createBarChart({
+            data, orientation: 'horizontal', brush: true,
+            width: 800, height: 400, legend: false, schedule: (fn) => fn(),
+        });
+        const canvas = createEventCanvas(800, 400);
+        chart.mount(canvas);
+        chart.setBrush({
+            valueMin: 10, valueMax: 17, bandMin: 0, bandMax: 6,
+            bands: ['c0', 'c1', 'c3', 'c5', 'c6'],   // 3 contiguous runs
+        });
+        quietCanvas(canvas);
+        const gDraw = runOpsGate(() => { chart.redraw(); }, { ops: 20000, warmup: 500 });
+        if (!gDraw.report.ok) die(allocFailMsg('A26.multiselect-redraw', gDraw.report, gDraw.summary));
+        check(gDraw.bytesPerOp <= 16,
+            () => `A26: multi-select redraw ${gDraw.bytesPerOp.toFixed(3)} B/op > 16`);
+
+        // (b) DIFFERENTIAL retained gate: drag-commit storm vs toggle-click
+        // storm. Commit paths allocate fresh ids/payload arrays per gesture
+        // BY DESIGN (sub-Hz in real use); transients are invisible here (this
+        // tier sees RETAINED growth only), so maxMajor is deliberately not
+        // asserted on the storms. What must hold: neither storm retains
+        // per-gesture state (B/op stays at the leak floor), and a toggle
+        // click costs no more retention than a drag commit.
+        fireShared(canvas, 'pointerdown', 400, 30, { shiftKey: true });
+        const gDrag = runOpsGate((i) => {
+            fireShared(canvas, 'pointermove', 100 + (i % 300), 20 + (i % 60), { shiftKey: true });
+        }, { ops: 30000, warmup: 500 });
+        fireShared(canvas, 'pointerup', 100, 20, { shiftKey: true });
+        const gToggle = runOpsGate((i) => {
+            const y = 25 + (i % 8) * 50;   // walk the 8 bands
+            fireShared(canvas, 'pointerdown', 400, y, { shiftKey: true });
+            fireShared(canvas, 'pointerup', 400, y, { shiftKey: true });
+        }, { ops: 30000, warmup: 500 });
+        check(gDrag.bytesPerOp <= 8,
+            () => `A26: drag storm retains ${gDrag.bytesPerOp.toFixed(3)} B/op (> 8 leak floor)`);
+        check(gToggle.bytesPerOp <= gDrag.bytesPerOp + 2.0,
+            () => `A26: toggle storm ${gToggle.bytesPerOp.toFixed(3)} B/op vs drag control ${gDrag.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        chart.destroy();
+    }
 }

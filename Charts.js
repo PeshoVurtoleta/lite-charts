@@ -2656,6 +2656,29 @@ const _computeBrushIds = (xs, ys, n, xMin, xMax, yMin, yMax) => {
     return ids;
 };
 
+// v1.20.0: grow-only Uint8 band-membership flags for the horizontal brush
+// multi-select toggle + overlay-run bake. Cold only (gesture commit / brush
+// change, sub-Hz). A grow-only pool carries stale bytes -- callers MUST
+// zero-fill the used [0, cats.length) range before each reuse. Mirrors the
+// _candleDtScratch idiom.
+let _brushBandScratch = null;
+
+// v1.20.0: membership-filtered ids for the horizontal band multi-select.
+// state.xs[i] holds an integral band index (extractBarSeriesData writes the
+// category ordinal), so index the flag with `xs[i] | 0`. Include i when its
+// band flag is set AND its value falls inside [valueMin, valueMax]. Fresh
+// array per call (sub-Hz gesture path, matching _computeBrushIds).
+const _computeBrushIdsBanded = (xs, ys, n, flags, valueMin, valueMax) => {
+    const ids = [];
+    for (let i = 0; i < n; i++) {
+        const y = ys[i];
+        if (flags[xs[i] | 0] && y >= valueMin && y <= valueMax) {
+            ids.push(i);
+        }
+    }
+    return ids;
+};
+
 const inferXScaleType = (firstRow, xKey) => {
     if (firstRow == null) return 'linear';
     let probe;
@@ -6400,6 +6423,22 @@ const createBaseAxisChart = (config, renderer) => {
     // THROWS here (before any signal alloc), null (absent/false) -> eager path.
     const legendVSpec = _normalizeLegendVirtualization(config.legend, legendPosition);
 
+    // v1.20.0: brush gesture modifier. Cold-resolve the event property name
+    // ONCE to a predicate so the hot gate is a single bracket read, never a
+    // per-event string compare. Validated even when brush is off (fail closed
+    // on every unverified state -- mirrors the legendVSpec always-validate
+    // precedent above). Default 'shift' is byte-identical to the v1.4.0 path.
+    let brushModProp = 'shiftKey';
+    if (config.brushModifier != null) {
+        const _bm = config.brushModifier;
+        if (_bm === 'shift') brushModProp = 'shiftKey';
+        else if (_bm === 'alt') brushModProp = 'altKey';
+        else if (_bm === 'ctrl') brushModProp = 'ctrlKey';
+        else if (_bm === 'meta') brushModProp = 'metaKey';
+        else throw new Error("lite-charts: brushModifier must be one of 'shift'|'alt'|'ctrl'|'meta'");
+    }
+    const _brushMod = (ev) => !!ev[brushModProp];
+
     const widthAutoSig = widthExplicit ? null : _own(signal(800));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthAcc = widthExplicit ? asAccessor(config.width) : widthAutoSig;
@@ -6752,8 +6791,11 @@ const createBaseAxisChart = (config, renderer) => {
 
     // v1.4.0-alpha.3: brush facade. Same shape pattern as viewFacade
     // (callable for reactive read; .peek / .set / .clear methods). The
-    // brush selection shape is { xMin, xMax, yMin, yMax, ids } with
-    // `ids` being indices into the primary series. ids is freshly
+    // brush selection shape is { xMin, xMax, yMin, yMax, ids, idsBySeries }
+    // (horizontal: { valueMin, valueMax, bandMin, bandMax, bands, ids,
+    // idsBySeries }). `ids` are indices into the primary series;
+    // `idsBySeries` (v1.20.0) is a commit-time per-series snapshot (null
+    // slot for empty or hidden series). ids/idsBySeries are freshly
     // allocated each emit -- not pooled to avoid aliasing bugs across
     // brushes; brushing is a user-driven gesture (sub-Hz), not a hot
     // path, so the allocation is acceptable.
@@ -6780,8 +6822,8 @@ const createBaseAxisChart = (config, renderer) => {
             // slipping through Number.isFinite as a silent 0.
             const valueMin = v.valueMin == null ? NaN : +v.valueMin;
             const valueMax = v.valueMax == null ? NaN : +v.valueMax;
-            const bandMin = v.bandMin == null ? NaN : +v.bandMin;
-            const bandMax = v.bandMax == null ? NaN : +v.bandMax;
+            let bandMin = v.bandMin == null ? NaN : +v.bandMin;
+            let bandMax = v.bandMax == null ? NaN : +v.bandMax;
             if (!Number.isFinite(valueMin) || !Number.isFinite(valueMax)
                 || !Number.isFinite(bandMin) || !Number.isFinite(bandMax)) {
                 throw new Error('lite-charts: horizontal brush must be null or an object ' +
@@ -6789,7 +6831,25 @@ const createBaseAxisChart = (config, renderer) => {
             }
             let bands;
             if (Array.isArray(v.bands)) {
+                // v1.20.0: caller-supplied band set. Validate fail-closed --
+                // every entry must be a non-null EXISTING category key. Derive
+                // bandMin/bandMax as the HULL of the mapped indices; do NOT
+                // trust caller bandMin/bandMax when bands is supplied. Order is
+                // preserved as given (the T7 bake handles non-contiguous runs).
+                const cats = categoriesRef.value;
+                let hullLo = Infinity, hullHi = -Infinity;
+                for (let k = 0; k < v.bands.length; k++) {
+                    const key = v.bands[k];
+                    if (key == null || cats.indexOf(key) < 0) {
+                        throw new Error('lite-charts: setBrush bands must be existing category keys');
+                    }
+                    const idx = cats.indexOf(key);
+                    if (idx < hullLo) hullLo = idx;
+                    if (idx > hullHi) hullHi = idx;
+                }
                 bands = v.bands;
+                bandMin = hullLo;
+                bandMax = hullHi;
             } else {
                 const cats = categoriesRef.value;
                 const lo = Math.max(0, Math.min(cats.length, Math.floor(bandMin)));
@@ -6804,15 +6864,34 @@ const createBaseAxisChart = (config, renderer) => {
                 bandMax,
                 bands,
                 ids: Array.isArray(v.ids) ? v.ids : null,
+                // v1.20.0: caller-ids-verbatim asymmetry, extended to
+                // idsBySeries -- a programmatic set never RECOMPUTES ids,
+                // it echoes the caller's array (or null). Documented behavior.
+                idsBySeries: Array.isArray(v.idsBySeries) ? v.idsBySeries : null,
             });
             return;
         }
+        // v1.20.0: vertical setBrush null gate. Mirror the horizontal branch
+        // above -- null/undefined coerce to 0 under unary + (null is not zero),
+        // so force each absent bound to NaN FIRST and fail closed on any
+        // non-finite bound. This is the v1.9.0 horizontal precedent applied to
+        // the standard {xMin, xMax, yMin, yMax} shape (previously setBrush({
+        // xMin: null }) slipped through as bound 0).
+        const xMin = v.xMin == null ? NaN : +v.xMin;
+        const xMax = v.xMax == null ? NaN : +v.xMax;
+        const yMin = v.yMin == null ? NaN : +v.yMin;
+        const yMax = v.yMax == null ? NaN : +v.yMax;
+        if (!Number.isFinite(xMin) || !Number.isFinite(xMax)
+            || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+            throw new Error('lite-charts: brush must be null or an object {xMin, xMax, yMin, yMax, ids?}');
+        }
         brushSig.set({
-            xMin: +v.xMin,
-            xMax: +v.xMax,
-            yMin: +v.yMin,
-            yMax: +v.yMax,
+            xMin,
+            xMax,
+            yMin,
+            yMax,
             ids: Array.isArray(v.ids) ? v.ids : null,
+            idsBySeries: Array.isArray(v.idsBySeries) ? v.idsBySeries : null,
         });
     };
     brushFacade.clear = () => {
@@ -7370,28 +7449,52 @@ const createBaseAxisChart = (config, renderer) => {
         // The draw fn reads the brush signal untracked; the dirty bridge
         // below tracks it and bumps the scene.
         if (brushEnabled) {
+            // v1.20.0: baked contiguous band runs for the horizontal overlay.
+            // A non-contiguous multi-select paints one rect PER run; a single
+            // contiguous selection bakes to exactly one run (byte-identical
+            // draw ops to the pre-1.20 one-rect path). Grow-only, flat pairs
+            // [start0, end0, start1, end1, ...]; baked in the dirty bridge
+            // below (cold, on every brushSig change), zero allocation in the
+            // draw closure.
+            let brushRunArr = null;
+            let brushRunCount = 0;   // number of [start, end] pairs
             const drawBrushOverlay = (ctx) => {
                 const b = brushFacade.peek();
                 if (!b) return;
                 // Convert data-space bounds back to pixels via the live
                 // scales. y is flipped: data yMax sits at the SMALLER
                 // pixel (top of plot).
-                let px1, px2, py1, py2;
                 if (swapAxes) {
                     // Horizontal: value axis on screen-X (yScale, no flip);
-                    // band extent on screen-Y from the BAND geometry. xScale.map
-                    // returns a band CENTER, so span the rect with leftEdge to
-                    // keep it half-a-band aligned with the drawn bars.
-                    px1 = yScale.map(b.valueMin);
-                    px2 = yScale.map(b.valueMax);
-                    py1 = xScale.leftEdge(b.bandMin);
-                    py2 = xScale.leftEdge(b.bandMax) + xScale.bandWidth;
-                } else {
-                    px1 = xScale.map(b.xMin);
-                    px2 = xScale.map(b.xMax);
-                    py1 = yScale.map(b.yMax);
-                    py2 = yScale.map(b.yMin);
+                    // band extent on screen-Y from the BAND geometry. Walk the
+                    // baked runs -- one rect per contiguous band span. xScale
+                    // leftEdge keeps each run half-a-band aligned with the bars.
+                    const vx1 = yScale.map(b.valueMin);
+                    const vx2 = yScale.map(b.valueMax);
+                    const bx = Math.min(vx1, vx2);
+                    const bw = Math.abs(vx2 - vx1);
+                    if (!isFinite(bx) || !isFinite(bw)) return;
+                    for (let r = 0; r < brushRunCount; r++) {
+                        const e1 = xScale.leftEdge(brushRunArr[r * 2]);
+                        const e2 = xScale.leftEdge(brushRunArr[r * 2 + 1]) + xScale.bandWidth;
+                        if (!isFinite(e1) || !isFinite(e2)) continue;
+                        const ry = Math.min(e1, e2);
+                        const rh = Math.abs(e2 - e1);
+                        if (bw < 1 && rh < 1) continue;   // degenerate; skip run
+                        ctx.fillStyle = brushFill;
+                        ctx.fillRect(bx, ry, bw, rh);
+                        ctx.strokeStyle = brushStroke;
+                        ctx.lineWidth = brushLineWidth;
+                        if (brushDash.length) ctx.setLineDash(brushDash);
+                        ctx.strokeRect(bx, ry, bw, rh);
+                        if (brushDash.length) ctx.setLineDash([]);
+                    }
+                    return;
                 }
+                const px1 = xScale.map(b.xMin);
+                const px2 = xScale.map(b.xMax);
+                const py1 = yScale.map(b.yMax);
+                const py2 = yScale.map(b.yMin);
                 if (!isFinite(px1) || !isFinite(px2) || !isFinite(py1) || !isFinite(py2)) return;
                 const rx = Math.min(px1, px2);
                 const ry = Math.min(py1, py2);
@@ -7409,10 +7512,41 @@ const createBaseAxisChart = (config, renderer) => {
             scene.root.add(pathNode({ draw: drawBrushOverlay }));
 
             // Dirty bridge: brush signal changes -> markDirty. Both
-            // user-driven (shift+drag) and programmatic (setBrush) paths
-            // run through this.
+            // user-driven (shift+drag / toggle) and programmatic (setBrush)
+            // paths run through this. v1.20.0: bake the horizontal overlay
+            // runs here too -- cold, before markDirty, only for swapAxes +
+            // a non-null payload; everything else resets the run count to 0
+            // (the vertical overlay path is unaffected).
             disposers.push(effect(() => {
-                brushSig();
+                const b = brushSig();
+                brushRunCount = 0;
+                if (swapAxes && b && Array.isArray(b.bands)) {
+                    const cats = categoriesRef.value;
+                    const nc = cats.length;
+                    _brushBandScratch = ensureUint8(_brushBandScratch, nc);
+                    const flags = _brushBandScratch;
+                    for (let i = 0; i < nc; i++) flags[i] = 0;
+                    for (let k = 0; k < b.bands.length; k++) {
+                        const idx = cats.indexOf(b.bands[k]);
+                        if (idx >= 0) flags[idx] = 1;
+                    }
+                    // Scan [0, nc) for contiguous runs -> flat [start, end] pairs.
+                    let r = 0;
+                    let i = 0;
+                    while (i < nc) {
+                        if (flags[i]) {
+                            const start = i;
+                            while (i < nc && flags[i]) i++;
+                            brushRunArr = ensureFloat32(brushRunArr, (r + 1) * 2);
+                            brushRunArr[r * 2] = start;
+                            brushRunArr[r * 2 + 1] = i - 1;
+                            r++;
+                        } else {
+                            i++;
+                        }
+                    }
+                    brushRunCount = r;
+                }
                 if (scene) scene.markDirty();
             }));
         }
@@ -7463,13 +7597,13 @@ const createBaseAxisChart = (config, renderer) => {
                 // without a button; allow those too (button === 0 on pen,
                 // -1 on some touch implementations).
                 if (ev.button != null && ev.button > 0) return;
-                // v1.4.0-alpha.3: shift-modifier reserved for brushing.
-                // If brush is also enabled, shift+drag routes there
-                // instead of pan. If brush is NOT enabled, shift-drag
-                // still falls through to pan -- the modifier-key
-                // contract is documented as "shift = brush WHEN brush
-                // is enabled".
-                if (brushEnabled && ev.shiftKey) return;
+                // v1.4.0-alpha.3: modifier reserved for brushing (v1.20.0:
+                // configurable via brushModifier, default 'shift'). If brush
+                // is also enabled, modifier+drag routes there instead of pan.
+                // If brush is NOT enabled, modifier+drag still falls through
+                // to pan -- the contract is "modifier = brush WHEN brush is
+                // enabled".
+                if (brushEnabled && _brushMod(ev)) return;
                 const p = _canvasPx(ev);
                 if (!_inPlot(p.x, p.y)) return;
                 dragActive = true;
@@ -7621,15 +7755,22 @@ const createBaseAxisChart = (config, renderer) => {
             // pointerdown via ev.shiftKey.
             if (brushEnabled) {
                 let brushActive = false;
+                // v1.20.0: moved latch. A real click is down + 1px jitter move
+                // + up; committing on every move would replace the selection
+                // with a 1px-drag rect and defeat the toggle. Latch true only
+                // once the pointer travels past brushClickThreshold, then
+                // commit; on up, no latch = click branch, latched = drag commit.
+                let brushMoved = false;
                 let brushStartX = 0, brushStartY = 0;
                 let brushCurrentX = 0, brushCurrentY = 0;
 
                 const onBrushDown = (ev) => {
                     if (ev.button != null && ev.button > 0) return;
-                    if (!ev.shiftKey) return;       // bare drag = pan; shift = brush
+                    if (!_brushMod(ev)) return;     // bare drag = pan; modifier = brush
                     const p = _canvasPx(ev);
                     if (!_inPlot(p.x, p.y)) return;
                     brushActive = true;
+                    brushMoved = false;
                     brushStartX = brushCurrentX = p.x;
                     brushStartY = brushCurrentY = p.y;
                     // Hide crosshair during brush (matches pan behavior).
@@ -7638,6 +7779,24 @@ const createBaseAxisChart = (config, renderer) => {
                         try { canvas.setPointerCapture(ev.pointerId); } catch (_) { /* swallow */ }
                     }
                     if (typeof ev.preventDefault === 'function') ev.preventDefault();
+                };
+
+                // v1.20.0: build the commit-time per-series id snapshot. Args
+                // are the same bounds passed to the branch's primary
+                // _computeBrushIds call (xs-range then ys-range). null slot for
+                // an empty (n === 0) or hidden series; visibility is read
+                // untracked (.peek) so the snapshot never subscribes and never
+                // recomputes when a series is toggled after the commit.
+                const _commitIdsBySeries = (aMin, aMax, bMin, bMax) => {
+                    if (seriesStates.length === 0) return null;
+                    const out = new Array(seriesStates.length);
+                    for (let i = 0; i < seriesStates.length; i++) {
+                        const st = seriesStates[i];
+                        out[i] = (st.n === 0 || !seriesVisibility[i].peek())
+                            ? null
+                            : _computeBrushIds(st.xs, st.ys, st.n, aMin, aMax, bMin, bMax);
+                    }
+                    return out;
                 };
 
                 const _commitBrush = () => {
@@ -7683,7 +7842,14 @@ const createBaseAxisChart = (config, renderer) => {
                                 valueMin, valueMax,
                             );
                         }
-                        brushSig.set({ valueMin, valueMax, bandMin, bandMax, bands, ids });
+                        // v1.20.0: per-series id snapshot at commit time. The
+                        // primary `ids` above stays byte-identical (still
+                        // seriesStates[0], visibility-blind). idsBySeries is a
+                        // COMMIT-TIME snapshot: null slot for an empty or hidden
+                        // series; no tracking, no recompute on later visibility
+                        // toggles.
+                        const idsBySeries = _commitIdsBySeries(bandMin, bandMax, valueMin, valueMax);
+                        brushSig.set({ valueMin, valueMax, bandMin, bandMax, bands, ids, idsBySeries });
                         return;
                     }
                     const dataBounds = _brushPxToData(rect, xScale, yScale);
@@ -7697,13 +7863,92 @@ const createBaseAxisChart = (config, renderer) => {
                             dataBounds.yMin, dataBounds.yMax,
                         );
                     }
+                    // v1.20.0: commit-time per-series snapshot (see the swap
+                    // branch above). Primary `ids` stays visibility-blind.
+                    const idsBySeries = _commitIdsBySeries(
+                        dataBounds.xMin, dataBounds.xMax,
+                        dataBounds.yMin, dataBounds.yMax,
+                    );
                     brushSig.set({
                         xMin: dataBounds.xMin,
                         xMax: dataBounds.xMax,
                         yMin: dataBounds.yMin,
                         yMax: dataBounds.yMax,
                         ids,
+                        idsBySeries,
                     });
+                };
+
+                // v1.20.0: horizontal band multi-select. Gesture contract:
+                // modifier+drag REPLACES the selection with a contiguous range
+                // (the _commitBrush path, unchanged); modifier+CLICK toggles the
+                // clicked band in/out of the current selection; toggling the
+                // last band off clears to null (empty selection is null, never
+                // {bands: []}). Swap-only -- the vertical click path clears as
+                // before. Cold (a click, sub-Hz).
+                const _toggleBandAtClick = () => {
+                    const band = xScale.invert(brushCurrentY);
+                    if (band < 0) {          // no categories -- fail closed
+                        brushSig.set(null);
+                        return;
+                    }
+                    const cats = categoriesRef.value;
+                    const nc = cats.length;
+                    _brushBandScratch = ensureUint8(_brushBandScratch, nc);
+                    const flags = _brushBandScratch;
+                    for (let i = 0; i < nc; i++) flags[i] = 0;   // stale-byte guard
+                    const cur = brushFacade.peek();
+                    // PRESERVE the current value range when a brush exists; a
+                    // fresh click spans the full live value domain (value axis
+                    // is screen-X under swap -- invert the two plot edges).
+                    let valueMin, valueMax;
+                    if (cur && Array.isArray(cur.bands)) {
+                        for (let k = 0; k < cur.bands.length; k++) {
+                            const idx = cats.indexOf(cur.bands[k]);
+                            if (idx >= 0) flags[idx] = 1;
+                        }
+                        valueMin = cur.valueMin;
+                        valueMax = cur.valueMax;
+                    } else {
+                        const ve0 = yScale.invert(plotBoundsBox.x);
+                        const ve1 = yScale.invert(plotBoundsBox.x + plotBoundsBox.w);
+                        valueMin = Math.min(ve0, ve1);
+                        valueMax = Math.max(ve0, ve1);
+                    }
+                    flags[band] ^= 1;        // flip the clicked band
+                    // Collect the selection in ascending band order + hull.
+                    let bandMin = -1, bandMax = -1, count = 0;
+                    const bands = [];
+                    for (let b = 0; b < nc; b++) {
+                        if (flags[b]) {
+                            if (bandMin < 0) bandMin = b;
+                            bandMax = b;
+                            bands.push(cats[b]);
+                            count++;
+                        }
+                    }
+                    if (count === 0) {       // last band toggled off -> clear
+                        brushSig.set(null);
+                        return;
+                    }
+                    let ids = null;
+                    if (seriesStates.length > 0 && seriesStates[0].n > 0) {
+                        ids = _computeBrushIdsBanded(
+                            seriesStates[0].xs, seriesStates[0].ys, seriesStates[0].n,
+                            flags, valueMin, valueMax,
+                        );
+                    }
+                    let idsBySeries = null;
+                    if (seriesStates.length > 0) {
+                        idsBySeries = new Array(seriesStates.length);
+                        for (let i = 0; i < seriesStates.length; i++) {
+                            const st = seriesStates[i];
+                            idsBySeries[i] = (st.n === 0 || !seriesVisibility[i].peek())
+                                ? null
+                                : _computeBrushIdsBanded(st.xs, st.ys, st.n, flags, valueMin, valueMax);
+                        }
+                    }
+                    brushSig.set({ valueMin, valueMax, bandMin, bandMax, bands, ids, idsBySeries });
                 };
 
                 const onBrushMove = (ev) => {
@@ -7711,19 +7956,35 @@ const createBaseAxisChart = (config, renderer) => {
                     const p = _canvasPx(ev);
                     brushCurrentX = p.x;
                     brushCurrentY = p.y;
-                    _commitBrush();
+                    if (!brushMoved) {
+                        const dx = brushCurrentX - brushStartX;
+                        const dy = brushCurrentY - brushStartY;
+                        if (dx * dx + dy * dy >= brushClickThreshold * brushClickThreshold) {
+                            brushMoved = true;
+                        }
+                    }
+                    // Commit only once the gesture is a real drag; sub-threshold
+                    // jitter must not replace the selection before the up-click.
+                    if (brushMoved) _commitBrush();
                 };
 
                 const onBrushUp = (ev) => {
                     if (!brushActive) return;
                     brushActive = false;
-                    // Click-to-clear: if total drag distance is below
-                    // threshold, treat as a click and clear the brush.
-                    const dx = brushCurrentX - brushStartX;
-                    const dy = brushCurrentY - brushStartY;
-                    const dist2 = dx * dx + dy * dy;
-                    if (dist2 < brushClickThreshold * brushClickThreshold) {
-                        brushSig.set(null);
+                    // Click-vs-drag via the moved latch, not the release
+                    // distance. Corner case (deliberate v1.20.0 change): drag
+                    // out and release back at the origin is now a DRAG (commits
+                    // the final rect) because the latch fired mid-gesture;
+                    // pre-1.20 the dist2-at-release rule counted it as a click,
+                    // which for horizontal would TOGGLE a random band -- worse.
+                    if (!brushMoved) {
+                        // Sub-threshold click: horizontal TOGGLES the clicked
+                        // band; vertical still clears (unchanged).
+                        if (swapAxes) {
+                            _toggleBandAtClick();
+                        } else {
+                            brushSig.set(null);
+                        }
                     } else {
                         // Final commit (in case the last move was missed).
                         _commitBrush();
@@ -7733,17 +7994,30 @@ const createBaseAxisChart = (config, renderer) => {
                     }
                 };
 
+                // Aborted gesture (pointercancel / pointerleave): never run the click
+                // branch -- a toggle/clear the user did not complete is a fail-open
+                // mutation. A latched drag still commits its last rect (pre-1.20
+                // parity: a visible selection was on screen).
+                const onBrushAbort = (ev) => {
+                    if (!brushActive) return;
+                    brushActive = false;
+                    if (brushMoved) _commitBrush();
+                    if (typeof canvas.releasePointerCapture === 'function' && ev && ev.pointerId != null) {
+                        try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* swallow */ }
+                    }
+                };
+
                 canvas.addEventListener('pointerdown', onBrushDown);
                 canvas.addEventListener('pointermove', onBrushMove);
                 canvas.addEventListener('pointerup', onBrushUp);
-                canvas.addEventListener('pointercancel', onBrushUp);
-                canvas.addEventListener('pointerleave', onBrushUp);
+                canvas.addEventListener('pointercancel', onBrushAbort);
+                canvas.addEventListener('pointerleave', onBrushAbort);
                 disposers.push(() => {
                     canvas.removeEventListener('pointerdown', onBrushDown);
                     canvas.removeEventListener('pointermove', onBrushMove);
                     canvas.removeEventListener('pointerup', onBrushUp);
-                    canvas.removeEventListener('pointercancel', onBrushUp);
-                    canvas.removeEventListener('pointerleave', onBrushUp);
+                    canvas.removeEventListener('pointercancel', onBrushAbort);
+                    canvas.removeEventListener('pointerleave', onBrushAbort);
                 });
             }
         }
@@ -10656,6 +10930,7 @@ export const _testHelpers = {
     _normalizeBrushRect,
     _brushPxToData,
     _computeBrushIds,
+    _computeBrushIdsBanded,
     resolveColor,
     bisectNearest,
     // Bubble-specific (axis kernel + size dimension)

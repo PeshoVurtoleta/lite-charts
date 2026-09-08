@@ -5,7 +5,29 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.19.0 (current)
+## v1.20.0 (current)
+
+Brush v2 (brief #17, `briefs/brush-refinements.md`, incl. the EXECUTED
+block). Three cuts plus a fail-closed fix, all in one candidate.
+`brushModifier` (`'shift' | 'alt' | 'ctrl' | 'meta'`, default `'shift'`)
+selects the gesture modifier, resolved cold to one predicate; a junk
+value throws pre-signal. Every gesture commit gains `idsBySeries` -- a
+commit-time per-series snapshot (null slot for a hidden or empty series,
+visibility read untracked), beside the unchanged primary `ids`. The
+horizontal-bar brush gains band multi-select: modifier+click toggles a
+band, non-contiguous `bands`, hull `bandMin`/`bandMax`, one pooled
+overlay rect per contiguous run (single run byte-identical). Fixed: the
+vertical `setBrush` null-bound path (`setBrush({ xMin: null })` coerced
+to 0; the horizontal branch was fixed in v1.9.0, vertical never was).
+Two review-driven guards beyond the brief: a `brushMoved` latch (so
+sub-threshold jitter never replaces the selection before a toggle) and
+`onBrushAbort` (pointercancel/leave never run the click branch).
+543/543 tests + torture (new A26 gate) + four reversion proofs; reviewer
+REJECTED once (the abort fail-open), fixed, then clean.
+
+---
+
+## v1.19.0
 
 Candlestick / OHLC chart (brief #16, `briefs/candlestick.md`, incl. the
 AS-EXECUTED block). `createCandlestickChart` -- the TENTH chart type,
@@ -848,7 +870,7 @@ Each still needs a grounded brief before its cut (only #1 has one so far,
 `briefs/brush-refinements.md`); descriptions for #2-#7 live in the absorbed
 list above.
 
-1. **Brush v2** (v1.20.0 candidate, brief WRITTEN) -- three cuts on the
+1. **Brush v2** (EXECUTED 2026-09-08 as the v1.20.0 candidate -- all three cuts + the fix landed, 543/543 + torture + A26, release pending) -- three cuts on the
    brush surface plus one fix: configurable brush modifier (`shift` is
    hardcoded at the two gesture gates, Charts.js:7472/:7629); brush IDs
    across all visible series (`_commitBrush` reads `seriesStates[0]`

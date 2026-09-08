@@ -180,6 +180,12 @@ export interface BrushSelection {
     yMin: number;
     yMax: number;
     ids: number[] | null;
+    /**
+     * Per-series row-index snapshot (v1.20.0). One slot per series, `null`
+     * for a hidden or empty series. Commit-time snapshot -- not recomputed
+     * on a later visibility toggle, and `setBrush` echoes it verbatim.
+     */
+    idsBySeries: (number[] | null)[] | null;
 }
 
 /**
@@ -188,7 +194,8 @@ export interface BrushSelection {
  * screen-Y, so a shift-drag selects a value RANGE crossed with a BAND SET. This
  * shape -- not `BrushSelection` -- is what `chart.brush()` returns for a
  * horizontal bar. `bands` is the selected category keys; `bandMin` / `bandMax`
- * the inclusive band-index span; `ids` the primary-series row indices inside the
+ * the band-index HULL (min/max of `bands`, which may be NON-contiguous under
+ * v1.20.0 band multi-select); `ids` the primary-series row indices inside the
  * selection (`null` when set programmatically via `setBrush`).
  */
 export interface HorizontalBarBrushSelection {
@@ -198,6 +205,12 @@ export interface HorizontalBarBrushSelection {
     bandMax: number;
     bands: Array<string | number>;
     ids: number[] | null;
+    /**
+     * Per-series row-index snapshot (v1.20.0). One slot per series, `null`
+     * for a hidden or empty series. Commit-time snapshot -- not recomputed
+     * on a later visibility toggle, and `setBrush` echoes it verbatim.
+     */
+    idsBySeries: (number[] | null)[] | null;
 }
 
 /**
@@ -223,6 +236,12 @@ export interface BrushStyleConfig {
 export interface BrushConfig {
     /** Enable shift+drag brushing. Default false. */
     brush?: boolean;
+    /**
+     * Gesture modifier key (v1.20.0). Default `'shift'`. An unknown value
+     * throws at construction. macOS `alt` is Option; `ctrl`+drag can raise
+     * the native context menu (documented, not special-cased).
+     */
+    brushModifier?: 'shift' | 'alt' | 'ctrl' | 'meta';
     /** Visual style for the brush rect overlay. */
     brushStyle?: BrushStyleConfig;
 }

@@ -10,7 +10,7 @@
 > radar ~22 KB, heatmap ~22 KB. all-nine total: ~90 KB. Kernel-side
 > auto-resize: omit width/height from config and the chart observes
 > its mount container via ResizeObserver.
-> v1.19.0 (current): createCandlestickChart -- the TENTH chart type, tenth
+> v1.19.0: createCandlestickChart -- the TENTH chart type, tenth
 > axis-kernel renderer (CANDLE_RENDERER, no sibling spread). One candle per
 > { ts, o, h, l, c } row: wick h..l (1px centered), body o..c, up/down
 > fills (defaults #16a34a/#dc2626; wick default = per-candle body color;
@@ -39,6 +39,28 @@
 > OUT for v1 with a named trigger -- candles sit at TRUE time, weekend/
 > holiday gaps show as gaps (the shading engine's premise); volume panes,
 > comparison overlays, hollow/heikin-ashi variants OUT (see README).
+> v1.20.0 (current): brush v2 on axis-kernel charts. Config gains
+> brushModifier?: 'shift'|'alt'|'ctrl'|'meta' (default 'shift'); an
+> unknown value throws at construction, resolved cold to one predicate
+> (no per-event string compare). Every gesture-driven brush commit adds
+> idsBySeries: (number[]|null)[]|null -- a COMMIT-TIME per-series snapshot
+> (one slot per series; null for a hidden or empty series; visibility read
+> untracked, never recomputed on a later toggle) alongside the primary
+> visibility-blind ids. setBrush echoes caller ids/idsBySeries VERBATIM,
+> never recomputes (same asymmetry as ids). Horizontal-bar brush: a
+> modifier+click TOGGLES the clicked band in/out (toggle last off -> clears
+> to null; fresh click selects that band across the full value span; a
+> drag selection's value range preserved on toggle); modifier+drag still
+> replaces with a range. bands may be NON-contiguous; bandMin/bandMax are
+> the HULL (min/max band index); overlay draws one rect per contiguous run
+> (byte-identical to the single-rect path at run count 1). setBrush({bands})
+> validates every entry against current category keys (unknown or null
+> throws) and re-derives the hull. Vertical setBrush null-bound fix:
+> xMin/xMax/yMin/yMax now == null-gated then Number.isFinite-checked and
+> THROW (previously a null bound silently anchored at 0). Click-vs-drag now
+> uses a moved LATCH (crossed the 3px click threshold mid-gesture), not the
+> release distance -- so a drag out and back to origin commits as a drag,
+> not a click. 514 tests + torture gate.
 > v1.18.0: cluster-outlines layer on createScatterChart --
 > outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?,
 > fillOpacity?, dash? }. The FOURTH rung of the injection ladder

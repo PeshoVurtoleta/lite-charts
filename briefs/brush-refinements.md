@@ -1,9 +1,15 @@
 # Brief #17 -- Brush v2 (v1.20.0 candidate)
 
-Status: GREENLIT 2026-09-06 (user confirmed the queue and its order the
-same day v1.19.0 shipped). Queue position 1 of 7 -- see ROADMAP "Queue
-(2026-09-06, user-confirmed order)". Target: the NEXT `cd LiteCharts &&
-claude` session, full pipeline (planner -> coder -> reviewer -> qa=me).
+Status: EXECUTED 2026-09-08 (greenlit 2026-09-06; queue position 1 of 7).
+Full pipeline ran: planner -> coder (3 rounds) -> reviewer (REJECTED the
+cancel/leave click-branch fail-open; fixed via onBrushAbort) -> qa=me.
+ALL THREE cuts + the mandatory fix landed in one v1.20.0 candidate (no
+v1.21.0 split). 543/543 tests (29 new + the HB2 re-pin), torture ok with
+the new A26 gate, 4 measured reversion proofs. Two execution deltas vs
+this brief: (1) the moved-latch -- commits are gated on crossing the 3px
+threshold, else sub-threshold jitter replaces the selection before the
+toggle (found in review); (2) aborted gestures (pointercancel/leave) skip
+the click branch entirely. Awaiting /release.
 
 Three cuts on the brush surface plus one mandatory fix. Cuts 1 + 2 + the
 fix alone are a releasable v1.20.0; cut 3 is the biggest and the planner

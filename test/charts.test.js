@@ -7916,8 +7916,10 @@ describe('v1.9.0 -- horizontal-bar brush', () => {
         c.destroy();
     });
 
-    // -- HB2: full-plot drag selects all bands + full value span; click clears
-    it('HB2: full-plot drag selects every band; sub-threshold shift-click clears', () => {
+    // -- HB2: full-plot drag selects all bands + full value span; clicks toggle
+    // (re-pinned for v1.20.0: sub-threshold modifier-clicks TOGGLE the clicked
+    // band instead of unconditionally clearing; last band toggled off clears.)
+    it('HB2: full-plot drag selects every band; sub-threshold shift-clicks toggle bands off until clear', () => {
         const c = mkH({ brush: true });
         const canvas = createInteractiveMockCanvas(400, 300);
         c.mount(canvas);
@@ -7931,9 +7933,24 @@ describe('v1.9.0 -- horizontal-bar brush', () => {
         assert.ok(Math.abs(b.valueMin - c.yScale.invert(0)) < 1e-6, 'value span reaches the left plot edge');
         assert.ok(Math.abs(b.valueMax - c.yScale.invert(400)) < 1e-6, 'value span reaches the right plot edge');
 
-        // A shift-click (< 3px movement) clears the active brush.
-        shiftDrag(canvas, 250, 150, 251, 150);
-        assert.strictEqual(c.brush(), null, 'sub-threshold shift-click clears the brush');
+        // v1.20.0: a shift-click (< 3px movement) toggles the clicked band.
+        // Click band 1 ('B') at its scale-derived center (the band origin
+        // carries outer padding -- never hardcode the pixel); toggling it
+        // off leaves {A} selected, with the drag's value range preserved.
+        const yB = c.xScale.leftEdge(1) + c.xScale.bandWidth / 2;
+        shiftDrag(canvas, 250, yB, 251, yB);
+        const b2 = c.brush();
+        assert.ok(b2 != null, 'toggling one of two bands must NOT clear');
+        assert.deepEqual(b2.bands, ['A'], 'clicked band B toggled off');
+        assert.equal(b2.bandMin, 0);
+        assert.equal(b2.bandMax, 0);
+        assert.ok(Math.abs(b2.valueMin - b.valueMin) < 1e-6, 'value range preserved across a toggle');
+        assert.ok(Math.abs(b2.valueMax - b.valueMax) < 1e-6, 'value range preserved across a toggle');
+
+        // Click band 0 ('A'); toggling the last selected band off clears.
+        const yA = c.xScale.leftEdge(0) + c.xScale.bandWidth / 2;
+        shiftDrag(canvas, 250, yA, 251, yA);
+        assert.strictEqual(c.brush(), null, 'toggling the last band off clears the brush');
         c.destroy();
     });
 
@@ -11372,5 +11389,630 @@ describe('v1.19.0 -- candlestick chart', () => {
         assert.equal(hookCalls.length, 1, 'exactly one guarded tooltipRows call site');
         const doorTerms = src.match(/rendererCtx\.candleError/g) || [];
         assert.ok(doorTerms.length >= 1, 'candleError reaches the mount door');
+    });
+});
+
+// ============================================================
+// v1.20.0 -- brush v2: configurable modifier, idsBySeries,
+// horizontal band multi-select, vertical setBrush null gate
+// ============================================================
+
+describe('v1.20.0 -- brush v2', () => {
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+
+    // Modifier-parametric gesture helpers. `mod` is the event PROPERTY
+    // ('shiftKey'|'altKey'|'ctrlKey'|'metaKey'); absent modifiers stay
+    // undefined on the event object, matching real PointerEvents where
+    // unpressed modifier getters are false.
+    const modEv = (mod, x, y, extra) => {
+        const ev = { clientX: x, clientY: y, pointerId: 1, preventDefault: () => {} };
+        if (mod) ev[mod] = true;
+        return Object.assign(ev, extra || {});
+    };
+    const modDrag = (canvas, mod, x0, y0, x1, y1) => {
+        canvas.dispatch('pointerdown', modEv(mod, x0, y0, { button: 0 }));
+        canvas.dispatch('pointermove', modEv(mod, x1, y1));
+        canvas.dispatch('pointerup',   modEv(mod, x1, y1));
+    };
+    // A pure click: down + up, zero movement.
+    const modClick = (canvas, mod, x, y) => {
+        canvas.dispatch('pointerdown', modEv(mod, x, y, { button: 0 }));
+        canvas.dispatch('pointerup',   modEv(mod, x, y));
+    };
+    // A realistic click: down + 1px jitter move + up. Pre-1.20 the jitter
+    // move committed a 1px drag that destroyed the toggle's base selection;
+    // the brushMoved latch must keep this a click.
+    const jitterClick = (canvas, mod, x, y) => {
+        canvas.dispatch('pointerdown', modEv(mod, x, y, { button: 0 }));
+        canvas.dispatch('pointermove', modEv(mod, x + 1, y));
+        canvas.dispatch('pointerup',   modEv(mod, x + 1, y));
+    };
+
+    // Two deterministic 10-point series on an integer grid: series 0 is
+    // y = x, series 1 is y = 9 - x. Brute-force filters below use the
+    // committed payload's own data-space bounds, so no scale math leaks
+    // into the expectations.
+    const S0 = []; const S1 = [];
+    for (let i = 0; i < 10; i++) { S0.push({ x: i, y: i }); S1.push({ x: i, y: 9 - i }); }
+    const mk2 = (extra) => createLineChart(Object.assign({
+        series: [
+            { name: 'a', data: S0 },
+            { name: 'b', data: S1 },
+        ],
+        x: 'x', y: 'y',
+        width: 500, height: 300,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        schedule: (fn) => fn(),
+    }, extra));
+    const bruteIds = (rows, b) => {
+        const out = [];
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].x >= b.xMin && rows[i].x <= b.xMax && rows[i].y >= b.yMin && rows[i].y <= b.yMax) out.push(i);
+        }
+        return out;
+    };
+
+    // 4-band horizontal-bar factory: A..D at 400x300, margin 0 -> band step
+    // 75px on screen-Y (band k spans [75k, 75k+75)).
+    const CATS4 = ['A', 'B', 'C', 'D'];
+    const mkH4 = (extra) => createBarChart(Object.assign({
+        data: [{ x: 'A', y: 100 }, { x: 'B', y: 50 }, { x: 'C', y: 75 }, { x: 'D', y: 25 }],
+        orientation: 'horizontal',
+        width: 400, height: 300,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        schedule: (fn) => fn(),
+    }, extra));
+    // Band CENTER pixel derived from the chart's own live scale -- the band
+    // origin carries outer padding, so hardcoded pixel math misplaces clicks.
+    const bandY = (c, k) => c.xScale.leftEdge(k) + c.xScale.bandWidth / 2;
+
+    // ---- brushModifier ------------------------------------------------
+
+    describe('brushModifier', () => {
+        const MODS = [
+            ['shift', 'shiftKey'],
+            ['alt', 'altKey'],
+            ['ctrl', 'ctrlKey'],
+            ['meta', 'metaKey'],
+        ];
+
+        for (const [name, prop] of MODS) {
+            it(`BM: '${name}' gates brush; every other modifier pans`, () => {
+                for (const [, otherProp] of MODS) {
+                    const c = mk2({ pan: true, brush: true, panBounds: 'free', brushModifier: name });
+                    const canvas = createInteractiveMockCanvas(500, 300);
+                    c.mount(canvas);
+                    modDrag(canvas, otherProp, 100, 100, 300, 200);
+                    if (otherProp === prop) {
+                        assert.ok(c.brush() != null, name + '+drag must brush');
+                        assert.strictEqual(c.view(), null, name + '+drag must not pan');
+                    } else {
+                        assert.strictEqual(c.brush(), null, otherProp + ' drag must not brush under brushModifier:' + name);
+                        assert.ok(c.view() != null, otherProp + ' drag must fall through to pan');
+                    }
+                    c.destroy();
+                }
+            });
+        }
+
+        it('BM: default is shift -- alt+drag pans, shift+drag brushes', () => {
+            const c = mk2({ pan: true, brush: true, panBounds: 'free' });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            modDrag(canvas, 'altKey', 100, 100, 300, 200);
+            assert.strictEqual(c.brush(), null, 'alt must not brush by default');
+            assert.ok(c.view() != null, 'alt drag pans by default');
+            modDrag(canvas, 'shiftKey', 100, 100, 300, 200);
+            assert.ok(c.brush() != null, 'shift brushes by default');
+            c.destroy();
+        });
+
+        it('BM: junk brushModifier throws at construction with zero node delta', () => {
+            const before = stats().activeNodes;
+            assert.throws(
+                () => mk2({ brush: true, brushModifier: 'cmd' }),
+                /brushModifier must be one of/,
+                'junk modifier must fail closed pre-signal',
+            );
+            assert.throws(
+                () => mk2({ brushModifier: 42 }),
+                /brushModifier must be one of/,
+                'validated even when brush is off',
+            );
+            assert.equal(stats().activeNodes - before, 0, 'construction throw must leak zero reactive nodes');
+        });
+    });
+
+    // ---- vertical setBrush null gate ---------------------------------
+
+    describe('vertical setBrush null gate', () => {
+        it('NG: each null bound throws; NaN and non-numeric junk throw; valid bounds round-trip', () => {
+            const c = mk2({ brush: true });
+            const base = { xMin: 1, xMax: 5, yMin: 1, yMax: 5 };
+            for (const key of ['xMin', 'xMax', 'yMin', 'yMax']) {
+                const bad = Object.assign({}, base); bad[key] = null;
+                assert.throws(() => c.setBrush(bad), /brush must be null or an object/, key + ': null is not zero');
+                assert.strictEqual(c.brush(), null, 'failed set must not mutate the selection');
+                bad[key] = NaN;
+                assert.throws(() => c.setBrush(bad), /brush must be null or an object/, key + ': NaN fails closed');
+                bad[key] = 'junk';
+                assert.throws(() => c.setBrush(bad), /brush must be null or an object/, key + ': non-numeric fails closed');
+            }
+            c.setBrush(base);
+            const b = c.brush();
+            assert.equal(b.xMin, 1); assert.equal(b.xMax, 5);
+            assert.equal(b.yMin, 1); assert.equal(b.yMax, 5);
+            assert.strictEqual(b.ids, null, 'programmatic set without ids emits null, never recomputes');
+            c.destroy();
+        });
+    });
+
+    // ---- idsBySeries --------------------------------------------------
+
+    describe('idsBySeries', () => {
+        it('IS: gesture commit matches per-series brute force; primary ids byte-identical to slot 0', () => {
+            const c = mk2({ brush: true });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            modDrag(canvas, 'shiftKey', 50, 30, 400, 270);
+            const b = c.brush();
+            assert.ok(b != null);
+            assert.ok(Array.isArray(b.idsBySeries), 'payload gains idsBySeries');
+            assert.equal(b.idsBySeries.length, 2, 'one slot per configured series');
+            assert.deepEqual(b.idsBySeries[0], bruteIds(S0, b), 'series 0 parity vs brute force');
+            assert.deepEqual(b.idsBySeries[1], bruteIds(S1, b), 'series 1 parity vs brute force');
+            assert.deepEqual(b.ids, bruteIds(S0, b), 'primary ids remain the series-0 scan');
+            assert.ok(b.ids.length > 0 && b.idsBySeries[1].length > 0, 'fixture must select points in BOTH series');
+            c.destroy();
+        });
+
+        it('IS: hidden series contributes a null slot; an earlier payload is a snapshot', () => {
+            const c = mk2({ brush: true });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            modDrag(canvas, 'shiftKey', 50, 30, 400, 270);
+            const first = c.brush();
+            assert.ok(Array.isArray(first.idsBySeries[1]), 'visible series has an ids array');
+
+            c.setSeriesVisible(1, false);
+            assert.strictEqual(c.brush(), first, 'visibility toggle must NOT recompute the committed payload');
+            assert.ok(Array.isArray(first.idsBySeries[1]), 'snapshot keeps the commit-time slot');
+
+            modDrag(canvas, 'shiftKey', 50, 30, 400, 270);
+            const second = c.brush();
+            assert.strictEqual(second.idsBySeries[1], null, 'hidden series -> null slot on the NEXT commit');
+            assert.deepEqual(second.idsBySeries[0], bruteIds(S0, second), 'visible series still brute-force exact');
+            c.destroy();
+        });
+
+        it('IS: setBrush echoes caller ids/idsBySeries verbatim and never recomputes', () => {
+            const c = mk2({ brush: true });
+            const ids = [7]; const perSeries = [[7], null];
+            c.setBrush({ xMin: 0, xMax: 9, yMin: 0, yMax: 9, ids, idsBySeries: perSeries });
+            const b = c.brush();
+            assert.strictEqual(b.ids, ids, 'caller ids array passes through by reference');
+            assert.strictEqual(b.idsBySeries, perSeries, 'caller idsBySeries passes through by reference');
+            c.setBrush({ xMin: 0, xMax: 9, yMin: 0, yMax: 9 });
+            assert.strictEqual(c.brush().idsBySeries, null, 'absent idsBySeries emits null, not a recompute');
+            c.destroy();
+        });
+
+        it('IS: horizontal gesture payload carries idsBySeries with slot 0 === ids', () => {
+            const c = mkH4({ brush: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            modDrag(canvas, 'shiftKey', 0, 0, 400, 300);
+            const b = c.brush();
+            assert.ok(b != null);
+            assert.ok(Array.isArray(b.idsBySeries) && b.idsBySeries.length === 1);
+            assert.deepEqual(b.idsBySeries[0], b.ids, 'single-series horizontal: slot 0 mirrors primary ids');
+            c.destroy();
+        });
+    });
+
+    // ---- horizontal band multi-select --------------------------------
+
+    describe('band multi-select', () => {
+        it('MS: fresh click selects one band across the full value span', () => {
+            const c = mkH4({ brush: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            modClick(canvas, 'shiftKey', 200, bandY(c, 1));
+            const b = c.brush();
+            assert.ok(b != null, 'a fresh modifier-click selects the clicked band');
+            assert.deepEqual(b.bands, ['B']);
+            assert.equal(b.bandMin, 1); assert.equal(b.bandMax, 1);
+            const vLo = Math.min(c.yScale.invert(0), c.yScale.invert(400));
+            const vHi = Math.max(c.yScale.invert(0), c.yScale.invert(400));
+            assert.ok(Math.abs(b.valueMin - vLo) < 1e-6, 'fresh click spans the full value domain (lo)');
+            assert.ok(Math.abs(b.valueMax - vHi) < 1e-6, 'fresh click spans the full value domain (hi)');
+            assert.deepEqual(b.ids, [1], 'the band-B row is selected');
+            c.destroy();
+        });
+
+        it('MS: clicks compose a non-contiguous selection; hull + set-membership ids; toggles clear', () => {
+            const c = mkH4({ brush: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            modClick(canvas, 'shiftKey', 200, bandY(c, 0));
+            modClick(canvas, 'shiftKey', 200, bandY(c, 2));
+            const b = c.brush();
+            assert.deepEqual(b.bands, ['A', 'C'], 'non-contiguous band set');
+            assert.equal(b.bandMin, 0, 'bandMin is the hull, not a contiguous span');
+            assert.equal(b.bandMax, 2, 'bandMax is the hull');
+            assert.deepEqual(b.ids, [0, 2], 'ids are set-membership over bands {0,2} -- row 1 (band B) excluded');
+            assert.deepEqual(b.idsBySeries, [[0, 2]], 'idsBySeries uses the same membership filter');
+
+            modClick(canvas, 'shiftKey', 200, bandY(c, 0));
+            assert.deepEqual(c.brush().bands, ['C'], 'toggling A off leaves C');
+            modClick(canvas, 'shiftKey', 200, bandY(c, 2));
+            assert.strictEqual(c.brush(), null, 'toggling the last band off clears');
+            c.destroy();
+        });
+
+        it('MS: a 1px jitter click still toggles (brushMoved latch regression)', () => {
+            const c = mkH4({ brush: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            jitterClick(canvas, 'shiftKey', 200, bandY(c, 3));
+            const b = c.brush();
+            assert.ok(b != null, 'jitter click must reach the toggle, not commit a 1px drag first');
+            assert.deepEqual(b.bands, ['D'], 'clicked band selected despite the sub-threshold move');
+            jitterClick(canvas, 'shiftKey', 200, bandY(c, 3));
+            assert.strictEqual(c.brush(), null, 'jitter click toggles back off');
+            c.destroy();
+        });
+
+        it('MS: a drag replaces a multi-select with the contiguous range', () => {
+            const c = mkH4({ brush: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            modClick(canvas, 'shiftKey', 200, bandY(c, 0));
+            modClick(canvas, 'shiftKey', 200, bandY(c, 3));
+            assert.deepEqual(c.brush().bands, ['A', 'D']);
+            modDrag(canvas, 'shiftKey', 50, bandY(c, 1), 350, bandY(c, 2));
+            assert.deepEqual(c.brush().bands, ['B', 'C'], 'drag replaces the composed selection');
+            c.destroy();
+        });
+
+        it('MS: drag out and back to the origin commits as a drag (latch), never toggles', () => {
+            const c = mkH4({ brush: true });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            canvas.dispatch('pointerdown', modEv('shiftKey', 200, 150, { button: 0 }));
+            canvas.dispatch('pointermove', modEv('shiftKey', 200, 40));
+            canvas.dispatch('pointermove', modEv('shiftKey', 201, 151));
+            canvas.dispatch('pointerup',   modEv('shiftKey', 201, 151));
+            const b = c.brush();
+            assert.ok(b != null, 'a latched gesture commits its final rect instead of counting as a click');
+            c.destroy();
+        });
+
+        it('MS: vertical charts keep click-to-clear (jitter click clears, never toggles)', () => {
+            const c = mk2({ brush: true });
+            const canvas = createInteractiveMockCanvas(500, 300);
+            c.mount(canvas);
+            modDrag(canvas, 'shiftKey', 50, 30, 400, 270);
+            assert.ok(c.brush() != null);
+            jitterClick(canvas, 'shiftKey', 250, 150);
+            assert.strictEqual(c.brush(), null, 'vertical sub-threshold click clears');
+            c.destroy();
+        });
+    });
+
+    // ---- setBrush({bands}) validation --------------------------------
+
+    describe('setBrush bands validation', () => {
+        it('SB: unknown or null band keys throw; the selection is untouched', () => {
+            const c = mkH4({ brush: true });
+            c.mount(createInteractiveMockCanvas(400, 300));   // categories exist only after extract
+            assert.throws(
+                () => c.setBrush({ valueMin: 0, valueMax: 100, bandMin: 0, bandMax: 0, bands: ['A', 'ZZZ'] }),
+                /existing category keys/,
+                'unknown category key fails closed',
+            );
+            assert.throws(
+                () => c.setBrush({ valueMin: 0, valueMax: 100, bandMin: 0, bandMax: 0, bands: ['A', null] }),
+                /existing category keys/,
+                'null band entry fails closed (null is not a key)',
+            );
+            assert.strictEqual(c.brush(), null, 'failed validation must not mutate the selection');
+            c.destroy();
+        });
+
+        it('SB: caller bands pass verbatim; hull is re-derived, caller bandMin/bandMax ignored', () => {
+            const c = mkH4({ brush: true });
+            c.mount(createInteractiveMockCanvas(400, 300));
+            const bands = ['A', 'C'];
+            c.setBrush({ valueMin: 0, valueMax: 100, bandMin: 99, bandMax: -5, bands });
+            const b = c.brush();
+            assert.strictEqual(b.bands, bands, 'validated caller array passes through');
+            assert.equal(b.bandMin, 0, 'hull lo re-derived from the band keys');
+            assert.equal(b.bandMax, 2, 'hull hi re-derived from the band keys');
+            c.destroy();
+        });
+
+        it('SB: absent bands keeps the contiguous span derivation', () => {
+            const c = mkH4({ brush: true });
+            c.mount(createInteractiveMockCanvas(400, 300));
+            c.setBrush({ valueMin: 0, valueMax: 100, bandMin: 1, bandMax: 2 });
+            assert.deepEqual(c.brush().bands, ['B', 'C'], 'span derivation is byte-identical to v1.9.0');
+            c.destroy();
+        });
+    });
+
+    // ---- overlay: one rect per contiguous run ------------------------
+
+    describe('overlay run rects', () => {
+        const SENTINEL = 'rgba(1, 2, 3, 0.5)';
+        // Count brush fillRects in the LAST rendered frame: walk the op log
+        // tracking fillStyle; a clearRect starts a new frame tally.
+        const lastFrameBrushRects = (ctx) => {
+            let fill = null; let rects = [];
+            const calls = ctx.calls;
+            for (let i = 0; i < calls.length; i++) {
+                const op = calls[i][0];
+                if (op === 'clearRect') { rects = []; continue; }
+                if (op === 'set:fillStyle') { fill = calls[i][1][0]; continue; }
+                if (op === 'fillRect' && fill === SENTINEL) rects.push(calls[i][1]);
+            }
+            return rects;
+        };
+
+        it('OV: a contiguous selection draws exactly one rect with the leftEdge geometry', () => {
+            const c = mkH4({ brush: true, brushStyle: { fill: SENTINEL } });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            c.setBrush({ valueMin: 10, valueMax: 90, bandMin: 1, bandMax: 2 });
+            const rects = lastFrameBrushRects(canvas.getContext('2d'));
+            assert.equal(rects.length, 1, 'one contiguous run -> one overlay rect');
+            const [, y, , h] = rects[0];
+            assert.ok(Math.abs(y - c.xScale.leftEdge(1)) < 1e-6, 'run top at leftEdge(bandMin)');
+            assert.ok(Math.abs((y + h) - (c.xScale.leftEdge(2) + c.xScale.bandWidth)) < 1e-6, 'run bottom at leftEdge(bandMax)+bandWidth');
+            c.destroy();
+        });
+
+        it('OV: a non-contiguous selection draws one rect per run; clear draws none', () => {
+            const c = mkH4({ brush: true, brushStyle: { fill: SENTINEL } });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            c.setBrush({ valueMin: 10, valueMax: 90, bandMin: 0, bandMax: 3, bands: ['A', 'B', 'D'] });
+            const ctx = canvas.getContext('2d');
+            const rects = lastFrameBrushRects(ctx);
+            assert.equal(rects.length, 2, 'runs {A,B} and {D} -> two rects');
+            assert.ok(rects[0][1] < rects[1][1], 'runs emitted in ascending band order');
+            c.clearBrush();
+            assert.equal(lastFrameBrushRects(ctx).length, 0, 'cleared selection draws no overlay');
+            c.destroy();
+        });
+
+        it('OV: exportSVG carries the same per-run rects', () => {
+            const c = mkH4({ brush: true, brushStyle: { fill: SENTINEL } });
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            c.setBrush({ valueMin: 10, valueMax: 90, bandMin: 0, bandMax: 3, bands: ['A', 'C'] });
+            const svg = c.exportSVG();
+            const hits = (svg.match(/rgba\(1, 2, 3, 0\.5\)/g) || []).length;
+            assert.ok(hits >= 2, 'SVG export must carry both run rects (fill + stroke may both match); got ' + hits);
+            c.destroy();
+        });
+    });
+});
+
+// ------------------------------------------------------------
+// v1.20.0 -- aborted gestures (pointercancel / pointerleave)
+// must never run the click branch: a toggle/clear the user did
+// not complete is a fail-open mutation. Latched drags keep the
+// pre-1.20 parity of committing their last rect.
+// ------------------------------------------------------------
+
+describe('v1.20.0 -- brush gesture aborts', () => {
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+    const ev = (x, y, extra) => Object.assign(
+        { clientX: x, clientY: y, pointerId: 1, shiftKey: true, preventDefault: () => {} },
+        extra || {});
+
+    const mkH = () => createBarChart({
+        data: [{ x: 'A', y: 100 }, { x: 'B', y: 50 }],
+        orientation: 'horizontal', brush: true,
+        width: 400, height: 300,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        schedule: (fn) => fn(),
+    });
+
+    for (const abort of ['pointercancel', 'pointerleave']) {
+        it(`AB: sub-threshold ${abort} leaves a horizontal selection untouched (no toggle)`, () => {
+            const c = mkH();
+            const canvas = createInteractiveMockCanvas(400, 300);
+            c.mount(canvas);
+            // Establish a selection by drag.
+            canvas.dispatch('pointerdown', ev(0, 0, { button: 0 }));
+            canvas.dispatch('pointermove', ev(400, 300));
+            canvas.dispatch('pointerup', ev(400, 300));
+            const before = c.brush();
+            assert.ok(before != null);
+            // Sub-threshold gesture aborted mid-flight.
+            const yB = c.xScale.leftEdge(1) + c.xScale.bandWidth / 2;
+            canvas.dispatch('pointerdown', ev(200, yB, { button: 0 }));
+            canvas.dispatch(abort, ev(200, yB));
+            assert.strictEqual(c.brush(), before, abort + ' must not toggle or clear');
+            // The abort must fully release the gesture: a later real click
+            // still toggles.
+            canvas.dispatch('pointerdown', ev(200, yB, { button: 0 }));
+            canvas.dispatch('pointerup', ev(200, yB));
+            assert.deepEqual(c.brush().bands, ['A'], 'gesture state recovered after the abort');
+            c.destroy();
+        });
+    }
+
+    it('AB: sub-threshold pointercancel leaves a vertical selection untouched (no clear)', () => {
+        const c = createLineChart({
+            series: [{ name: 'a', data: [{ x: 0, y: 0 }, { x: 9, y: 9 }] }],
+            x: 'x', y: 'y', brush: true,
+            width: 500, height: 300,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            schedule: (fn) => fn(),
+        });
+        const canvas = createInteractiveMockCanvas(500, 300);
+        c.mount(canvas);
+        canvas.dispatch('pointerdown', ev(50, 30, { button: 0 }));
+        canvas.dispatch('pointermove', ev(400, 270));
+        canvas.dispatch('pointerup', ev(400, 270));
+        const before = c.brush();
+        assert.ok(before != null);
+        canvas.dispatch('pointerdown', ev(250, 150, { button: 0 }));
+        canvas.dispatch('pointercancel', ev(250, 150));
+        assert.strictEqual(c.brush(), before, 'aborted click must not clear');
+        c.destroy();
+    });
+
+    it('AB: a latched drag aborted by pointercancel still commits its last rect', () => {
+        const c = mkH();
+        const canvas = createInteractiveMockCanvas(400, 300);
+        c.mount(canvas);
+        canvas.dispatch('pointerdown', ev(50, 20, { button: 0 }));
+        canvas.dispatch('pointermove', ev(350, 280));
+        canvas.dispatch('pointercancel', ev(350, 280));
+        const b = c.brush();
+        assert.ok(b != null, 'latched drag commits on abort (pre-1.20 parity)');
+        assert.equal(b.bands.length, 2, 'the dragged span is committed');
+        c.destroy();
+    });
+});
+
+// ------------------------------------------------------------
+// v1.20.0 -- module band-flag scratch hygiene: the grow-only
+// Uint8 scratch is shared across charts; a stale bit from one
+// chart's toggle must never leak a phantom band (or a phantom
+// overlay run) into another chart. Proves the zero-fill guards
+// load-bearing: reverting either fill loop turns these red.
+// ------------------------------------------------------------
+
+describe('v1.20.0 -- band scratch cross-chart hygiene', () => {
+    const createInteractiveMockCanvas = (width, height) => {
+        const base = createMockCanvas(width, height);
+        const listeners = new Map();
+        base.addEventListener = (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+        };
+        base.removeEventListener = (type, fn) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const idx = arr.indexOf(fn);
+            if (idx >= 0) arr.splice(idx, 1);
+        };
+        base.getBoundingClientRect = () => ({ left: 0, top: 0, width: base.width, height: base.height });
+        base.dispatch = (type, ev) => {
+            const arr = listeners.get(type);
+            if (!arr) return;
+            const copy = arr.slice();
+            for (let i = 0; i < copy.length; i++) copy[i](ev);
+        };
+        base.setPointerCapture = () => {};
+        base.releasePointerCapture = () => {};
+        return base;
+    };
+    const mkH4 = (extra) => createBarChart(Object.assign({
+        data: [{ x: 'A', y: 100 }, { x: 'B', y: 50 }, { x: 'C', y: 75 }, { x: 'D', y: 25 }],
+        orientation: 'horizontal',
+        width: 400, height: 300,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 },
+        schedule: (fn) => fn(),
+    }, extra));
+    const click = (canvas, x, y) => {
+        canvas.dispatch('pointerdown', { clientX: x, clientY: y, button: 0, pointerId: 1, shiftKey: true, preventDefault: () => {} });
+        canvas.dispatch('pointerup', { clientX: x, clientY: y, pointerId: 1, shiftKey: true });
+    };
+
+    it('SC: a prior chart toggle never leaks a phantom band into a fresh chart', () => {
+        // Chart 1 marks band 2 ('C') in the module scratch, then dies.
+        const c1 = mkH4({ brush: true });
+        const cv1 = createInteractiveMockCanvas(400, 300);
+        c1.mount(cv1);
+        click(cv1, 200, c1.xScale.leftEdge(2) + c1.xScale.bandWidth / 2);
+        assert.deepEqual(c1.brush().bands, ['C'], 'fixture: chart 1 leaves flags[2] set');
+        c1.destroy();
+
+        // Chart 2's fresh click on band 0 must yield exactly {A}: a stale
+        // flags[2] bit would surface as a phantom 'C'.
+        const c2 = mkH4({ brush: true });
+        const cv2 = createInteractiveMockCanvas(400, 300);
+        c2.mount(cv2);
+        click(cv2, 200, c2.xScale.leftEdge(0) + c2.xScale.bandWidth / 2);
+        const b = c2.brush();
+        assert.deepEqual(b.bands, ['A'], 'no phantom band from the shared scratch');
+        assert.deepEqual(b.ids, [0], 'ids see only the clicked band');
+        c2.destroy();
+    });
+
+    it('SC: a prior chart selection never bakes a phantom overlay run into a fresh chart', () => {
+        const SENTINEL = 'rgba(4, 5, 6, 0.5)';
+        const c1 = mkH4({ brush: true });
+        c1.mount(createInteractiveMockCanvas(400, 300));
+        c1.setBrush({ valueMin: 0, valueMax: 100, bandMin: 2, bandMax: 2, bands: ['C'] });
+        c1.destroy();
+
+        const c2 = mkH4({ brush: true, brushStyle: { fill: SENTINEL } });
+        const cv2 = createInteractiveMockCanvas(400, 300);
+        c2.mount(cv2);
+        c2.setBrush({ valueMin: 0, valueMax: 100, bandMin: 0, bandMax: 0, bands: ['A'] });
+        const ctx = cv2.getContext('2d');
+        let fill = null; let rects = 0;
+        const calls = ctx.calls;
+        for (let i = 0; i < calls.length; i++) {
+            const op = calls[i][0];
+            if (op === 'clearRect') { rects = 0; continue; }
+            if (op === 'set:fillStyle') { fill = calls[i][1][0]; continue; }
+            if (op === 'fillRect' && fill === SENTINEL) rects++;
+        }
+        assert.equal(rects, 1, 'exactly one overlay run -- no phantom run from the shared scratch');
+        c2.destroy();
     });
 });
