@@ -54,6 +54,33 @@ export interface SVGExportOptions {
 // Line chart
 // ---------------------------------------------------------------------------
 
+/**
+ * Error bars / confidence band (v1.21.0). A decoration over the continuous-x
+ * renderers (line / area / scatter): per-point whiskers and/or a filled ribbon
+ * projected through the y-scale. Supply either absolute `lo`/`hi` accessors OR
+ * the symmetric `value` magnitude (sugar for lo = y - value / hi = y + value);
+ * supplying both throws at construction. SoA data may carry parallel `los`/
+ * `his` arrays instead. A null/NaN lo/hi/value draws no whisker for that point.
+ */
+export interface ErrorBarsConfig {
+    /** Absolute lower value per row (AoS). Mutually exclusive with `value`. */
+    lo?: FieldAccessor;
+    /** Absolute upper value per row (AoS). Mutually exclusive with `value`. */
+    hi?: FieldAccessor;
+    /** Symmetric +/- magnitude. Mutually exclusive with `lo`/`hi`. */
+    value?: FieldAccessor;
+    /** Stroke color. Default = the series color. */
+    color?: string;
+    /** Stroke width in px. Default 1, clamped to (0, 8]. */
+    width?: number;
+    /** Cap half-extent in px. Default 3, clamped to [0, 32]; 0 = no caps. */
+    capWidth?: number;
+    /** false (whiskers only, default) | true (ribbon only) | 'both'. */
+    band?: boolean | 'both';
+    /** Band fill color. Default = the series color at ~0.15 alpha. */
+    bandFill?: string;
+}
+
 export interface SeriesConfig {
     name?: string;
     data: DataAccessor;
@@ -63,6 +90,8 @@ export interface SeriesConfig {
     interpolation?: InterpolationMode;
     /** Per-series override for markers. `false` disables. Default inherits from chart. */
     markers?: boolean | MarkerConfig;
+    /** Per-series error bars / confidence band. Default inherits from chart. */
+    errorBars?: ErrorBarsConfig;
 }
 
 export interface XScaleConfig {
@@ -443,6 +472,8 @@ export interface LineChartConfig extends PanZoomConfig, BrushConfig {
     interpolation?: InterpolationMode;
     /** Marker dots at each sample point. `true` for defaults, `false` to disable, or an object. */
     markers?: boolean | MarkerConfig;
+    /** Chart-level error bars / confidence band default; per-series `errorBars` overrides. */
+    errorBars?: ErrorBarsConfig;
     /** Gridlines through the plot rect at each tick. Default false. `true` enables both axes. */
     grid?: boolean | GridConfig;
 

@@ -1288,4 +1288,84 @@ export function run() {
             () => `A26: toggle storm ${gToggle.bytesPerOp.toFixed(3)} B/op vs drag control ${gDrag.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
         chart.destroy();
     }
+
+    // --- A27 (v1.21.0): error bars / confidence bands ------------------------
+    // (a) COLD/HOT ISOLATION -- the leak trap. The error-bar cold resolve
+    // tracks themeVersion + the data accessor ONLY; the hot project tracks
+    // scaleVersion. lo/hi accessors are called ONLY by resolve(), so their
+    // call count is a clean spy isolated from the main render path (which
+    // re-extracts per view via a DIFFERENT accessor). A scaleVersion leak into
+    // the cold effect -- re-resolving every pan/zoom frame -- shows up here as
+    // the lo/hi call count climbing across a pure setView storm.
+    // (b) HARD redraw gate: whisker + band ('both') frame path stays zero-alloc
+    // within 2 B/op of a no-errorBars control.
+    {
+        const N = 200;
+        const rows = [];
+        for (let i = 0; i < N; i++) {
+            const y = Math.sin(i * 0.05) * 10;
+            rows.push({ x: i, y, lo: y - 1.5, hi: y + 1.5 });
+        }
+        let loCalls = 0, hiCalls = 0;
+        const dataSig = signal(rows);
+        const mkLine = (bars) => {
+            const c = createLineChart({
+                data: dataSig,
+                zoom: true,
+                ...(bars ? {
+                    errorBars: {
+                        lo: (row) => { loCalls++; return row.lo; },
+                        hi: (row) => { hiCalls++; return row.hi; },
+                        band: 'both', capWidth: 4,
+                    },
+                } : {}),
+                width: 800, height: 400, schedule: (fn) => fn(),
+            });
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const c = mkLine(true);
+        const ctrl = mkLine(false);
+        // Exactly one cold resolve at mount: n lo + n hi accessor calls.
+        check(loCalls === N && hiCalls === N,
+            () => `A27: expected ${N} lo/${N} hi accessor calls at mount (one resolve), got ${loCalls}/${hiCalls}`);
+
+        // View storm: 208 scale changes + a redraw between each. Scale changes
+        // must reproject (hot) but NEVER re-resolve (cold) -- the lo/hi call
+        // count is FROZEN across the storm, and no signal-graph node is added.
+        const vA = { xMin: 10, xMax: 180, yMin: -12, yMax: 12 };
+        const vB = { xMin: 30, xMax: 160, yMin: -8, yMax: 8 };
+        for (let i = 0; i < 8; i++) c.setView(i & 1 ? vA : vB);   // settle (A22 precedent)
+        const loBefore = loCalls, hiBefore = hiCalls;
+        const before = graphSnapshot();
+        for (let i = 0; i < 208; i++) {
+            c.setView(i & 1 ? vA : vB);
+            c.redraw();
+        }
+        const after = graphSnapshot();
+        check(loCalls === loBefore && hiCalls === hiBefore,
+            () => `A27: cold resolve leaked into the frame path -- ${loCalls - loBefore} lo/${hiCalls - hiBefore} hi accessor calls across a pure view storm (expected 0)`);
+        check(after.nodes - before.nodes === 0,
+            () => `A27: ${after.nodes - before.nodes} new signal-graph nodes across the view storm (expected 0)`);
+
+        // Data change DOES re-resolve (the tracking is real, not dead): swap the
+        // data signal and confirm the accessor fires again.
+        const loAtSwap = loCalls;
+        dataSig.set(rows.slice());
+        check(loCalls > loAtSwap,
+            () => `A27: data change did not re-run the cold resolve (lo calls stuck at ${loCalls}) -- the data accessor is not tracked`);
+
+        // Redraw budget: whisker + band walk vs no-errorBars control.
+        const gEB = runOpsGate(() => { c.redraw(); }, { ops: 20000, warmup: 1000 });
+        const gCtrl = runOpsGate(() => { ctrl.redraw(); }, { ops: 20000, warmup: 1000 });
+        if (!gEB.report.ok) die(allocFailMsg('A27.errorbars-redraw', gEB.report, gEB.summary));
+        check(gEB.bytesPerOp <= 16,
+            () => `A27: error-bar redraw ${gEB.bytesPerOp.toFixed(3)} B/op > 16`);
+        check(Math.abs(gEB.bytesPerOp - gCtrl.bytesPerOp) <= 2.0,
+            () => `A27: error-bar redraw ${gEB.bytesPerOp.toFixed(3)} B/op vs no-errorBars control ${gCtrl.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+        ctrl.destroy();
+        c.destroy();
+    }
 }

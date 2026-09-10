@@ -12016,3 +12016,161 @@ describe('v1.20.0 -- band scratch cross-chart hygiene', () => {
         c2.destroy();
     });
 });
+
+// ---------------------------------------------------------------------------
+// v1.21.0 -- error bars / confidence bands
+// ---------------------------------------------------------------------------
+// The error-bar layer is a separate overlay (buildErrorBars) modeled on the
+// annotation cold-resolve/hot-project split: whiskers and/or a filled ribbon
+// per point, on line/area/scatter. These are boundary tests; the frame-path
+// 0-alloc claim + the cold/hot leak trap are gated in torture A27.
+//
+// Isolation idiom: two charts identical but for `errorBars`. The line + axis
+// ops are byte-identical, so a WITH - WITHOUT op-count delta is exactly the
+// error-bar layer's contribution. markers:false removes marker fill/moveTo
+// noise so the band's fill() and the whisker's moveTo isolate cleanly.
+describe('v1.21.0 -- error bars / confidence bands', () => {
+    const ebData = (n) => {
+        const d = [];
+        for (let i = 0; i < n; i++) {
+            const y = 5 + (i % 3);
+            d.push({ x: i, y, lo: y - 1, hi: y + 1 });
+        }
+        return d;
+    };
+    const mkLine = (data, errorBars, extra) => createLineChart(Object.assign({
+        data, markers: false, errorBars, width: 800, height: 400, schedule: (fn) => fn(),
+    }, extra || {}));
+    const drawn = (chart) => {
+        const canvas = createMockCanvas(800, 400);
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.redraw();
+        return ctx;
+    };
+
+    it('EB1: draws one whisker vertical per point (capWidth 0)', () => {
+        const data = ebData(4);
+        const cW = mkLine(data, { lo: 'lo', hi: 'hi', capWidth: 0 });
+        const cO = mkLine(data, undefined);
+        const dMove = countCalls(drawn(cW), 'moveTo') - countCalls(drawn(cO), 'moveTo');
+        assert.equal(dMove, 4, 'one whisker vertical (moveTo) per point');
+        cW.destroy(); cO.destroy();
+    });
+
+    it('EB2: a null lo row draws no whisker -- null is not zero (LOAD-BEARING)', () => {
+        const data = ebData(4);
+        data[1].lo = null;
+        const cW = mkLine(data, { lo: 'lo', hi: 'hi', capWidth: 0 });
+        const cO = mkLine(ebData(4), undefined);
+        const dMove = countCalls(drawn(cW), 'moveTo') - countCalls(drawn(cO), 'moveTo');
+        // Reverting the `== null ? NaN : +rl` gate makes null -> 0 -> a whisker
+        // anchored at map(0), so the count would be 4. Proven red by reversion.
+        assert.equal(dMove, 3, 'the null-lo row is skipped, never anchored at 0');
+        cW.destroy(); cO.destroy();
+    });
+
+    it('EB3: symmetric `value` sugar draws whiskers; value + lo throws', () => {
+        const data = [
+            { x: 0, y: 5, e: 2 }, { x: 1, y: 6, e: 1 },
+            { x: 2, y: 4, e: 2 }, { x: 3, y: 7, e: 1 },
+        ];
+        const cW = mkLine(data, { value: 'e', capWidth: 0 });
+        const cO = mkLine(data, undefined);
+        const dMove = countCalls(drawn(cW), 'moveTo') - countCalls(drawn(cO), 'moveTo');
+        assert.equal(dMove, 4, 'symmetric value yields lo=y-e / hi=y+e whiskers');
+        const before = stats().activeNodes;
+        assert.throws(() => mkLine(data, { value: 'e', lo: 'lo' }), /lite-charts.*mutually exclusive/);
+        assert.equal(stats().activeNodes - before, 0, 'rejected config leaks no node');
+        cW.destroy(); cO.destroy();
+    });
+
+    it('EB4: a NaN gap splits the confidence band into runs (LOAD-BEARING)', () => {
+        const full = ebData(5);
+        const gap = ebData(5);
+        gap[2].hi = null;   // break the middle -> runs {0,1} and {3,4}
+        const cFull = mkLine(full, { lo: 'lo', hi: 'hi', band: true });
+        const cGap = mkLine(gap, { lo: 'lo', hi: 'hi', band: true });
+        const cO = mkLine(full, undefined);
+        assert.equal(countCalls(drawn(cO), 'fill'), 0, 'a plain line chart fills nothing (baseline)');
+        assert.equal(countCalls(drawn(cFull), 'fill'), 1, 'all-finite series = one ribbon run');
+        // Reverting the run-split (one bridging run) collapses this to 1 -> red.
+        assert.equal(countCalls(drawn(cGap), 'fill'), 2, 'a mid-series gap splits into two runs');
+        cFull.destroy(); cGap.destroy(); cO.destroy();
+    });
+
+    it('EB5: a view/scale storm does not re-run the cold resolve (LOAD-BEARING)', () => {
+        let loCalls = 0;
+        const data = ebData(4);
+        const c = mkLine(data, { lo: (r) => { loCalls++; return r.lo; }, hi: 'hi' }, { zoom: true });
+        c.mount(createMockCanvas(800, 400));
+        const atMount = loCalls;
+        assert.equal(atMount, 4, 'exactly one cold resolve at mount (n lo calls)');
+        for (let i = 0; i < 10; i++) c.setView({ xMin: 0, xMax: 3, yMin: i, yMax: i + 10 });
+        // If disposeResolve tracked scaleVersion (the leak trap), loCalls would
+        // climb across the storm. Reverting the cold/hot split proves this red.
+        assert.equal(loCalls, atMount, 'scale changes reproject (hot) but never re-resolve (cold)');
+        c.destroy();
+    });
+
+    it('EB6: errorBars is per-series', () => {
+        const s0 = ebData(4);
+        const s1 = ebData(3);
+        const cW = createLineChart({
+            series: [{ name: 'a', data: s0, errorBars: { lo: 'lo', hi: 'hi', capWidth: 0 } },
+                     { name: 'b', data: s1 }],
+            markers: false, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        const cO = createLineChart({
+            series: [{ name: 'a', data: s0 }, { name: 'b', data: s1 }],
+            markers: false, width: 800, height: 400, schedule: (fn) => fn(),
+        });
+        const dMove = countCalls(drawn(cW), 'moveTo') - countCalls(drawn(cO), 'moveTo');
+        assert.equal(dMove, 4, 'only series 0 (n=4) gets whiskers, not series 1');
+        cW.destroy(); cO.destroy();
+    });
+
+    it('EB7: exportSVG emits the whisker + band geometry', () => {
+        const data = ebData(4);
+        const cW = mkLine(data, { lo: 'lo', hi: 'hi', band: 'both' });
+        const cO = mkLine(data, undefined);
+        cW.mount(createMockCanvas(800, 400));
+        cO.mount(createMockCanvas(800, 400));
+        const svgW = cW.exportSVG();
+        const svgO = cO.exportSVG();
+        assert.ok(svgW.length > svgO.length, 'error bars add geometry to the exported SVG');
+        assert.ok((svgW.match(/<path/g) || []).length > (svgO.match(/<path/g) || []).length,
+            'the ribbon + whiskers add path elements');
+        cW.destroy(); cO.destroy();
+    });
+
+    it('EB8: construction throws on junk errorBars, zero node delta', () => {
+        const data = ebData(4);
+        const bad = [
+            'x', 5, [], {}, { value: 'e', lo: 'lo' }, { lo: 'lo', width: 0 },
+            { lo: 'lo', width: -1 }, { lo: 'lo', width: NaN }, { lo: 'lo', capWidth: -1 },
+            { lo: 'lo', band: 'nope' }, { lo: 'lo', color: 5 }, { lo: 'lo', bandFill: {} },
+        ];
+        for (const eb of bad) {
+            const label = JSON.stringify(eb);
+            const before = stats().activeNodes;
+            assert.throws(() => mkLine(data, eb), /lite-charts/, 'expected throw for errorBars ' + label);
+            assert.equal(stats().activeNodes - before, 0, 'rejected errorBars ' + label + ' leaked a node');
+        }
+    });
+
+    it('EB9: whiskers project through a log y-axis; non-positive lo self-skips', () => {
+        const data = [
+            { x: 0, y: 10, lo: 5, hi: 20 }, { x: 1, y: 100, lo: 50, hi: 200 },
+            { x: 2, y: 1000, lo: 500, hi: 2000 }, { x: 3, y: 50, lo: 0, hi: 80 },
+        ];
+        const cW = mkLine(data, { lo: 'lo', hi: 'hi', capWidth: 0 }, { yScale: { type: 'log' } });
+        const cO = mkLine(data, undefined, { yScale: { type: 'log' } });
+        const dMove = countCalls(drawn(cW), 'moveTo') - countCalls(drawn(cO), 'moveTo');
+        // Row 3 has lo=0 -> map(0)=NaN under log -> that whisker's lo end is NaN
+        // -> self-skipped. The other three project through the log scale.
+        assert.equal(dMove, 3, 'the lo=0 row self-skips under log y; the rest draw');
+        cW.destroy(); cO.destroy();
+    });
+});

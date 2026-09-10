@@ -2307,10 +2307,360 @@ const DEFAULT_LEGEND_POSITION = 'bottom';
 const DEFAULT_GRID_COLOR = 'rgba(0,0,0,0.08)';
 const VALID_LEGEND_POSITIONS = { top: 1, bottom: 1, left: 1, right: 1 };
 
+// v1.21.0: error-bar / confidence-band defaults. Stroke width and cap extent
+// in pixels; the band fill inherits the series color at this alpha when the
+// user gives no explicit `bandFill` (so the trend line reads through).
+const DEFAULT_ERRORBAR_WIDTH = 1;
+const DEFAULT_ERRORBAR_CAP = 3;
+const DEFAULT_ERRORBAR_BAND_ALPHA = 0.15;
+
 // Pre-allocated constants used by the crosshair draw fn. Avoids `[]` /
 // `Math.PI * 2` allocations on every mousemove redraw.
 const _EMPTY_DASH = Object.freeze([]);
 const _TWO_PI = Math.PI * 2;
+
+// ---------------------------------------------------------------------------
+// Error bars / confidence bands (v1.21.0)
+// ---------------------------------------------------------------------------
+//
+// A DECORATION over the continuous-x renderers (line / area / scatter), not a
+// new kernel. Per-series `errorBars` config resolves cold to raw accessors +
+// colors; the layer projects lo/hi through the shared y-scale on the hot tick
+// (reusing the series' own pxs for x) and emits whiskers and/or a filled
+// ribbon at 0 B/frame, on the annotation cold-resolve / hot-project split.
+
+// Cold validator (construction, pre-signal). Returns a frozen resolved config,
+// or null when `raw == null` (the series carries no error bars). Every junk
+// shape FAILS CLOSED here -- before any owned signal is allocated -- so a
+// rejected chart leaks no arena slot. `seriesColor` is the RAW color spec
+// (may be a CSS var); it is the stroke/fill default, resolved later in the
+// cold effect. lo/hi/value become RAW accessors so the layer applies the
+// `== null` gate itself (the +null===0 trap: a null row must draw NO whisker,
+// never anchor at value 0).
+const _normalizeErrorBars = (raw, seriesColor) => {
+    if (raw == null) return null;
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new Error('lite-charts: errorBars must be an object { lo, hi } or { value }');
+    }
+    const hasLo = raw.lo != null;
+    const hasHi = raw.hi != null;
+    const hasVal = raw.value != null;
+    if (hasVal && (hasLo || hasHi)) {
+        throw new Error('lite-charts: errorBars `value` (symmetric) is mutually ' +
+            'exclusive with `lo`/`hi` (absolute) -- supply one or the other');
+    }
+    if (!hasVal && !hasLo && !hasHi) {
+        throw new Error('lite-charts: errorBars requires `value` (symmetric) or ' +
+            '`lo`/`hi` (absolute)');
+    }
+    // Accessors are raw: buildRawAccessor throws (lite-charts-prefixed) on a
+    // non-fn/non-key spec, so an invalid accessor still fails closed here.
+    const loAcc = hasLo ? buildRawAccessor(raw.lo) : null;
+    const hiAcc = hasHi ? buildRawAccessor(raw.hi) : null;
+    const valAcc = hasVal ? buildRawAccessor(raw.value) : null;
+    // Width: default 1, floor is exclusive (0, 8]; non-finite / <= 0 throws,
+    // an over-large width clamps to 8.
+    let width = DEFAULT_ERRORBAR_WIDTH;
+    if (raw.width != null) {
+        const w = +raw.width;
+        if (!Number.isFinite(w) || w <= 0) {
+            throw new Error('lite-charts: errorBars.width must be a finite number > 0');
+        }
+        width = w > 8 ? 8 : w;
+    }
+    // Cap half-extent: default 3, [0, 32]; 0 = no caps. Non-finite / < 0 throws,
+    // over-large clamps to 32.
+    let capWidth = DEFAULT_ERRORBAR_CAP;
+    if (raw.capWidth != null) {
+        const cw = +raw.capWidth;
+        if (!Number.isFinite(cw) || cw < 0) {
+            throw new Error('lite-charts: errorBars.capWidth must be a finite number >= 0');
+        }
+        capWidth = cw > 32 ? 32 : cw;
+    }
+    // Band: false (whiskers only) | true (ribbon only) | 'both'.
+    let band = false;
+    if (raw.band != null) {
+        if (raw.band === false || raw.band === true || raw.band === 'both') {
+            band = raw.band;
+        } else {
+            throw new Error("lite-charts: errorBars.band must be false, true, or 'both'");
+        }
+    }
+    if (raw.color != null && typeof raw.color !== 'string') {
+        throw new Error('lite-charts: errorBars.color must be a string');
+    }
+    if (raw.bandFill != null && typeof raw.bandFill !== 'string') {
+        throw new Error('lite-charts: errorBars.bandFill must be a string');
+    }
+    return Object.freeze({
+        loAcc,
+        hiAcc,
+        valAcc,
+        colorSpec: raw.color != null ? raw.color : seriesColor,
+        bandFillSpec: raw.bandFill != null ? raw.bandFill : null,
+        width,
+        capWidth,
+        band,
+    });
+};
+
+// The error-bar layer, modeled verbatim on buildAnnotations: ONE group under
+// scene.root holding a band pathNode (added FIRST, under the whiskers) and a
+// whisker pathNode. Owns per-series pooled raw columns los/his (Float64) and
+// their pixel projections plos/phis (Float32), grown per series length. The
+// cold effect (themeVersion + each opted series' data accessor) refills the
+// raw columns + resolves colors; the hot effect (scaleVersion + plotBounds)
+// re-maps to pixels every pan/zoom frame at 0 alloc.
+//
+// opts: {
+//   seriesStates, seriesRefs, series (normalized), yScale, yAccessor,
+//   plotBoundsBox, plotBoundsSignal, scaleVersion, themeVersion, container,
+//   markDirty
+// }
+const buildErrorBars = (parent, opts) => {
+    const series = opts.series;
+    const S = series.length;
+    const losPool = new Array(S).fill(null);   // raw lower value (Float64)
+    const hisPool = new Array(S).fill(null);   // raw upper value (Float64)
+    const plosPool = new Array(S).fill(null);  // pixel lower y (Float32)
+    const phisPool = new Array(S).fill(null);  // pixel upper y (Float32)
+    const ebN = new Int32Array(S);             // live point count per series
+    const strokeArr = new Array(S).fill(DEFAULT_LINE_COLOR);
+    const fillArr = new Array(S).fill(DEFAULT_LINE_COLOR);
+    const alphaArr = new Float64Array(S);      // band fill alpha per series
+
+    const ebGroup = parent.add(group({}));
+
+    // Band ribbon: for each opted, visible series with band !== false, walk the
+    // points L->R accumulating a maximal run where BOTH phis and plos (and the
+    // shared px) are finite; on a break, trace hi L->R then lo R->L, close, and
+    // fill. A NaN/null gap SPLITS the ribbon into runs (the polyline gap rule).
+    // Clipped to the plot rect (annotation clip idiom). 0 B/frame.
+    const bandDraw = (ctx) => {
+        const pb = opts.plotBoundsBox;
+        const plotL = pb.x;
+        const plotT = pb.y;
+        const plotR = pb.x + pb.w;
+        const plotB = pb.y + pb.h;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(plotL, plotT, plotR - plotL, plotB - plotT);
+        ctx.clip();
+        ctx.beginPath(); // clear the clip rect from the path chunk buffer.
+        for (let i = 0; i < S; i++) {
+            const cfg = series[i].errorBars;
+            if (!cfg || cfg.band === false) continue;
+            if (!opts.seriesRefs[i].visibleRef.value) continue;
+            const state = opts.seriesStates[i];
+            const pxs = state.pxs;
+            const plos = plosPool[i], phis = phisPool[i];
+            if (pxs === null || plos === null || phis === null) continue;
+            let count = ebN[i];
+            if (state.n < count) count = state.n;
+            ctx.fillStyle = fillArr[i];
+            const alpha = alphaArr[i];
+            if (alpha !== 1) ctx.globalAlpha = alpha;
+            let runStart = -1;
+            for (let j = 0; j <= count; j++) {
+                let ok = false;
+                if (j < count) {
+                    const px = pxs[j], pt = phis[j], pb2 = plos[j];
+                    ok = px === px && pt === pt && pb2 === pb2;
+                }
+                if (ok && runStart < 0) {
+                    runStart = j;
+                } else if (!ok && runStart >= 0) {
+                    ctx.beginPath();
+                    ctx.moveTo(pxs[runStart], phis[runStart]);
+                    for (let k = runStart + 1; k < j; k++) ctx.lineTo(pxs[k], phis[k]);
+                    for (let k = j - 1; k >= runStart; k--) ctx.lineTo(pxs[k], plos[k]);
+                    ctx.closePath();
+                    ctx.fill();
+                    runStart = -1;
+                }
+            }
+            if (alpha !== 1) ctx.globalAlpha = 1;
+        }
+        ctx.restore();
+    };
+
+    // Whiskers: for each opted, visible series with band !== true, per point a
+    // vertical segment (map(lo)..map(hi)) plus two caps of capWidth half-extent.
+    // NaN self-skips (px/pt/pb !== itself); a zero-length whisker (pt === pb) is
+    // skipped; plot-bounds x-cull is the candle idiom. ONE beginPath/stroke per
+    // series (color is per-series). 0 B/frame.
+    const whiskerDraw = (ctx) => {
+        const pb = opts.plotBoundsBox;
+        const plotL = pb.x;
+        const plotT = pb.y;
+        const plotR = pb.x + pb.w;
+        const plotB = pb.y + pb.h;
+        // Clip to the plot rect (the band/line/area idiom): a tall whisker at a
+        // visible x must not paint into the axis or title margin.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(plotL, plotT, plotR - plotL, plotB - plotT);
+        ctx.clip();
+        ctx.beginPath(); // clear the clip rect from the path chunk buffer.
+        for (let i = 0; i < S; i++) {
+            const cfg = series[i].errorBars;
+            if (!cfg || cfg.band === true) continue;
+            if (!opts.seriesRefs[i].visibleRef.value) continue;
+            const state = opts.seriesStates[i];
+            const pxs = state.pxs;
+            const plos = plosPool[i], phis = phisPool[i];
+            if (pxs === null || plos === null || phis === null) continue;
+            let count = ebN[i];
+            if (state.n < count) count = state.n;
+            const cap = cfg.capWidth;
+            ctx.strokeStyle = strokeArr[i];
+            ctx.lineWidth = cfg.width;
+            ctx.beginPath();
+            for (let j = 0; j < count; j++) {
+                const px = pxs[j];
+                if (px !== px) continue;
+                if (px + cap < plotL || px - cap > plotR) continue;
+                const pt = phis[j], pbb = plos[j];
+                if (pt !== pt || pbb !== pbb || pt === pbb) continue;
+                const wx = (px | 0) + 0.5;
+                ctx.moveTo(wx, pt);
+                ctx.lineTo(wx, pbb);
+                if (cap > 0) {
+                    const ct = (pt | 0) + 0.5;
+                    const cb = (pbb | 0) + 0.5;
+                    ctx.moveTo(wx - cap, ct);
+                    ctx.lineTo(wx + cap, ct);
+                    ctx.moveTo(wx - cap, cb);
+                    ctx.lineTo(wx + cap, cb);
+                }
+            }
+            ctx.stroke();
+        }
+        ctx.restore();
+    };
+
+    // Added band-first so the ribbon renders BEHIND the whiskers. Draw fns are
+    // defined above; the sync scheduler paints on add(), invoking each draw.
+    const bandPath = ebGroup.add(pathNode({ draw: (ctx) => bandDraw(ctx) }));
+    const whiskerPath = ebGroup.add(pathNode({ draw: (ctx) => whiskerDraw(ctx) }));
+    void bandPath; void whiskerPath;
+
+    // Data -> pixels. Reads NO signals (the hot effect wrapper tracks them), so
+    // resolve() may call it synchronously without leaking scaleVersion into the
+    // cold effect.
+    const project = () => {
+        const yS = opts.yScale;
+        for (let i = 0; i < S; i++) {
+            const cfg = series[i].errorBars;
+            if (!cfg) continue;
+            const n = ebN[i];
+            const los = losPool[i], his = hisPool[i];
+            const plos = plosPool[i], phis = phisPool[i];
+            if (los === null || his === null || plos === null || phis === null) continue;
+            for (let j = 0; j < n; j++) {
+                plos[j] = yS.map(los[j]);
+                phis[j] = yS.map(his[j]);
+            }
+        }
+        opts.markDirty();
+    };
+
+    // Cold resolve: raw columns + colors. Tracks themeVersion + each opted
+    // series' data accessor ONLY -- reads NO scale signal, so a pan/zoom storm
+    // reprojects (project below) WITHOUT re-running this step.
+    const resolve = () => {
+        const container = opts.container;
+        const yAcc = opts.yAccessor;
+        for (let i = 0; i < S; i++) {
+            const cfg = series[i].errorBars;
+            if (!cfg) continue;
+            strokeArr[i] = resolveColor(cfg.colorSpec, container);
+            fillArr[i] = resolveColor(cfg.bandFillSpec != null ? cfg.bandFillSpec : cfg.colorSpec, container);
+            alphaArr[i] = cfg.bandFillSpec != null ? 1 : DEFAULT_ERRORBAR_BAND_ALPHA;
+            const data = series[i].dataAccessor(); // tracked: data change re-resolves
+            let n = 0;
+            const soa = data && data.los && data.his &&
+                typeof data.los.length === 'number' && typeof data.his.length === 'number';
+            if (soa) {
+                const dl = data.los, dh = data.his;
+                n = dl.length < dh.length ? dl.length : dh.length;
+            } else if (Array.isArray(data)) {
+                n = data.length;
+            }
+            const need = n > 0 ? n : 1;
+            const los = ensureFloat64(losPool[i], need);
+            const his = ensureFloat64(hisPool[i], need);
+            const plos = ensureFloat32(plosPool[i], need);
+            const phis = ensureFloat32(phisPool[i], need);
+            losPool[i] = los; hisPool[i] = his;
+            plosPool[i] = plos; phisPool[i] = phis;
+            if (soa) {
+                const dl = data.los, dh = data.his;
+                for (let j = 0; j < n; j++) {
+                    const rl = dl[j], rh = dh[j];
+                    los[j] = rl == null ? NaN : +rl;
+                    his[j] = rh == null ? NaN : +rh;
+                }
+            } else if (cfg.valAcc) {
+                // Symmetric sugar: lo = y - v, hi = y + v. The magnitude v is
+                // == null gated before the + (null is not zero, so a null
+                // magnitude self-skips, never a 0-width bar). y comes through the
+                // SAME buildAccessor coercion the line uses (a NaN y self-skips;
+                // a null y centers at 0 exactly where the polyline plots it, so
+                // the bar never disagrees with the point).
+                const va = cfg.valAcc;
+                for (let j = 0; j < n; j++) {
+                    const row = data[j];
+                    const rv = va(row, j);
+                    const v = rv == null ? NaN : +rv;
+                    const y = yAcc(row, j);
+                    if (v !== v || y !== y) {
+                        los[j] = NaN; his[j] = NaN;
+                    } else {
+                        los[j] = y - v; his[j] = y + v;
+                    }
+                }
+            } else {
+                // Absolute lo/hi. A missing accessor leaves that end NaN (the
+                // whisker/band point self-skips); each application gates == null.
+                const la = cfg.loAcc, ha = cfg.hiAcc;
+                for (let j = 0; j < n; j++) {
+                    const row = data[j];
+                    const rl = la ? la(row, j) : null;
+                    const rh = ha ? ha(row, j) : null;
+                    los[j] = rl == null ? NaN : +rl;
+                    his[j] = rh == null ? NaN : +rh;
+                }
+            }
+            ebN[i] = n;
+        }
+    };
+
+    const disposeResolve = effect(() => {
+        opts.themeVersion();
+        resolve();
+        project();
+    });
+
+    const disposeProject = effect(() => {
+        opts.scaleVersion();
+        opts.plotBoundsSignal();
+        project();
+    });
+
+    const dispose = () => {
+        disposeResolve();
+        disposeProject();
+        ebGroup.remove();
+    };
+
+    return {
+        ebGroup,
+        dispose,
+        get count() { return ebN; },
+    };
+};
 
 // v1.5.0: crosshair guide line, factored into two orientation-specific
 // helpers so drawCrosshair is a single branch-free call per frame. The kernel
@@ -6317,6 +6667,9 @@ const createBaseAxisChart = (config, renderer) => {
             lineWidth: s.lineWidth != null ? s.lineWidth : (config.lineWidth != null ? config.lineWidth : 1.5),
             interpolation: _resolveInterpolation(s.interpolation != null ? s.interpolation : config.interpolation),
             markers: s.markers !== undefined ? s.markers : config.markers,
+            errorBars: _normalizeErrorBars(
+                s.errorBars != null ? s.errorBars : config.errorBars,
+                s.color != null ? s.color : (config.color != null ? config.color : DEFAULT_LINE_COLOR)),
         }));
     } else if (config.data != null) {
         normalized = [{
@@ -6326,10 +6679,16 @@ const createBaseAxisChart = (config, renderer) => {
             lineWidth: config.lineWidth != null ? config.lineWidth : 1.5,
             interpolation: _resolveInterpolation(config.interpolation),
             markers: config.markers,
+            errorBars: _normalizeErrorBars(
+                config.errorBars,
+                config.color != null ? config.color : DEFAULT_LINE_COLOR),
         }];
     } else {
         throw new Error('lite-charts: chart factory requires `data` or `series`');
     }
+    // v1.21.0: build the error-bar layer only when a series actually opts in --
+    // a chart without errorBars stays byte-identical (zero node delta).
+    const anyErrorBars = normalized.some((s) => s.errorBars);
 
     // -- Accessors --
     const xKey = config.x != null ? config.x : 'x';
@@ -6583,6 +6942,12 @@ const createBaseAxisChart = (config, renderer) => {
     // Assigned in mount() when the layer is built; exposed on _internal so
     // white-box tests read pool lengths / visibility. null when disabled.
     let annHandle = null;
+
+    // v1.21.0: error-bar theme signal, bumped in refreshTheme alongside
+    // annThemeVersion so CSS-var-driven stroke/fill colors track a theme
+    // switch. null (and the layer never built) when no series opts in.
+    const ebThemeVersion = anyErrorBars ? _own(signal(0)) : null;
+    let ebHandle = null;
 
     // -- Refs that the draw closures read (mutated by an effect) --
     // visibleRef mirrors a public-facing `seriesVisibility[i]` signal so the
@@ -7369,6 +7734,28 @@ const createBaseAxisChart = (config, renderer) => {
                 draw: (ctx) => drawFn(ctx),
             }));
             seriesNodes.push(node);
+        }
+
+        // -- Error-bar / confidence-band layer (v1.21.0) --
+        // Attached AFTER the series nodes (band + whiskers sit over the line,
+        // under crosshair) and BEFORE annotations. Runtime-isolated: built only
+        // when a series opts in (anyErrorBars), so a plain chart is unchanged.
+        if (anyErrorBars) {
+            const eb = buildErrorBars(scene.root, {
+                seriesStates,
+                seriesRefs,
+                series: normalized,
+                yScale,
+                yAccessor,
+                plotBoundsBox,
+                plotBoundsSignal,
+                scaleVersion,
+                themeVersion: ebThemeVersion,
+                container,
+                markDirty: () => { if (scene) scene.markDirty(); },
+            });
+            ebHandle = eb;
+            disposers.push(eb.dispose);
         }
 
         // -- Annotation layer (v1.7.0) --
@@ -8431,6 +8818,9 @@ const createBaseAxisChart = (config, renderer) => {
         // Re-fire the annotation resolve/color step so CSS-var-driven rule /
         // fill / label colors track the theme. The markDirty below repaints.
         if (annThemeVersion) annThemeVersion.update((v) => (v + 1) | 0);
+        // v1.21.0: re-fire the error-bar cold resolve so CSS-var stroke/fill
+        // colors track the theme too.
+        if (ebThemeVersion) ebThemeVersion.update((v) => (v + 1) | 0);
         // Update legend swatches too -- they were styled from colorRef at build time.
         // v1.12.0: the virtualized legend has no positional span:first-child map
         // (rows are pooled/recycled), so repaint the bound rows by index instead.
@@ -8497,6 +8887,9 @@ const createBaseAxisChart = (config, renderer) => {
             // null when no `annotations` config. A getter because annHandle is
             // assigned in mount(), after this object is built.
             get annotations() { return annHandle; },
+            // v1.21.0: the error-bar layer handle, or null when no series opts
+            // in. A getter for the same mount()-timing reason as annotations.
+            get errorBars() { return ebHandle; },
         },
     };
 

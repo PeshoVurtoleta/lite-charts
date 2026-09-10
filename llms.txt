@@ -39,7 +39,30 @@
 > OUT for v1 with a named trigger -- candles sit at TRUE time, weekend/
 > holiday gaps show as gaps (the shading engine's premise); volume panes,
 > comparison overlays, hollow/heikin-ashi variants OUT (see README).
-> v1.20.0 (current): brush v2 on axis-kernel charts. Config gains
+> v1.21.0 (current): error bars / confidence bands on line/area/scatter.
+> Per-series (chart-level default) config.errorBars: { lo, hi } (absolute
+> per-row accessors/keys, or SoA los/his typed arrays alongside xs/ys) OR
+> { value } (symmetric magnitude, lo=y-v / hi=y+v; supplying value AND
+> lo/hi throws). band: false (default) draws whiskers (vertical bar +
+> capWidth caps), true a filled ribbon, 'both' both; a NaN/null gap SPLITS
+> the ribbon into runs. color defaults to the series color, bandFill to that
+> color at ~0.15 alpha, width clamps (0,8], capWidth [0,32]. A separate
+> overlay layer (buildErrorBars) modeled on the annotation cold-resolve/
+> hot-project split: the cold effect (themeVersion + the data accessor)
+> refills raw lo/hi columns + resolves colors, the hot effect (scaleVersion
+> + plotBounds) re-maps to pixels every frame at 0 B; x reuses the series'
+> own projected pxs. Reads NO scale signal in the cold effect (no per-frame
+> re-resolve). Projects through a log y-axis (non-positive bound -> NaN
+> self-skip), clips to the plot rect, exportSVG emits the geometry. FAILS
+> CLOSED: a per-row null/NaN lo/hi/value self-skips that point (== null
+> gated before + -- never a 0-anchored bar); a malformed errorBars throws at
+> construction before any signal alloc (zero node delta). A chart without
+> errorBars is byte-identical. OUT (named refusals): bar error bars
+> (grouped/stacked offset), decimated high-N whiskers (per raw point, low-N
+> intent), horizontal-bar layouts, box plot, stacked area. +9 tests
+> (543->552), 3 reversion proofs, torture A27 (whisker+band storm within
+> 2 B/op of a no-errorBars control; cold resolve once per data/theme change).
+> v1.20.0: brush v2 on axis-kernel charts. Config gains
 > brushModifier?: 'shift'|'alt'|'ctrl'|'meta' (default 'shift'); an
 > unknown value throws at construction, resolved cold to one predicate
 > (no per-event string compare). Every gesture-driven brush commit adds

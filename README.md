@@ -17,14 +17,30 @@
 > `@zakkster/lite-axis` (tick generation). Three peer deps. ESM-only.
 > ~1100 lines single file. MIT.
 
-**Status:** v1.20.0 -- brush v2 (minor). A configurable
-`brushModifier` (`'shift' | 'alt' | 'ctrl' | 'meta'`); every gesture
-commit now carries `idsBySeries`, a per-series row-index snapshot beside
-the primary `ids`; the horizontal-bar brush gains band multi-select
-(modifier+click toggles a band, non-contiguous `bands`, hull
-`bandMin`/`bandMax`, one overlay rect per contiguous run); and the
-vertical `setBrush` null-bound path is now fail-closed. Draws at 0 B/frame.
-**543/543 tests pass** plus a torture/stress gate (`npm run torture`).
+**Status:** v1.21.0 -- error bars / confidence bands (minor). Opt in per
+series with `errorBars: { lo, hi }` (absolute) or `{ value }` (symmetric)
+on line / area / scatter: whiskers (vertical bar + caps) and/or a filled
+confidence-band ribbon (`band: true | 'both'`), projected through the
+y-scale on the annotation cold-resolve/hot-project split. A null or NaN
+`lo`/`hi` self-skips that point (never anchored at 0); junk config throws
+at construction. Draws at 0 B/frame.
+**552/552 tests pass** plus a torture/stress gate (`npm run torture`).
+
+**New in v1.21.0:**
+- **Error bars / confidence bands.** Per-series (chart-level default)
+  `errorBars: { lo, hi }` (absolute per-row accessors or SoA `los`/`his`
+  arrays) or `{ value }` (symmetric magnitude, `lo = y - v` / `hi = y + v`;
+  mutually exclusive with `lo`/`hi`). `band: false` draws whiskers (vertical
+  bar + `capWidth` caps), `true` draws a filled ribbon, `'both'` draws both;
+  a NaN/null gap splits the ribbon into runs. `color` defaults to the series
+  color, `bandFill` to that color at ~0.15 alpha. Projects through a log
+  y-axis (a non-positive bound self-skips), clips to the plot rect, and
+  emits to SVG. A per-row null/NaN `lo`/`hi`/`value` self-skips that point
+  (`+null === 0` gated -- never a 0-anchored bar); a bad config throws at
+  construction before any signal is allocated. A chart without `errorBars`
+  is byte-identical. New torture A27 (whisker + band gesture storm within
+  2 B/op of a no-errorBars control; the cold resolve fires once per
+  data/theme change, never per frame).
 
 **New in v1.20.0:**
 - **Brush v2.** `brushModifier` selects the gesture modifier (default
@@ -816,6 +832,63 @@ createLineChart({ data: dense, markers: { everyN: 10 } });
 
 **Decimation interaction:** markers are suppressed when the decimated path
 runs (>2x plot width). They'd be unreadable.
+
+## Error bars + confidence bands (v1.21.0)
+
+Opt in per series (or chart-level as a default) on `createLineChart`,
+`createAreaChart`, `createScatterChart`. Each point gets a lower/upper
+bound, drawn as a whisker (vertical bar + caps), a filled ribbon, or both.
+
+```javascript
+// Absolute lo/hi per row.
+createLineChart({
+  data: [{ x: 0, y: 5, lo: 4, hi: 6.5 }, { x: 1, y: 6, lo: 5.2, hi: 6.8 }],
+  errorBars: { lo: 'lo', hi: 'hi' },        // whiskers, caps 3px
+});
+
+// Symmetric magnitude -- lo = y - e, hi = y + e.
+createLineChart({
+  data: rows,
+  errorBars: { value: 'stderr', band: 'both' },  // ribbon + whiskers
+});
+
+// Per series: bars on one series only.
+createLineChart({
+  series: [
+    { name: 'model', data: pred, errorBars: { lo: 'p05', hi: 'p95', band: true } },
+    { name: 'actual', data: obs },            // no bars
+  ],
+});
+```
+
+`errorBars` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `lo`, `hi` | Absolute lower/upper accessors or keys (AoS). Mutually exclusive with `value`. |
+| `value` | Symmetric magnitude: `lo = y - v`, `hi = y + v`. |
+| `band` | `false` whiskers only (default), `true` filled ribbon, `'both'`. |
+| `color` | Whisker stroke. Default = the series color. |
+| `width` | Whisker stroke px. Default 1, clamped to `(0, 8]`. |
+| `capWidth` | Cap half-extent px. Default 3, `[0, 32]`; `0` = no caps. |
+| `bandFill` | Ribbon fill. Default = the series color at ~0.15 alpha. |
+
+SoA data supplies parallel `los` / `his` typed arrays alongside `xs` / `ys`
+instead of accessors. Bounds project through the y-scale (log-safe -- a
+non-positive bound self-skips) on the annotation cold-resolve/hot-project
+split, so a pan/zoom frame re-maps at 0 B and the raw columns re-resolve
+only on a data or theme change. A NaN/null gap splits the ribbon into runs.
+
+**Fail-closed:** a per-row `null`/`NaN` `lo`/`hi`/`value` self-skips that
+point -- never a bar anchored at 0 (`+null === 0` is gated). A malformed
+`errorBars` (junk shape, `value` together with `lo`/`hi`, bad
+`width`/`capWidth`/`band`/`color`) throws at construction before any signal
+is allocated.
+
+**Not for:** bar charts (the grouped/stacked offset math is a separate
+cut), decimated high-N series (bars draw per raw point -- intended for
+low-N), and horizontal-bar layouts. Box plots and stacked area are later
+statistical cuts.
 
 ## Theme reactivity (v1.0.0)
 
@@ -2155,7 +2228,8 @@ forward plan and the development history that led here. Headlines:
 | **v1.15.0** | Horizontal legend virtualization + early-close holidays + an earlier fail-closed point for bad legend config. A virtualized legend at `position: 'top'`/`'bottom'` windows a single non-wrapping row scrolling along X: supply `legend.width` + `legend.itemWidth` (positive integers) and the adapter receives `{ count, itemWidth, width, overscan, renderRow, horizontal: true }`. Size keys are orientation-exclusive -- `height`/`itemHeight` on top/bottom, or `width`/`itemWidth` on left/right, throw at construction; the left/right adapter opts + DOM path stay byte-identical. `shading.holidays` entries may be `{ ts, closeMinutes }` (early close): every session that UTC day clamps to close at `closeMinutes` (1..1439) and the trailing closed time fuses forward like a whole-day holiday's band; whole-day (number) entries are byte-identical. Early-close doors that throw at construction: object without `ts`; bad `ts`; `closeMinutes` null/non-integer/outside 1..1439; a duplicate UTC day across all entries; an early close on a weekday with no open session; an early close on a day carrying an overnight evening session. The clamp is one cold-path line in `_sessionBands` (`cutMs = Infinity` on non-early days). Legend position/container validation + `virtualize` normalization are hoisted above the first owned signal in `createBaseAxisChart`, so bad legend config throws with nothing allocated; when both chart-type options and legend are invalid, the `initOpts` error wins. 10 new tests (463->473) + torture A21 (horizontal scroll storm vs a vertical-storm branch-parity control, measured delta 0.000 B/op); five reversion proofs. |
 | **v1.16.0** | Injected field-raster layer on `createScatterChart`. `field: { index, value, gridW?, gridH?, colors?, colorFn?, opacity? }` rasterizes the primary series' per-point scalar into a smooth barycentric-interpolated background heatmap -- the third injection rung after `spatialIndex` and `cells`. The triangulated mesh + serpentine grid sampler come from an injected `FieldIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.3.0`, `createFieldIndex(N)`; lite-charts imports nothing), built over pixel-space points and re-sampled cold on every data/scale change on the same `postProject` seam as cells, so it stays anisotropy-correct under pan/zoom. One `sampleField` per refresh fills a pooled grow-only grid; per-cell CSS colors are precomputed cold so the draw walks a prebuilt array (`fillStyle`/`fillRect`, NaN cells skipped) at 0 B/frame; `exportSVG` emits one `<rect>` per finite cell. `gridW`/`gridH` integers in `[8,256]` (default 64x48); `colors` `[low,high]` hex ramp (default blue-100 -> blue-900) or `colorFn(v,vMin,vMax)` with extents over the FINITE cells only; `opacity` default 0.5. Independent fault domain from `cells` (own `try/catch`, own `ctx` error slot OR-ed into the mount door, own handle disposal); drawn UNDER the cells node. `interpolate` is never called. Construction throws before any owned signal: non-object `field`, missing/non-function `index`, missing `value`, non-integer/out-of-caps `gridW`/`gridH` (`== null` gated before any `+`). A scatter with no `field` is byte-identical. |
 | **v1.17.0** | Contour/isoline layer over the field raster. `field.contours: { levels: count \| number[], color?, width?, dash? }` sweeps the injected triangulation for iso-value crossings (`triangleCount`/`triangleVertices` + edge interpolation -- exact for the piecewise-linear interpolant, proven against an independent planar oracle) and strokes them between the raster and the cells layer at 0 B/frame from a pooled cold-computed segment buffer. Count-form levels sit strictly inside the finite sampled range and re-derive per pan/zoom (outlier rule); explicit out-of-range levels legally draw nothing; strict `z > v` tie rule (every triangle yields 0 or 2 crossings). Third independent fault domain: reuses the field handle, skips when the raster shows nothing (no rebuild), never disposes what it does not own. Bad `levels` throw pre-signal; junk styles fall back. SVG parity free through the draw serializer. `locate`/`barycentric` remain unconsumed -- no delaunay-side change. |
-| **v1.20.0** (this) | Brush v2 on axis-kernel charts. `brushModifier: 'shift' \| 'alt' \| 'ctrl' \| 'meta'` (default `'shift'`) picks the gesture modifier, resolved cold to one predicate (no per-event string compare). Every gesture-driven brush commit now carries `idsBySeries` -- a commit-time per-series snapshot (null slot for an empty or hidden series; visibility read untracked, never recomputed on a later toggle) alongside the visibility-blind primary `ids`. Horizontal-bar brush gains a band multi-select: a modifier+click TOGGLES the clicked band in/out of the selection (modifier+drag still replaces with a contiguous range); toggling the last band off clears to `null`; the payload's `bands` may now be NON-contiguous, `bandMin`/`bandMax` are the HULL, and the overlay walks baked contiguous runs (one rect per run, byte-identical to the one-rect path for a single run). `setBrush({ bands })` validates every entry is an existing category key (else throws) and re-derives the hull. Fixed: the vertical `setBrush` null-bound path now fails closed (`setBrush({ xMin: null })` previously coerced to bound 0). 543 tests + torture gate. |
+| **v1.21.0** (this) | Error bars / confidence bands on line / area / scatter. Opt in per series (chart-level default) with `errorBars: { lo, hi }` (absolute per-row accessors, or SoA `los`/`his` arrays) or `{ value }` (symmetric, `lo = y - v` / `hi = y + v`; mutually exclusive with `lo`/`hi`). `band: false` (default) draws whiskers (vertical bar + `capWidth` caps), `true` a filled ribbon, `'both'` both; a NaN/null gap splits the ribbon into runs. `color` defaults to the series color, `bandFill` to that color at ~0.15 alpha. Projected through the y-scale (log-safe: a non-positive bound self-skips) on the annotation cold-resolve/hot-project split, clipped to the plot rect, SVG-exported. A per-row null/NaN `lo`/`hi`/`value` self-skips that point (`+null === 0` gated -- never a 0-anchored bar); a bad config throws at construction, zero node delta; a chart without `errorBars` is byte-identical. +9 tests (543->552), three reversion proofs, torture A27 (whisker + band storm within 2 B/op of a no-errorBars control; cold resolve once per data/theme change). |
+| **v1.20.0** | Brush v2 on axis-kernel charts. `brushModifier: 'shift' \| 'alt' \| 'ctrl' \| 'meta'` (default `'shift'`) picks the gesture modifier, resolved cold to one predicate (no per-event string compare). Every gesture-driven brush commit now carries `idsBySeries` -- a commit-time per-series snapshot (null slot for an empty or hidden series; visibility read untracked, never recomputed on a later toggle) alongside the visibility-blind primary `ids`. Horizontal-bar brush gains a band multi-select: a modifier+click TOGGLES the clicked band in/out of the selection (modifier+drag still replaces with a contiguous range); toggling the last band off clears to `null`; the payload's `bands` may now be NON-contiguous, `bandMin`/`bandMax` are the HULL, and the overlay walks baked contiguous runs (one rect per run, byte-identical to the one-rect path for a single run). `setBrush({ bands })` validates every entry is an existing category key (else throws) and re-derives the hull. Fixed: the vertical `setBrush` null-bound path now fails closed (`setBrush({ xMin: null })` previously coerced to bound 0). 543 tests + torture gate. |
 | **v1.19.0** | Candlestick / OHLC chart. `createCandlestickChart({ data, keys?, up?, down?, wick?, bodyRatio?, shading?, ... })` -- the tenth chart type on the axis kernel via a fresh `CANDLE_RENDERER` (no sibling spread; a `createLineChart`-only bundle gains nothing). Forced time x, median-slot body width recomputed cold per data/scale change, raw-double timestamps (minute bars draw exactly despite the Float32 xs pools), per-value log-safe o/h/l/c projection, whole-series fail-closed OHLC validation (mount throws; corrupt swaps draw nothing), doji ticks, O/H/L/C tooltip rows via a new guarded `tooltipRows` renderer hook, `shading` engine reused by reference, SVG parity. +11 tests (503->514), five reversion proofs, torture A25 (1k branch-parity + 10k absolute + retention). |
 | v1.18.0 | Cluster-outlines layer on `createScatterChart`. `outlines: { index, groupKey, alpha?, stroke?, strokeWidth?, fill?, fillOpacity?, dash? }` draws one boundary per point group -- convex hull (no `alpha`) or concave alpha shape (`alpha` = pixel radius, finite `> 0`, `Infinity` refused) -- via an injected `ClusterIndexFactory` (optional peer `@zakkster/lite-delaunay` `^1.4.0`, `createClusterIndex(maxPoints)`; zero imports). Fourth injection rung: rows partition by raw `groupKey` (SameValueZero, insertion-ordered; `== null` -> no group), per-group pixel subsets pack cold (non-finite rows skipped), one handle per group per refresh on the `postProject` seam, queries land in SAFE-bound pooled buffers (`3n`/`n` per their 1.4.0 docs), loops bake into flat pooled geometry walked at 0 B/frame above cells / below markers. Multi-loop shapes + hole loops draw as ordinary loops; per-group single-path fill + nonzero rule + opposite hole winding = correct holes. Fourth independent fault domain (own error slot in the mount-door OR); degenerate groups skip silently; > 64 groups faults fail-closed. Doors pre-signal; junk styles fall back; `typeof` handle probe at first refresh. 13 new tests (490->503: hull-oracle bijection w/ orientation, 2-loop split fixture, four-domain fault matrix both ways, build/dispose ledger, hole-winding fill, SVG Z-closure, absent-config parity) + torture A24 (208-write gesture storm, 416/416 builds/disposes, redraw within 2 B/op of a no-outlines control); five reversion proofs. |
 | v1.21.0+ (candidates) | In confirmed order (see ROADMAP): error bars / confidence bands; axis titles + zero-alloc tick formatters; chart title/subtitle/caption in the layout system; linked-chart helpers; crosshair/tooltip ARIA; data labels on bars/points. Deferred with named triggers: volume pane, index-compact x, candlestick variants, low-GC transitions. |

@@ -4,14 +4,19 @@ Local working scratch. **Not shipped** -- `briefs/` is absent from
 package.json `files[]`, so nothing here reaches npm. Each brief is a
 self-contained plan for one future `cd LiteCharts && claude` session.
 
-Current state: **v1.19.0 SHIPPED** -- candlestick/OHLC chart, brief
+Current state: **v1.20.0 SHIPPED** -- brush v2, brief #17 executed
+2026-09-08 (configurable `brushModifier`, per-series commit-time
+`idsBySeries` snapshot, horizontal-bar band multi-select with
+non-contiguous `bands`/hull/pooled run-baked overlay, plus the vertical
+`setBrush` null-gate fix; two review finds fixed -- brushMoved latch +
+onBrushAbort; 543/543 + A26 + 4 reversion proofs, reviewer REJECTED-then-
+fixed). Published + npm-view-verified 2026-09-08 (latest=1.20.0); catalog
+card synced. Prior: **v1.19.0** -- candlestick/OHLC chart, brief
 #16 executed 2026-09-06 (`createCandlestickChart`, tenth axis-kernel type
 via CANDLE_RENDERER; forced time x, median slot, RAW-double ts path over
 the Float32 xs pools, whole-series fail-closed OHLC, per-value log
 projection, tooltipRows hook, shading engine by reference; 514/514 + A25 +
-5 reversion proofs, reviewer APPROVED zero blockers). Published +
-npm-view-verified 2026-09-06 (latest=1.19.0); catalog card synced.
-Prior: **v1.18.0** (npm-view
+5 reversion proofs). Prior: **v1.18.0** (npm-view
 2026-09-06 -- cluster-outlines layer on scatter, brief #14
 executed 2026-09-05 -- `outlines: { index, groupKey, alpha?, ... }`, fourth
 injection rung + fourth fault domain, per-group hull/alpha-shape vs the
@@ -54,7 +59,8 @@ The forward plan in `../ROADMAP.md` points here.
 | ~~7~~ | ~~`market-hours.md`~~ | **SHIPPED v1.11.0** | S-M | Caller-supplied session calendar, complement-of-open-union band generation over the v1.10.0 shading machinery (`_weekendBands` byte-identical). Overnight sessions still OUT (throw; v1.11.x candidate). Kept for reference. |
 | ~~5~~ | ~~`legend-virtualization.md`~~ | **SHIPPED v1.12.0** | S | Caller-supplied `virtualize` fn per the `spatialIndex` precedent (NO lite-virtual import), vertical-only, ONE shared visibility effect + ONE delegated click listener (the planner overturned the brief's bounded-pool-effects option -- a rebind inside a scroll callback cannot re-run an effect). Horizontal virtualization still throws (candidate). Kept for reference. |
 | ~~11~~ | ~~`charts-gl-rescue.md`~~ | **EXECUTED -- 0.1.0 SHIPPED 2026-09-05** (published + npm-view-verified, card synced) | S-M | Gate the July orphan and publish: git init, reprove the 117 mock-GL tests, build the missing torture tiers (T0/T6/T7/T9 -- the one real engineering task; zero-GC claim currently UNPROVEN), fix the version lies (llms.txt "v1.0.0", stale sibling note, no VERSION const), blueprint README + missing ROADMAP.md + ASCII scrub. No feature work; the lite-gl-migration question is explicitly deferred to 1.0.0. Written 2026-09-03; amended 2026-09-05 with the user's demo verdict ("bad and outdated") -- demo refresh now IN scope as T7 (pinned importmap, real version tag, a 100k+ stress scene w/ measured fps; grounding in the brief). Confirmed as the NEXT session. AS-EXECUTED: 118 tests, tiers T0/T6/T7/T9 + BREAK control, ONE real leak found + fixed (unmount never disposed the 4 handle signals -- lite-signal reclaims only on explicit dispose), truth pass incl. dangling `types` refs removed, demo scene 05 measured the instanced-quad fill wall (1M @ 2px sub-50fps at dpr 2) -- the grounding that feeds #15. |
-| 17 | `brush-refinements.md` | feature, v1.20.0 -- **EXECUTED 2026-09-08** (full pipeline: planner -> coder x3 -> reviewer REJECTED-then-fixed -> qa; 543/543 tests incl. 29 new + HB2 re-pin, torture ok + new A26 gate, 4 measured reversion proofs; ALL THREE cuts landed, no v1.21.0 split; release pending) | M | Brush v2: configurable brush modifier (shift hardcoded at Charts.js:7472/:7629); brush IDs across all visible series (additive `idsBySeries`, primary `ids` unchanged); horizontal-bar band multi-select (toggle-click, non-contiguous `bands`, hull bandMin/bandMax, pooled run-baked overlay); PLUS a mandatory fail-closed fix -- vertical `brushFacade.set` has no `== null` gate (:6810-6816, `setBrush({xMin:null})` -> silent 0; the horizontal branch was fixed in v1.9.0, vertical never was). Cuts 1+2+fix alone are a releasable v1.20.0; cut 3 may split to v1.21.0. |
+| ~~17~~ | ~~`brush-refinements.md`~~ | feature, v1.20.0 -- **SHIPPED 2026-09-08** (published + npm-view-verified, card synced; full pipeline: planner -> coder x3 -> reviewer REJECTED-then-fixed -> qa; 543/543 tests incl. 29 new + HB2 re-pin, torture ok + new A26 gate, 4 measured reversion proofs; ALL THREE cuts landed, no v1.21.0 split) | M | Brush v2: configurable brush modifier (shift hardcoded at Charts.js:7472/:7629); brush IDs across all visible series (additive `idsBySeries`, primary `ids` unchanged); horizontal-bar band multi-select (toggle-click, non-contiguous `bands`, hull bandMin/bandMax, pooled run-baked overlay); PLUS a mandatory fail-closed fix -- vertical `brushFacade.set` has no `== null` gate (:6810-6816, `setBrush({xMin:null})` -> silent 0; the horizontal branch was fixed in v1.9.0, vertical never was). Cuts 1+2+fix alone are a releasable v1.20.0; cut 3 may split to v1.21.0. |
+| 18 | `error-bars.md` | feature, v1.21.0 -- **EXECUTED 2026-09-08** (queue item 2 of 7; planner stalled -> lead re-emitted the plan, coder landed T1-T7 + .d.ts before its turn limit, lead added torture A27, reviewer APPROVED zero blockers + 2 nits fixed, qa=lead; 552/552 + torture A27 + three reversion proofs; release pending) | M | First statistical-series cut, the ROADMAP's cheapest: per-point `lo`/`hi` accessors (absolute + symmetric `value` sugar) projected through the y-scale on the annotation cold-resolve/hot-project 0-B/frame idiom -- whiskers (error bars) and/or a filled ribbon (confidence band), on line/area/scatter. NO new kernel; DECORATES existing continuous-x renderers, candle's per-point-column precedent (os/hs/ls/cs -> pos/phs/pls/pcs). Per-series config (multi-series), null/NaN self-skips per point (never anchors at 0 -- the `+null===0` trap), construction-throws on junk config. OUT (named): bar error bars (grouped/stacked offset math), decimated whiskers, horizontal, box plot/stacked area (the NEXT cuts). Open planner decisions: per-series vs chart-level config placement, whether the band ships with the whiskers or fast-follows. |
 | 15 | `charts-gl-1.0.0-core.md` | decision, lite-charts-gl 1.0.0 -- EXECUTES IN LiteChartsGl AFTER the user records its DECISION block | M-L | The D5 gate #11 deferred, now decidable: lite-gl 2.0.0's real surface read side by side with the 0.1.0 internals (2026-09-05). Grounded on three defects 0.1.0 measured or carries latently -- the 1M fill wall (observed), float32 epoch-ms collapse (ULP 131,072 ms; latent, demos use synthetic ranges), zero context-loss handling -- ALL pre-solved + torture-gated in lite-gl (POINT_HI camera, sink-owned restore, zero-alloc pick). Mapping: scatter -> createPointHiSink, heatmap -> createQuadSink (live setValues lands), line STAYS hairline (no LINE_HI exists). Costs disclosed: x5 scatter memory, lite-raf peer baggage, pointShape parity. Recommendation option 1 at sinks-only depth, falsifiable by a T1 spike A/B with a written 2b bail-out; both lanes carry full tasks + gates. |
 | 12 | `field-raster.md` | feature, v1.16.0 -- **SHIPPED 2026-09-05, live on npm (verified)** | M | THE field consumer brief the dormancy protocol anticipated: `field: { index }` on scatter, third rung of the injection ladder, consuming the published lite-delaunay 1.3.0 `createFieldIndex` (locked contract + perf grounding recorded above). sampleField-only batching (never hot interpolate), postProject cold lifecycle per the cells precedent; as-executed: NO row flip (by0 = plotTop already lands row 0 on top -- orientation proven by fixture + reversion), independent cells/field fault domains, reviewer's coverage-only REJECTED discharged by qa (FR1-9 + A22 + 5 reversions). Peer bump ^1.3.0. |
 | 14 | `cluster-outlines.md` | feature, v1.18.0 -- **EXECUTED 2026-09-05** vs the published delaunay 1.4.0 (503/503, torture A24, five reversion proofs, reviewer APPROVED zero blockers; zero contract deviations -- see the brief's AS-EXECUTED block; SHIPPED, npm-verified 2026-09-06) | M | Fourth injection rung: per-group convex-hull / alpha-shape outlines on scatter (`outlines: { index, groupKey, alpha? }`). THIS brief carries the consumer contract 1.4.0 is built against (the 1.2.0/1.3.0 protocol): `convexHull(outIndices)->count` + `alphaShape(alpha, outIndices, outLoopEnds)->loopCount`, ORIGINAL indices, CCW, multi-loop via exclusive end-offsets, zero-alloc, documented sizing bound, alpha finite >0 in pixel units. alphaShape is the wake trigger -- convexHull alone is caller-computable. Relay the contract section to the lite-delaunay session; execute charts-side only against the PUBLISHED 1.4.0. |
@@ -70,11 +76,12 @@ upcoming back-office build (time-series KPI panel + many-series dashboards).
 ~~#14 cluster outlines -> v1.18.0~~ SHIPPED (published + verified
 2026-09-06); ~~#16 candlestick -> v1.19.0~~ SHIPPED (published + verified
 2026-09-06).
-~~#17 brush-refinements -> v1.20.0~~ EXECUTED 2026-09-08 (all three cuts
-+ the fail-closed fix; awaiting /release + publish).
+~~#17 brush-refinements -> v1.20.0~~ SHIPPED 2026-09-08 (all three cuts
++ the fail-closed fix; published + npm-view-verified, card synced).
 Remaining -- per the ROADMAP "Queue (2026-09-06, user-confirmed order)",
-next up is item 2: error bars / confidence bands; then axis titles +
-tick-format callback; chart chrome; linked-chart helpers; a11y live
+item 2 (error bars / confidence bands) is EXECUTED 2026-09-08 as the v1.21.0
+candidate (`error-bars.md`, release pending); next up is item 3: axis titles
++ tick-format callback; then chart chrome; linked-chart helpers; a11y live
 region; data labels -- each still needs a brief before its cut.
 Parallel: #15 (the charts-gl 1.0.0 render-core decision -- awaiting the
 user's DECISION record; item 6's fate is decided there).

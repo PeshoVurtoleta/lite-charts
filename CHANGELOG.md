@@ -5,6 +5,54 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] -- 2026-09-08
+
+### Added
+
+- **Error bars / confidence bands** on `createLineChart`, `createAreaChart`,
+  `createScatterChart`. Opt in per series (chart-level `errorBars` is the
+  default) with `errorBars: { lo, hi }` (absolute per-row accessors/keys, or
+  SoA `los` / `his` typed arrays) or `{ value }` (symmetric magnitude,
+  `lo = y - v` / `hi = y + v`; mutually exclusive with `lo`/`hi`). `band`:
+  `false` draws whiskers (vertical bar + `capWidth` caps), `true` a filled
+  ribbon, `'both'` both; a NaN/null gap splits the ribbon into runs. `color`
+  defaults to the series color, `bandFill` to that color at ~0.15 alpha,
+  `width` clamps to `(0, 8]`, `capWidth` to `[0, 32]`.
+- Bounds project through the y-scale (log-safe: a non-positive bound
+  self-skips) on the annotation cold-resolve/hot-project split -- a pan/zoom
+  frame re-maps at 0 B/frame; the raw columns re-resolve only on a data or
+  theme change. The layer clips to the plot rect and exports to SVG. A chart
+  without `errorBars` is byte-identical (the overlay builds only when a
+  series opts in).
+
+### Fixed
+
+- A per-row `null`/`NaN` `lo`/`hi`/`value` self-skips that point rather than
+  anchoring a bar at 0 (`+null === 0` gated before the coercion, per the
+  house "null is not zero" rule).
+
+### Design
+
+- Fail-closed at construction: a malformed `errorBars` (non-object, `value`
+  together with `lo`/`hi`, none of `lo`/`hi`/`value`, bad
+  `width`/`capWidth`/`band`/`color`/`bandFill`) throws before any signal is
+  allocated (zero node delta).
+- Out of scope (named refusals): bar-chart error bars (grouped/stacked
+  offset math), decimated high-N whiskers (bars draw per raw point --
+  intended for low-N series), horizontal-bar layouts, box plots, stacked
+  area.
+
+### Coverage
+
+- +9 boundary tests (543 -> 552): whisker-per-point, the null-gate skip, the
+  symmetric sugar + mutual-exclusion throw, the band run-split, cold/hot
+  isolation (a scale storm never re-resolves), per-series scoping, SVG
+  emission, the full construction-throw matrix, and log-y projection with a
+  non-positive self-skip. Three guards proven load-bearing by measured
+  reversion. Torture A27: a whisker + band gesture storm stays within 2 B/op
+  of a no-errorBars control, and the cold resolve fires once per data/theme
+  change, never per frame.
+
 ## [1.20.0] -- 2026-09-08
 
 ### Added

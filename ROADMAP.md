@@ -5,7 +5,33 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.20.0 (current)
+## v1.21.0 (current)
+
+Error bars / confidence bands (brief #18, `briefs/error-bars.md`, incl. the
+EXECUTED block; queue item 2). The first statistical-series cut. Opt in per
+series (chart-level default) on line/area/scatter with `errorBars: { lo, hi }`
+(absolute per-row accessors/keys, or SoA `los`/`his` arrays) or `{ value }`
+(symmetric, `lo = y - v` / `hi = y + v`; value + lo/hi throws). `band` false
+draws whiskers (bar + `capWidth` caps), true a filled ribbon, `'both'` both;
+a NaN/null gap splits the ribbon into runs. A separate overlay layer
+(`buildErrorBars`) modeled verbatim on the annotation cold-resolve/hot-project
+split -- the cold effect (themeVersion + data accessor) refills raw lo/hi
+columns + resolves colors, the hot effect (scaleVersion + plotBounds) re-maps
+to pixels at 0 B/frame; x reuses the series' own projected `pxs`. Log-safe
+(non-positive bound self-skips), clips to the plot rect, exportSVG emits the
+geometry. Fail-closed: a per-row null/NaN `lo`/`hi`/`value` self-skips that
+point (`+null === 0` gated -- never a 0-anchored bar); a junk config throws
+pre-signal (zero node delta); a chart without `errorBars` is byte-identical.
++9 tests (543 -> 552), three reversion proofs (null gate, band run-split,
+cold/hot isolation), torture A27 (whisker+band storm within 2 B/op of a
+no-errorBars control; cold resolve once per data/theme change). Reviewer
+APPROVED, zero blockers; two nits fixed (whisker plot-rect clip + a comment
+overclaim). OUT (named refusals): bar error bars (grouped/stacked offset),
+decimated high-N whiskers, horizontal-bar layouts, box plot, stacked area.
+
+---
+
+## v1.20.0
 
 Brush v2 (brief #17, `briefs/brush-refinements.md`, incl. the EXECUTED
 block). Three cuts plus a fail-closed fix, all in one candidate.
@@ -870,7 +896,7 @@ Each still needs a grounded brief before its cut (only #1 has one so far,
 `briefs/brush-refinements.md`); descriptions for #2-#7 live in the absorbed
 list above.
 
-1. **Brush v2** (EXECUTED 2026-09-08 as the v1.20.0 candidate -- all three cuts + the fix landed, 543/543 + torture + A26, release pending) -- three cuts on the
+1. **Brush v2** (SHIPPED 2026-09-08 as v1.20.0 -- all three cuts + the fix landed, 543/543 + torture + A26; released + published to npm, card synced) -- three cuts on the
    brush surface plus one fix: configurable brush modifier (`shift` is
    hardcoded at the two gesture gates, Charts.js:7472/:7629); brush IDs
    across all visible series (`_commitBrush` reads `seriesStates[0]`
@@ -881,7 +907,10 @@ list above.
    finite check (:6810-6816), so `setBrush({xMin: null})` silently
    becomes 0 (the horizontal branch was fixed in v1.9.0; the vertical
    never was).
-2. **Error bars / confidence bands** -- first statistical series cut.
+2. **Error bars / confidence bands** (EXECUTED 2026-09-08 as v1.21.0 --
+   brief #18, per-series `errorBars` whiskers + ribbon on line/area/scatter,
+   552/552 + torture A27 + three reversion proofs, reviewer APPROVED) --
+   first statistical series cut.
 3. **Axis titles + tick-format callback** (secondary y-axis stays a
    separate, bigger candidate).
 4. **Chart chrome** -- title / subtitle / caption in the reactive margin
