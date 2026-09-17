@@ -11981,11 +11981,41 @@ const createBaseGridChart = (config, renderer) => {
     const disposers = [];
     let mounted = false;
 
+    // v1.22.0: mount() resolves these six colors in place, overwriting the
+    // original specs (which may be '--var' tokens) with concrete strings. Capture
+    // the originals here so refreshTheme() and any remount after unmount() can
+    // re-resolve from the tokens, not from a stale concrete value.
+    const _themeSpecs = {
+        colorLow:               opts.colorLow,
+        colorHigh:              opts.colorHigh,
+        labelColor:             opts.labelColor,
+        highlightStroke:        opts.highlightStroke,
+        rowColumnHighlightFill: opts.rowColumnHighlightFill,
+        valueLabelColor:        opts.valueLabelColor,
+    };
+    const _resolveThemeColors = () => {
+        opts.colorLow              = resolveColor(_themeSpecs.colorLow, container);
+        opts.colorHigh             = resolveColor(_themeSpecs.colorHigh, container);
+        opts.labelColor            = resolveColor(_themeSpecs.labelColor, container);
+        opts.highlightStroke       = resolveColor(_themeSpecs.highlightStroke, container);
+        opts.rowColumnHighlightFill= resolveColor(_themeSpecs.rowColumnHighlightFill, container);
+        opts.valueLabelColor       = resolveColor(_themeSpecs.valueLabelColor, container);
+    };
+
     // -- Chart object (built before mount; some fields populated then) --
     const chart = {
         mount: null,         // assigned below
         unmount: null,
         redraw: () => { if (scene) scene.markDirty(); },
+        // v1.22.0: re-resolves the CSS-var-driven colors against the container's
+        // computed style and recomputes the precomputed per-cell color arrays,
+        // then repaints. Cold path (theme switch); safe no-op when unmounted.
+        refreshTheme: () => {
+            if (!mounted) return;
+            _resolveThemeColors();
+            renderer.computeColors(state, opts);   // cell + label colors were precomputed from the old ramp
+            if (scene) scene.markDirty();
+        },
         // Read-only state introspection for tests / debug. _internal NOT
         // public API; do not depend on shape across minor versions.
         _internal: { state, xBand, yBand, plotBoundsBox },
@@ -12058,13 +12088,10 @@ const createBaseGridChart = (config, renderer) => {
             _wireAutoSize(container, widthAutoSig, heightAutoSig, disposers);
         }
 
-        // Resolve theme-affected colors (CSS-vars -> concrete strings).
-        opts.colorLow              = resolveColor(opts.colorLow, container);
-        opts.colorHigh             = resolveColor(opts.colorHigh, container);
-        opts.labelColor            = resolveColor(opts.labelColor, container);
-        opts.highlightStroke       = resolveColor(opts.highlightStroke, container);
-        opts.rowColumnHighlightFill= resolveColor(opts.rowColumnHighlightFill, container);
-        opts.valueLabelColor       = resolveColor(opts.valueLabelColor, container);
+        // Resolve theme-affected colors (CSS-vars -> concrete strings). Specs
+        // come from _themeSpecs so a remount after unmount() re-resolves the
+        // original tokens rather than re-passing the previously-resolved values.
+        _resolveThemeColors();
 
         const schedule = config.schedule || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => cb());
         scene = createScene(canvas, {

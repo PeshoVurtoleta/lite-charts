@@ -5,6 +5,40 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] -- 2026-09-17
+
+### Added
+
+- `chart.refreshTheme()` on the heatmap / grid kernel -- re-resolves the six
+  theme-affected colors (`colors` ramp endpoints, `labelColor`,
+  `highlightStroke`, `rowColumnHighlightFill`, `valueLabelColor`) from their
+  ORIGINAL specs and recomputes the precomputed cell/label color arrays, then
+  repaints; brings the grid kernel to parity with the axis/polar/radar kernels
+  (`Charts.d.ts` already declared it on `Chart`).
+
+### Design
+
+- The specs are captured at construction, before `mount()` resolves them in
+  place -- the one structural delta vs the other kernels, whose spec-vs-ref
+  split already survived mount. `refreshTheme` is a cold path (theme switch):
+  no new signals or effects, the per-frame draw path is byte-identical, and
+  color resolution stays off the `redraw()` path (test-pinned). Unmounted
+  charts no-op; a headless or unresolvable `--var` token resolves to the
+  `#888` fallback; the `valueLabelColor: 'auto'` per-cell contrast sentinel
+  survives repeated refreshes.
+
+### Fixed
+
+- Remounting a heatmap after `unmount()` now re-resolves the original CSS-var
+  tokens instead of passing the previously-resolved concrete values through
+  again.
+
+### Coverage
+
+- 6 new boundary tests (H-RT1..H-RT6; 552 -> 558), one measured reversion
+  proof (a neutered `refreshTheme` body reddens H-RT2/3/4/5 while the no-op
+  guard and repaint tests stay green), torture gate ok.
+
 ## [1.21.0] -- 2026-09-08
 
 ### Added

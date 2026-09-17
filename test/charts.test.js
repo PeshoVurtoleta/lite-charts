@@ -5240,6 +5240,180 @@ describe('createHeatmap polish (v1.2.0)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// v1.22.0 -- heatmap refreshTheme (grid kernel theme parity)
+// ---------------------------------------------------------------------------
+
+describe('heatmap refreshTheme (v1.22.0)', () => {
+    // Simulate a themable container: getComputedStyle resolves '--' tokens
+    // from a mutable map (the A5 pattern). Restores the global in finally.
+    const withTheme = (vars, fn) => {
+        const origGCS = globalThis.getComputedStyle;
+        let gcsCalls = 0;
+        globalThis.getComputedStyle = () => {
+            gcsCalls++;
+            return { getPropertyValue: (k) => (vars[k] != null ? vars[k] : '') };
+        };
+        try {
+            return fn(() => gcsCalls);
+        } finally {
+            globalThis.getComputedStyle = origGCS;
+        }
+    };
+
+    const GRID_2x1 = [
+        { x: 'A', y: 'R', value: 0 },
+        { x: 'B', y: 'R', value: 10 },
+    ];
+
+    it('H-RT1: refreshTheme is a safe no-op before mount, after unmount, after destroy', () => {
+        const chart = createHeatmap({ data: GRID_2x1, width: 400, height: 200, schedule: (fn) => fn() });
+        chart.refreshTheme(); // never mounted
+        chart.mount(createMockCanvas(400, 200));
+        chart.unmount();
+        chart.refreshTheme(); // unmounted (container/scene nulled)
+        chart.destroy();
+        chart.refreshTheme(); // destroyed
+    });
+
+    it('H-RT2: CSS-var ramp endpoints re-resolve and cellColors recompute', () => {
+        // Flip-in-place: mutate the SAME vars map between mount and refresh.
+        const vars = { '--lo': '#000000', '--hi': '#ffffff' };
+        withTheme(vars, () => {
+            const chart = createHeatmap({
+                data: GRID_2x1,
+                colors: ['--lo', '--hi'],
+                width: 400, height: 200,
+                schedule: (fn) => fn(),
+            });
+            chart.mount(createMockCanvas(400, 200));
+            // value 0 -> lo endpoint, value 10 -> hi endpoint.
+            assert.equal(chart._internal.state.cellColors[0], 'rgb(0,0,0)');
+            assert.equal(chart._internal.state.cellColors[1], 'rgb(255,255,255)');
+
+            // Pre-flip refresh must be a stable no-change.
+            chart.refreshTheme();
+            assert.equal(chart._internal.state.cellColors[0], 'rgb(0,0,0)');
+
+            vars['--lo'] = '#ff0000';
+            vars['--hi'] = '#00ff00';
+            chart.refreshTheme();
+            assert.equal(chart._internal.state.cellColors[0], 'rgb(255,0,0)',
+                'low endpoint must re-resolve from the ORIGINAL --lo token');
+            assert.equal(chart._internal.state.cellColors[1], 'rgb(0,255,0)',
+                'high endpoint must re-resolve from the ORIGINAL --hi token');
+            chart.destroy();
+        });
+    });
+
+    it('H-RT3: redraw() does not re-resolve (resolution stays off the redraw path)', () => {
+        const vars = { '--lo': '#000000', '--hi': '#ffffff' };
+        withTheme(vars, (gcsCalls) => {
+            const chart = createHeatmap({
+                data: GRID_2x1,
+                colors: ['--lo', '--hi'],
+                width: 400, height: 200,
+                schedule: (fn) => fn(),
+            });
+            chart.mount(createMockCanvas(400, 200));
+            const afterMount = gcsCalls();
+            chart.redraw();
+            chart.redraw();
+            assert.equal(gcsCalls(), afterMount,
+                'getComputedStyle must not be reached from redraw()');
+            chart.refreshTheme();
+            assert.ok(gcsCalls() > afterMount,
+                'refreshTheme() must re-resolve through getComputedStyle');
+            chart.destroy();
+        });
+    });
+
+    it('H-RT4: axis labelColor CSS-var re-resolves and paints with the new value', () => {
+        const vars = { '--txt': '#111111' };
+        withTheme(vars, () => {
+            const canvas = createMockCanvas(400, 200);
+            const chart = createHeatmap({
+                data: GRID_2x1,
+                labelColor: '--txt',
+                width: 400, height: 200,
+                schedule: (fn) => fn(),
+            });
+            chart.mount(canvas);
+            const ctx = canvas.getContext('2d');
+            vars['--txt'] = '#eeeeee';
+            ctx.calls.length = 0;
+            chart.refreshTheme(); // markDirty -> sync draw
+            const fills = ctx.calls.filter((c) => c[0] === 'set:fillStyle').map((c) => c[1][0]);
+            assert.ok(fills.includes('#eeeeee'),
+                'labels must paint with the re-resolved color, got: ' + fills.join(','));
+            assert.ok(!fills.includes('#111111'),
+                'the stale mount-time label color must be gone');
+            chart.destroy();
+        });
+    });
+
+    it('H-RT5: valueLabelColor auto sentinel survives refreshTheme; explicit token re-resolves', () => {
+        const vars = { '--lo': '#000000', '--hi': '#010101', '--vl': '#123456' };
+        withTheme(vars, () => {
+            // Default 'auto': all-dark ramp -> white contrast labels, before
+            // AND after refreshTheme (sentinel must not be clobbered).
+            const auto = createHeatmap({
+                data: GRID_2x1,
+                colors: ['--lo', '--hi'],
+                showValues: true,
+                width: 400, height: 200,
+                schedule: (fn) => fn(),
+            });
+            auto.mount(createMockCanvas(400, 200));
+            assert.equal(auto._internal.state.cellLabelColors[0], '#ffffff');
+            auto.refreshTheme();
+            assert.ok(auto._internal.state.cellLabelColors,
+                'auto-contrast labels must still be computed after refreshTheme');
+            assert.equal(auto._internal.state.cellLabelColors[0], '#ffffff');
+            auto.destroy();
+
+            // Explicit '--vl' token: repaints with the flipped value.
+            const canvas = createMockCanvas(400, 200);
+            const explicit = createHeatmap({
+                data: GRID_2x1,
+                showValues: true,
+                valueLabelColor: '--vl',
+                width: 400, height: 200,
+                schedule: (fn) => fn(),
+            });
+            explicit.mount(canvas);
+            const ctx = canvas.getContext('2d');
+            vars['--vl'] = '#654321';
+            ctx.calls.length = 0;
+            explicit.refreshTheme();
+            const fills = ctx.calls.filter((c) => c[0] === 'set:fillStyle').map((c) => c[1][0]);
+            assert.ok(fills.includes('#654321'),
+                'value labels must paint with the re-resolved color');
+            explicit.destroy();
+        });
+    });
+
+    it('H-RT6: refreshTheme triggers a repaint; headless var resolution fails closed', () => {
+        // No getComputedStyle mock here: '--' tokens fall back to '#888'
+        // (fail closed) and refreshTheme neither throws nor skips the repaint.
+        const canvas = createMockCanvas(400, 200);
+        const chart = createHeatmap({
+            data: GRID_2x1,
+            colors: ['--lo', '--hi'],
+            width: 400, height: 200,
+            schedule: (fn) => fn(),
+        });
+        chart.mount(canvas);
+        const ctx = canvas.getContext('2d');
+        ctx.calls.length = 0;
+        chart.refreshTheme();
+        assert.ok(ctx.calls.length > 0, 'refreshTheme must cause a redraw');
+        assert.equal(chart._internal.state.cellColors[0], 'rgb(136,136,136)',
+            'unresolvable tokens must resolve to the #888 fallback, not throw');
+        chart.destroy();
+    });
+});
+
+// ---------------------------------------------------------------------------
 // v1.3.0 -- chart.exportSVG() across all four kernels
 // ---------------------------------------------------------------------------
 

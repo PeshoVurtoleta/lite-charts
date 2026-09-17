@@ -39,7 +39,22 @@
 > OUT for v1 with a named trigger -- candles sit at TRUE time, weekend/
 > holiday gaps show as gaps (the shading engine's premise); volume panes,
 > comparison overlays, hollow/heikin-ashi variants OUT (see README).
-> v1.21.0 (current): error bars / confidence bands on line/area/scatter.
+> v1.22.0 (current): heatmap refreshTheme(). The grid kernel captures its
+> six theme-affected color specs (colors ramp endpoints, labelColor,
+> highlightStroke, rowColumnHighlightFill, valueLabelColor) at
+> construction, BEFORE mount() resolves them in place -- so
+> chart.refreshTheme() re-resolves the ORIGINAL --var tokens against the
+> container's computed style, re-runs the cold cell-color compute
+> (state.cellColors + the 'auto' per-cell contrast labels are precomputed,
+> so a re-resolve alone changes nothing on screen), and repaints. Cold
+> path only; the per-frame draw is byte-identical and resolution stays
+> off redraw() (test-pinned). Fail-closed: unmounted -> no-op; headless
+> or unresolvable token -> '#888'. Also fixed: remount after unmount()
+> re-resolves the original tokens (was: double-resolved concrete values).
+> Charts.d.ts already declared refreshTheme on the shared Chart interface;
+> the heatmap now matches its types. +6 tests (552->558), one reversion
+> proof, torture ok.
+> v1.21.0: error bars / confidence bands on line/area/scatter.
 > Per-series (chart-level default) config.errorBars: { lo, hi } (absolute
 > per-row accessors/keys, or SoA los/his typed arrays alongside xs/ys) OR
 > { value } (symmetric magnitude, lo=y-v / hi=y+v; supplying value AND
@@ -1341,8 +1356,11 @@ createLineChart({
   `yBand.invert` + a presence-mask check. `chart.hover` is a
   signal-style reactive accessor with `.peek()` escape hatch.
   Mouse events on canvas drive `moveHover` / `hideHover`
-  automatically. Axis labels render inline (no lite-axis dep for
-  the grid kernel since categories are arbitrary strings). 12 new
+  automatically. Theme-affected colors resolve at mount and
+  re-resolve on `chart.refreshTheme()` (v1.22.0), which also
+  recomputes the precomputed cell colors. Axis labels render
+  inline (no lite-axis dep for the grid kernel since categories
+  are arbitrary strings). 12 new
   tests. 231 total.
 - **v1.2.0: destroy() + heatmap polish.**
   **chart.destroy() on all four kernels.** Each kernel tracks every

@@ -5,7 +5,28 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.21.0 (current)
+## v1.22.0 (current)
+
+Heatmap `refreshTheme()` (brief #19, `briefs/heatmap-refresh-theme.md`;
+user-reported gap, same-session cut). The grid kernel (`createBaseGridChart`,
+sole consumer `createHeatmap`) was the only kernel without a theme hook --
+and its `mount()` resolved the six theme-affected color specs IN PLACE,
+destroying the `--var` tokens, so even a naive port of the axis-kernel
+pattern could not have worked. The cut: capture `_themeSpecs` at
+construction; one shared `_resolveThemeColors()` for `mount()` and the new
+`chart.refreshTheme()`, which re-resolves, re-runs `renderer.computeColors`
+(cell + auto-contrast label colors are precomputed at extract time), and
+marks the scene dirty. Cold path; the per-frame draw is byte-identical; no
+new signals or effects. Fail-closed: unmounted no-op, headless/unresolvable
+tokens -> `#888`, the `valueLabelColor: 'auto'` sentinel survives repeated
+refreshes. Fixed in passing: remount-after-unmount re-resolves original
+tokens (was double-resolving concrete values). `Charts.d.ts` already
+declared `refreshTheme` on the shared `Chart` interface -- this closed a
+types-vs-implementation mismatch. Reviewer APPROVED (7/7 judgment calls,
+zero blockers). +6 tests (H-RT1..H-RT6, 552 -> 558), one measured reversion
+proof (a neutered refreshTheme body reddens H-RT2/3/4/5), torture ok.
+
+## v1.21.0
 
 Error bars / confidence bands (brief #18, `briefs/error-bars.md`, incl. the
 EXECUTED block; queue item 2). The first statistical-series cut. Opt in per
