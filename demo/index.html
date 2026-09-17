@@ -834,7 +834,7 @@
         "@zakkster/lite-scene":  "https://cdn.jsdelivr.net/npm/@zakkster/lite-scene@1.0.0/Scene.js",
         "@zakkster/lite-axis":   "https://cdn.jsdelivr.net/npm/@zakkster/lite-axis@1.0.1/Axis.js",
         "@zakkster/lite-virtual": "https://cdn.jsdelivr.net/npm/@zakkster/lite-virtual@1.1.0/Virtual.js",
-        "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.3.0/Delaunay.js",
+        "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.4.0/Delaunay.js",
         "@zakkster/lite-depth": "https://cdn.jsdelivr.net/npm/@zakkster/lite-depth@2.0.0/Depth.js",
         "@zakkster/lite-arena": "https://cdn.jsdelivr.net/npm/@zakkster/lite-arena@1.9.0/Arena.js",
         "@zakkster/lite-fastbit32": "https://cdn.jsdelivr.net/npm/@zakkster/lite-fastbit32@1.2.0/FastBit32.js",
@@ -999,6 +999,15 @@
                     Still fail-closed where it matters: a log value axis on a
                     horizontal bar throws at construction.
                 </p>
+                <p>
+                    v1.20.0 adds band MULTI-SELECT: shift+CLICK toggles the
+                    clicked band in or out, so <span class="mono">bands</span>
+                    can be NON-contiguous (bandMin/bandMax are the hull, and the
+                    overlay draws one rect per contiguous run). Toggle the last
+                    band off and the selection clears to null; a shift+drag still
+                    replaces with a value range. Try shift+clicking a few
+                    non-adjacent bars.
+                </p>
             </div>
         </div>
         <div class="card dashboard-card">
@@ -1007,7 +1016,7 @@
                 <button class="btn" id="hbar-reset">reset view</button>
                 <button class="btn" id="hbar-brush-clear">clear brush</button>
                 <span class="pill"><span class="dot"></span><span
-                        id="hbar-brush-status">brush: null (shift+drag the bars)</span></span>
+                        id="hbar-brush-status">brush: null (shift+drag a range, or shift+click bars to multi-select)</span></span>
             </div>
         </div>
     </section>
@@ -1180,7 +1189,7 @@
     <section>
         <div class="section-head">
             <div class="titles">
-                <span class="eyebrow">// voronoi cells -- cells x lite-delaunay 1.3.0</span>
+                <span class="eyebrow">// voronoi cells -- cells x lite-delaunay 1.4.0</span>
                 <h2>Every point owns a region.</h2>
                 <p>
                     The same scatter, tessellated. Pass
@@ -1188,7 +1197,7 @@
                     and each primary-series point owns a bbox-clipped Voronoi
                     polygon drawn UNDER the markers -- geometry from the REAL
                     published <span class="mono">@zakkster/lite-delaunay</span>
-                    1.3.0 <span class="mono">createCellIndex</span>, injected
+                    1.4.0 <span class="mono">createCellIndex</span>, injected
                     exactly like <span class="mono">spatialIndex</span>
                     (lite-charts imports no implementation). A per-point
                     <span class="mono">colorKey</span> tints each cell by its
@@ -1206,12 +1215,51 @@
     </section>
 
     <!-- =================================================================
+         Cluster outlines (v1.18.0 -- convex hull / alpha shape)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// cluster outlines -- outlines x lite-delaunay 1.4.0</span>
+                <h2>Every group owns a boundary.</h2>
+                <p>
+                    The same two-cluster cloud, now with a boundary drawn per
+                    group. Pass
+                    <span class="mono">outlines: { index: createClusterIndex(N), groupKey: 'cluster' }</span>
+                    and each group of points gets one outline -- a convex hull by
+                    default, or a concave alpha shape when
+                    <span class="mono">alpha</span> (a pixel radius) is set. The
+                    fourth rung of the injection ladder (spatial index -> cells ->
+                    field -> outlines): geometry comes from the published
+                    <span class="mono">@zakkster/lite-delaunay</span> 1.4.0
+                    <span class="mono">createClusterIndex</span>, and lite-charts
+                    imports no implementation. Left is the hull; right is the
+                    alpha shape, which follows the cloud's real concavities and
+                    can split into multiple loops or carve holes. Outlines are
+                    pixel-space, rebuilt with the projection, drawn above cells
+                    and below the markers.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card two-col-grid">
+            <div>
+                <div class="caption centered">convex hull -- alpha absent</div>
+                <div class="chart-area" id="hull-scatter-chart"></div>
+            </div>
+            <div>
+                <div class="caption centered">alpha shape -- concave boundary</div>
+                <div class="chart-area" id="alpha-scatter-chart"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
          Field raster + contours (v1.16.0 field / v1.17.0 contours)
          ================================================================= -->
     <section>
         <div class="section-head">
             <div class="titles">
-                <span class="eyebrow">// field raster + contours -- field x lite-delaunay 1.3.0</span>
+                <span class="eyebrow">// field raster + contours -- field x lite-delaunay 1.4.0</span>
                 <h2>The weather map under the dots.</h2>
                 <p>
                     Scattered samples of a continuous scalar. Pass
@@ -1219,7 +1267,7 @@
                     and the primary series' per-point values rasterize into a
                     smooth barycentric-interpolated heatmap UNDER the markers --
                     the mesh and grid sampler injected from the published
-                    <span class="mono">@zakkster/lite-delaunay</span> 1.3.0
+                    <span class="mono">@zakkster/lite-delaunay</span> 1.4.0
                     <span class="mono">createFieldIndex</span>, third rung of the
                     injection ladder. <span class="mono">field.contours: { levels: 10 }</span>
                     adds iso-value lines over it: an exact sweep of the same
@@ -1622,34 +1670,40 @@
     <section>
         <div class="section-head">
             <div class="titles">
-                <span class="eyebrow">// brushing -- v1.4.0-alpha.3</span>
-                <h2>Shift+drag selects. Other charts react.</h2>
+                <span class="eyebrow">// brushing -- v1.4.0-alpha.3 + v1.20.0</span>
+                <h2>Alt+drag selects. Other charts react.</h2>
                 <p>
                     Opt in with <span class="mono">brush: true</span>.
-                    Shift+drag selects a rectangle on the top chart;
+                    This chart sets <span class="mono">brushModifier: 'alt'</span>
+                    (v1.20.0 -- the modifier is configurable, default
+                    <span class="mono">'shift'</span>; an unknown value throws at
+                    construction), so <strong>alt+drag</strong> selects a
+                    rectangle on the top chart;
                     <span class="mono">chart.brush</span> emits
                     <span class="mono">{ xMin, xMax, yMin, yMax, ids }</span>.
-                    Below it, two follower charts subscribe to that
-                    signal through <span class="mono">effect()</span>
-                    -- the bar chart shows distribution within the
-                    brushed range, and the second line chart highlights
-                    only the brushed points. Shift+click (without
-                    movement) clears the selection. Coexists with
+                    Below it, two follower charts subscribe to that signal
+                    through <span class="mono">effect()</span> -- the bar chart
+                    shows distribution within the brushed range, and the second
+                    line chart highlights only the brushed points. Alt+click
+                    (without movement) clears the selection. Coexists with
                     pan/zoom; bare drag still pans.
                 </p>
                 <p>
                     The cross-chart linking pattern: any
                     <span class="mono">effect()</span> that reads
-                    <span class="mono">chart.brush()</span> re-runs
-                    live during the drag, so follower charts update
-                    in real time. The
-                    <span class="mono">ids</span> array is freshly
-                    allocated per commit -- no aliasing across brushes.
+                    <span class="mono">chart.brush()</span> re-runs live during
+                    the drag, so follower charts update in real time. Every
+                    gesture-driven commit also carries v1.20.0's
+                    <span class="mono">idsBySeries</span> -- a per-series
+                    commit-time snapshot (one slot per series, null for a hidden
+                    one) shown in the status line beside the primary
+                    visibility-blind <span class="mono">ids</span>. Both id
+                    arrays are freshly allocated per commit -- no aliasing.
                 </p>
             </div>
         </div>
         <div class="card dashboard-card">
-            <div class="caption">source (shift+drag to brush)</div>
+            <div class="caption">source (alt+drag to brush)</div>
             <div class="chart-area" id="brush-source-chart"></div>
             <div class="two-col-grid" style="margin-top: 12px;">
                 <div>
@@ -1711,7 +1765,7 @@
     <section>
         <div class="section-head">
             <div class="titles">
-                <span class="eyebrow">// time series -- v1.10.0 + v1.11.0</span>
+                <span class="eyebrow">// time series -- v1.10.0 / v1.11.0 / v1.13.0 / v1.15.0</span>
                 <h2>Time-first, with the market's gaps shaded in.</h2>
                 <p>
                     <span class="mono">createTimeLineChart</span> is
@@ -1733,9 +1787,22 @@
                     09:30-16:00 ET) shades the COMPLEMENT of the open-interval
                     union -- after-hours and weekends merge, so Fri-close ->
                     Mon-open is ONE contiguous band. Everything is epoch-ms
-                    UTC; converting local session times is the caller's job,
-                    and overnight (close &lt; open) sessions throw by design.
+                    UTC; converting local session times is the caller's job.
                     Both charts pan and zoom -- drag around and the bands track.
+                </p>
+                <p>
+                    The second row adds v1.13.0 and v1.15.0. Left: an OVERNIGHT
+                    session (<span class="mono">closeMinutes &lt; openMinutes</span>,
+                    e.g. 22:00 -> 06:00 UTC) -- legal since v1.13.0, split at the
+                    midnight seam so the trading window crosses midnight while the
+                    daytime shades closed. Right: a
+                    <span class="mono">holidays</span> array (v1.13.0, UTC
+                    day-start epoch-ms -- <span class="mono">null</span> is not
+                    epoch 0, and <span class="mono">new Date(y,m,d)</span> is LOCAL
+                    midnight, so pass <span class="mono">Date.UTC(...)</span>)
+                    closes whole days and fuses with adjacent gaps; one entry is
+                    an EARLY CLOSE (v1.15.0, <span class="mono">{ ts, closeMinutes }</span>)
+                    that truncates just that day's session.
                 </p>
             </div>
         </div>
@@ -1747,6 +1814,16 @@
             <div>
                 <div class="caption centered">shading.sessions -- non-trading time (v1.11.0)</div>
                 <div class="chart-area" id="ts-sessions-chart"></div>
+            </div>
+        </div>
+        <div class="card dashboard-card two-col-grid" style="margin-top: 16px;">
+            <div>
+                <div class="caption centered">overnight session 22:00 -> 06:00 UTC (v1.13.0)</div>
+                <div class="chart-area" id="ts-overnight-chart"></div>
+            </div>
+            <div>
+                <div class="caption centered">holidays + early close (v1.13.0 / v1.15.0)</div>
+                <div class="chart-area" id="ts-holidays-chart"></div>
             </div>
         </div>
     </section>
@@ -1792,6 +1869,41 @@
                 <button class="btn" id="virt-show-all">show all</button>
                 <span class="pill"><span class="dot"></span><span
                         id="virt-legend-status">--</span></span>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Horizontal legend virtualization -- v1.15.0
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// horizontal legend virtualization -- v1.15.0</span>
+                <h2>Same windowing, sideways.</h2>
+                <p>
+                    v1.15.0 extends virtualization to
+                    <span class="mono">position: 'top'</span> and
+                    <span class="mono">'bottom'</span>: the legend becomes a
+                    single non-wrapping row that scrolls along X, windowed the
+                    same way. The size keys are orientation-EXCLUSIVE -- top and
+                    bottom REQUIRE <span class="mono">width</span> and
+                    <span class="mono">itemWidth</span> (a
+                    <span class="mono">height</span>/<span class="mono">itemHeight</span>
+                    key THROWS rather than being silently reinterpreted). The same
+                    200-series data and the SAME injected adapter drive it; the
+                    adapter just receives <span class="mono">horizontal: true</span>
+                    (lite-virtual's <span class="mono">mountList</span> takes it
+                    natively). Scroll the row -- the DOM-row count stays O(window),
+                    not O(series).
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="virt-legend-top-chart"></div>
+            <div class="control-row">
+                <span class="pill"><span class="dot"></span><span
+                        id="virt-legend-top-status">--</span></span>
             </div>
         </div>
     </section>
@@ -1994,7 +2106,7 @@
     // The dense-bubble/scatter sections' spatial index. Same injection
     // pattern: lite-charts has ZERO references to lite-delaunay -- the
     // consumer imports the factory and passes it as `spatialIndex`.
-    import {createSpatialIndex, createCellIndex, createFieldIndex} from '@zakkster/lite-delaunay';
+    import {createSpatialIndex, createCellIndex, createFieldIndex, createClusterIndex} from '@zakkster/lite-delaunay';
 
     // The 3D relief panel's renderer. lite-depth is a zero-GC Canvas2D
     // software-projected pseudo-3D engine -- injected at the consumer exactly
@@ -2471,7 +2583,7 @@
     effect(() => {
         const b = hbarChart.brush();
         if (!b) {
-            $hbarBrushStatus.textContent = 'brush: null (shift+drag the bars)';
+            $hbarBrushStatus.textContent = 'brush: null (shift+drag a range, or shift+click bars to multi-select)';
             return;
         }
         $hbarBrushStatus.textContent = 'brush: value=[' + b.valueMin.toFixed(0)
@@ -2801,7 +2913,7 @@
     // ---------------------------------------------------------------------
     //
     // The same two-cluster cloud, tessellated. `cells.index` is the REAL
-    // published lite-delaunay 1.3.0 createCellIndex -- injected exactly like
+    // published lite-delaunay 1.4.0 createCellIndex -- injected exactly like
     // spatialIndex; Charts.js contains no reference to it. A per-point
     // `colorKey` ('tone') tints each cell by its cluster, and
     // hitTolerance: 'nearest' turns the whole plot into each point's hit
@@ -2848,11 +2960,69 @@
     ALL_CHARTS.push(cellScatterChart);
 
     // ---------------------------------------------------------------------
+    // CLUSTER OUTLINES -- v1.18.0 (convex hull / alpha shape)
+    // ---------------------------------------------------------------------
+    //
+    // The same two-cluster scatterData, partitioned by its `cluster` key.
+    // outlines.index is the REAL published lite-delaunay 1.4.0
+    // createClusterIndex -- injected like cells/field/spatialIndex. Left uses
+    // the convex hull (alpha absent); right sets alpha (a pixel radius) for the
+    // concave shape. Strokes are raw hex (theme-independent boundary colours).
+    const hullScatterChart = createScatterChart({
+        data: scatterData,
+        markerSize: 3,
+        color: '--c-primary',
+        fillOpacity: 0.45,
+        stroke: null,
+        strokeWidth: 0,
+        outlines: {
+            index: createClusterIndex(scatterData.length),
+            groupKey: 'cluster',
+            stroke: '#f59e0b',
+            strokeWidth: 2,
+            fill: '#f59e0b',
+            fillOpacity: 0.07,
+        },
+        width: responsiveWidth('hull-scatter-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 16, bottom: 32, left: 40},
+        ...SHARED_OPTS,
+        legend: false,
+    });
+    hullScatterChart.mount(document.getElementById('hull-scatter-chart'));
+    ALL_CHARTS.push(hullScatterChart);
+
+    const alphaScatterChart = createScatterChart({
+        data: scatterData,
+        markerSize: 3,
+        color: '--c-primary',
+        fillOpacity: 0.45,
+        stroke: null,
+        strokeWidth: 0,
+        outlines: {
+            index: createClusterIndex(scatterData.length),
+            groupKey: 'cluster',
+            alpha: 42,          // pixel radius -> concave boundary (absent = hull)
+            stroke: '#8b5cf6',
+            strokeWidth: 2,
+            fill: '#8b5cf6',
+            fillOpacity: 0.07,
+        },
+        width: responsiveWidth('alpha-scatter-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 16, bottom: 32, left: 40},
+        ...SHARED_OPTS,
+        legend: false,
+    });
+    alphaScatterChart.mount(document.getElementById('alpha-scatter-chart'));
+    ALL_CHARTS.push(alphaScatterChart);
+
+    // ---------------------------------------------------------------------
     // FIELD RASTER + CONTOURS -- v1.16.0 field / v1.17.0 contours
     // ---------------------------------------------------------------------
     //
     // 260 "stations" sampling a smooth pressure-like surface (two Gaussian
-    // bumps). `field.index` is the REAL published lite-delaunay 1.3.0
+    // bumps). `field.index` is the REAL published lite-delaunay 1.4.0
     // createFieldIndex -- injected like spatialIndex/cells; Charts.js
     // contains no reference to it. The raster resamples COLD on the
     // postProject seam, so pan/zoom (enabled here) shows the count-form
@@ -3571,6 +3741,7 @@
     const brushSourceChart = createLineChart({
         data: brushSourceData,
         brush: true,
+        brushModifier: 'alt',      // v1.20.0: configurable (default 'shift'); alt+drag here
         brushStyle: {
             fill: 'rgba(255, 153, 51, 0.18)',
             stroke: 'rgba(255, 153, 51, 0.85)',
@@ -3695,9 +3866,15 @@
             return;
         }
         const n = b.ids ? b.ids.length : 0;
+        // v1.20.0: idsBySeries is a per-series commit-time snapshot (one slot per
+        // series; null for a hidden/empty series). This source is single-series,
+        // so it has one slot -- shown here beside the primary visibility-blind ids.
+        const perSeries = b.idsBySeries
+            ? b.idsBySeries.map((s) => s ? s.length : 'null').join(', ')
+            : 'n/a';
         $brushStatus.textContent = 'brush: x=[' + b.xMin.toFixed(1) + ', ' + b.xMax.toFixed(1) +
             '] y=[' + b.yMin.toFixed(1) + ', ' + b.yMax.toFixed(1) +
-            '] ids=' + n + ' points';
+            '] ids=' + n + ' | idsBySeries=[' + perSeries + ']';
     });
 
     $brushClear.addEventListener('click', () => brushSourceChart.clearBrush());
@@ -3846,6 +4023,58 @@
     tsSessionsChart.mount(document.getElementById('ts-sessions-chart'));
     ALL_CHARTS.push(tsSessionsChart);
 
+    // v1.13.0 overnight: closeMinutes < openMinutes is legal -- the session
+    // splits at the UTC midnight seam. 22:00 (1320) -> 06:00 (360) trades across
+    // midnight; the daytime 06:00-22:00 shades closed.
+    const tsOvernightChart = createTimeLineChart({
+        data: tsData,
+        shading: {
+            sessions: [{openMinutes: 1320, closeMinutes: 360}],
+            sessionFill: TS_SHADE_FILL,
+        },
+        pan: true,
+        zoom: true,
+        width: responsiveWidth('ts-overnight-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-amber',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    tsOvernightChart.mount(document.getElementById('ts-overnight-chart'));
+    ALL_CHARTS.push(tsOvernightChart);
+
+    // v1.13.0 holidays + v1.15.0 early close. TS_START is a UTC day start (a
+    // Monday), so TS_START + k*DAY_MS is day k's UTC midnight -- exactly the
+    // whole-UTC-day form holidays wants (Date.UTC semantics, not local).
+    const tsHoliday = TS_START + 9 * DAY_MS;       // a week-2 weekday, whole-day close
+    const tsEarlyCloseDay = TS_START + 4 * DAY_MS;  // week-1 Friday, early close
+    const tsHolidaysChart = createTimeLineChart({
+        data: tsData,
+        shading: {
+            sessions: [{openMinutes: 810, closeMinutes: 1200}],   // regular 13:30-20:00 UTC
+            sessionFill: TS_SHADE_FILL,
+            holidays: [
+                tsHoliday,                                    // whole UTC day closed
+                {ts: tsEarlyCloseDay, closeMinutes: 990},     // early close 16:30 UTC
+            ],
+        },
+        pan: true,
+        zoom: true,
+        width: responsiveWidth('ts-holidays-chart', 380),
+        height: 320,
+        margin: {top: 16, right: 24, bottom: 40, left: 56},
+        interpolation: 'linear',
+        showMarkers: false,
+        color: '--c-pink',
+        labelColor: '--text-secondary',
+        spineColor: '--surface-line',
+    });
+    tsHolidaysChart.mount(document.getElementById('ts-holidays-chart'));
+    ALL_CHARTS.push(tsHolidaysChart);
+
     // ---------------------------------------------------------------------
     // LEGEND VIRTUALIZATION -- v1.12.0 (caller-injected adapter)
     // ---------------------------------------------------------------------
@@ -3871,12 +4100,17 @@
             },
             onCleanup: (fn) => cleanups.push(fn),
         };
+        // v1.15.0: one bridge, both orientations. lite-virtual's mountList takes
+        // horizontal natively (itemSize + viewport on the main axis, translateX).
+        // Charts passes { itemHeight, height } for left/right and { itemWidth,
+        // width, horizontal:true } for top/bottom; map both onto itemSize/viewport.
         mountList(host, scope, {
             count: opts.count,
-            itemHeight: opts.itemHeight,
-            viewport: opts.height,
+            itemSize: opts.horizontal ? opts.itemWidth : opts.itemHeight,
+            viewport: opts.horizontal ? opts.width : opts.height,
             overscan: opts.overscan,
             render: opts.renderRow,
+            horizontal: !!opts.horizontal,
         });
         return {
             dispose: () => {
@@ -3954,6 +4188,42 @@
             for (let i = 0; i < VIRT_SERIES; i++) virtLegendChart.setSeriesVisible(i, true);
         });
     });
+
+    // ---------------------------------------------------------------------
+    // HORIZONTAL LEGEND VIRTUALIZATION -- v1.15.0 (top position)
+    // ---------------------------------------------------------------------
+    //
+    // Same 200 series, same legendVirtualizer adapter (now orientation-aware).
+    // position:'top' with width + itemWidth windows a single scrolling row;
+    // supplying height/itemHeight here would throw (orientation-exclusive keys).
+    const virtLegendTopChart = createLineChart({
+        series: virtSeries,
+        width: responsiveWidth('virt-legend-top-chart', 800),
+        height: 320,
+        ...SHARED_OPTS,
+        tooltip: false,
+        legend: {
+            position: 'top',
+            width: 760,          // REQUIRED scroll-viewport px (top/bottom)
+            itemWidth: 150,      // REQUIRED positive int (height/itemHeight would throw)
+            overscan: 2,
+            virtualize: legendVirtualizer,
+        },
+    });
+    virtLegendTopChart.mount(document.getElementById('virt-legend-top-chart'));
+    ALL_CHARTS.push(virtLegendTopChart);
+
+    const $virtTopStatus = document.getElementById('virt-legend-top-status');
+    const _virtTopCountRows = () => {
+        const host = virtLegendTopChart.legend;
+        if (!host) return;
+        const rows = host.querySelectorAll('[data-lc-idx]');
+        let shown = 0;
+        for (let i = 0; i < rows.length; i++) if (rows[i].style.display !== 'none') shown++;
+        $virtTopStatus.textContent = 'DOM rows: ' + shown + ' / ' + VIRT_SERIES + ' series';
+    };
+    _virtTopCountRows();
+    setInterval(_virtTopCountRows, 500);
 
     // ---------------------------------------------------------------------
     // RADAR -- multi-axis polygon layout, separate kernel

@@ -83,12 +83,14 @@ published seams, zero Charts.js change.
     inline heightfield->quads builder (x from column, z from row, y from height;
     one quad `[a, a+1, a+cols+1, a+cols]` per cell; skip any quad with a
     NaN/out-of-band corner). This runs against published lite-depth@2.0.0.
-  - **Parallel dependency**: a companion brief `../LiteDepth/briefs/heightfield.md`
-    proposes `geometry.heightfield(z, cols, rows, opts)`. It is being executed in
-    a separate lite-depth session. IF it has shipped + published by the time this
-    runs, replace the inline builder with `geometry.heightfield` and bump the
-    lite-depth pin. If not, the inline builder ships -- **this session is NOT
-    blocked on it.**
+  - **Heightfield helper -- DECIDED (2026-09-17): keep the inline builder.**
+    `geometry.heightfield` shipped in lite-depth 2.1.0 (published), but it is a
+    SINGLE-mesh, per-VERTEX-holes builder; this relief is BANDED (6 sub-meshes,
+    per-QUAD-mean assignment). A per-band masked-z swap would drop every
+    boundary-straddling quad from both bands -> 1-quad seams between colour
+    bands (visual regression). The helper is the right tool for a single-material
+    relief, not for this mean-based banding, so the inline `geometry.custom`
+    builder STAYS. (User chose this over a single-mesh monochrome swap.)
 - **Camera / light**: an isometric-ish camera (`updateCamera` after mutating);
   a directional `stage.light` so the relief self-shades. Optional:
   `setShadowMaterial` + `setCastShadow` for a ground shadow under the terrain on
