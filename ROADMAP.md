@@ -889,6 +889,46 @@ needs one before any cut:
   the 0 B/frame identity is real, so this waits for a consumer who
   needs it, not for completeness.
 
+### Candidate from suite composition (2026-09-17): 3D relief map via lite-depth
+
+User-raised. `@zakkster/lite-depth` 2.0.0 (zero-GC Canvas2D software-projected
+pseudo-3D: SoA node arena, painter sort, LUT flat shading, screen-space
+picking, ground shadows, frozen LANES.md binary contract) can render "3D-alike
+maps" -- and the v1.16.0 field raster already computes the exact input a
+relief needs: a gridW x gridH scalar grid (sampleField, cold per data/scale
+change) with a vMin/vMax ramp. Extrude that grid as a heightfield through a
+lite-depth stage and the "weather map" (raster = ramp, contours = structure)
+gains a third reading: relief = magnitude.
+
+Grounded seams, verified against both surfaces:
+- **Data**: the sampled field grid is the heightfield; NaN cells (outside
+  hull) become holes, exactly as the 2D raster paints nothing.
+- **Color**: `materialFromRamp(hexRamp)` takes the SAME ramp the field's
+  `colors` option takes -- one palette, both projections.
+- **DPR** (the user's emphasis): both packages own device-pixel-ratio
+  explicitly and identically -- charts resolves `config.dpr` (default
+  `devicePixelRatio`), backing buffer = CSS px x dpr, logic in logical px;
+  `createStage(ctx, { width, height, dpr })` / `stage.resize(w, h, dpr?)`
+  mirror it. A crisp high-DPR relief is a config pass-through, zero new
+  coordination code on either side.
+- **Hover**: stage `pick`/`nearest` (screen-space AABB) can answer "which
+  cell" for a tooltip showing the z value.
+- **Budget**: the default 64x48 grid is ~5.9k triangles -- at lite-depth's
+  software-rasterizer comfort ceiling; a 32x24 relief (~1.4k faces) is the
+  comfortable default, resolution opt-up disclosed.
+
+SHAPE DECISION (the load-bearing call, deliberately NOT a charts feature
+yet): a 3D projected view breaks the axis-kernel premises -- no invertible
+2D scale mapping, so crosshair/pan/zoom/annotations don't transfer. First
+cut is therefore a COMPOSITION, not a fifth injection rung: a compound demo
+(candidate fold-in: briefs/demo-refresh.md) where charts computes and
+lite-depth projects, composed on documented seams. The ONE charts-side cut
+that productization would need -- a documented read-only accessor for the
+sampled field grid ({ grid, gridW, gridH, vMin, vMax }; today internal) --
+is small and useful beyond this candidate, and is the trigger's first task.
+Named trigger for a packaged adapter (lite-charts-depth or a recipe in the
+lite-headless family): a consumer wanting the relief outside a demo.
+
 ### Queue (2026-09-06, user-confirmed order)
 
 Post-v1.19.0 the user confirmed the remaining candidates and this order.

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>@zakkster/lite-charts -- v1.19.0</title>
+    <title>@zakkster/lite-charts -- v1.21.0</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -835,6 +835,10 @@
         "@zakkster/lite-axis":   "https://cdn.jsdelivr.net/npm/@zakkster/lite-axis@1.0.1/Axis.js",
         "@zakkster/lite-virtual": "https://cdn.jsdelivr.net/npm/@zakkster/lite-virtual@1.1.0/Virtual.js",
         "@zakkster/lite-delaunay": "https://cdn.jsdelivr.net/npm/@zakkster/lite-delaunay@1.3.0/Delaunay.js",
+        "@zakkster/lite-depth": "https://cdn.jsdelivr.net/npm/@zakkster/lite-depth@2.0.0/Depth.js",
+        "@zakkster/lite-arena": "https://cdn.jsdelivr.net/npm/@zakkster/lite-arena@1.9.0/Arena.js",
+        "@zakkster/lite-fastbit32": "https://cdn.jsdelivr.net/npm/@zakkster/lite-fastbit32@1.2.0/FastBit32.js",
+        "@zakkster/lite-aabb": "https://cdn.jsdelivr.net/npm/@zakkster/lite-aabb@2.0.0/Aabb.js",
         "@zakkster/lite-charts": "../Charts.js"
     }
 }
@@ -848,7 +852,7 @@
         <div class="brand">
             <span class="brand-logo"></span>
             <span class="brand-name">@zakkster/lite-charts</span>
-            <span class="brand-version">v1.19.0</span>
+            <span class="brand-version">v1.21.0</span>
         </div>
         <button class="theme-toggle" id="theme-toggle">
             <span class="indicator"></span>
@@ -864,7 +868,7 @@
          ================================================================= -->
     <section>
         <div class="hero-intro">
-            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.19.0</span>
+            <span class="eyebrow"><span class="accent">>></span> RELEASE -- v1.21.0</span>
             <h1>Reactive, zero-GC charts.<br>Sub-frame budget at <span class="num">100,000</span> points.</h1>
             <p>
                 Single-file ESM. Three peer deps (two more optional, injected --
@@ -1232,6 +1236,103 @@
         </div>
         <div class="card dashboard-card">
             <div class="chart-area" id="field-contour-chart"></div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         3D relief map (NEW -- charts field grid x @zakkster/lite-depth)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// suite composition -- field grid x lite-depth 2.0.0</span>
+                <h2>The weather map, as relief.</h2>
+                <p>
+                    The same scalar field the panel above ramps and contours,
+                    now EXTRUDED. lite-charts computes the grid -- delaunay's
+                    <span class="mono">sampleField</span> resamples the scattered
+                    stations into a <span class="mono">32 x 24</span> heightfield
+                    -- and <span class="mono">@zakkster/lite-depth</span>, a
+                    zero-GC Canvas2D software-projected pseudo-3D engine, renders
+                    it. Height is quantized into bands, one flat-shaded mesh per
+                    band coloured from the SAME blue ramp, so the surface reads as
+                    contours in 3D. Cells outside the convex hull sample to NaN and
+                    become holes. Drag to orbit. This is a PROJECTION of the field,
+                    not a chart: a 3D view has no invertible 2D scale, so
+                    pan/zoom/crosshair/annotations do not transfer -- charts and
+                    lite-depth compose on published seams, neither importing the
+                    other. DPR is a single shared number: the relief takes the same
+                    <span class="mono">devicePixelRatio</span> the charts do, and
+                    lite-depth owns the backing-buffer scale internally -- crisp on
+                    a Retina panel with no extra coordination.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="relief-area" style="position:relative;">
+                <canvas id="relief-canvas" style="display:block; width:100%; touch-action:none; cursor:grab;"></canvas>
+                <div class="caption centered" id="relief-status">drag to orbit -- 32 x 24 heightfield, 6 bands</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Error bars / confidence bands (v1.21.0)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// error bars + confidence bands -- v1.21.0</span>
+                <h2>Every point carries its uncertainty.</h2>
+                <p>
+                    Per-series <span class="mono">errorBars</span> draws whiskers
+                    (a vertical bar with caps) and/or a filled confidence ribbon on
+                    line, area, and scatter. Give absolute bounds
+                    <span class="mono">{ lo, hi }</span> or a symmetric magnitude
+                    <span class="mono">{ value }</span> (lo = y - v, hi = y + v);
+                    <span class="mono">band</span> is false (whiskers), true
+                    (ribbon), or 'both'. The overlay rides the annotation layer's
+                    cold-resolve / hot-project split -- raw bounds resolve on data
+                    or theme change, pixels re-map every frame at 0 B, and a
+                    NaN/null gap splits the ribbon into runs. A per-point null or
+                    NaN self-skips that point; it never anchors a bar at zero.
+                    Toggle the band mode below.
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="errorbar-chart"></div>
+            <div style="margin-top:12px; display:flex; gap:12px; align-items:center;">
+                <button class="btn" id="eb-mode-btn">band: both</button>
+                <span class="caption" id="eb-status">whiskers + ribbon</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- =================================================================
+         Candlestick / OHLC (v1.19.0)
+         ================================================================= -->
+    <section>
+        <div class="section-head">
+            <div class="titles">
+                <span class="eyebrow">// candlestick / OHLC -- v1.19.0, tenth chart type</span>
+                <h2>OHLC at true time.</h2>
+                <p>
+                    <span class="mono">createCandlestickChart</span> plots one
+                    candle per <span class="mono">{ ts, o, h, l, c }</span> row on a
+                    forced time axis -- the tenth chart type, its own axis-kernel
+                    renderer. Up and down bodies fill from open to close, the wick
+                    runs high to low, and the tooltip shows O/H/L/C rows. The full
+                    session-shading engine rides along by reference: weekend gaps
+                    shade here exactly as they do on the time-series line. Candles
+                    sit at TRUE time -- non-trading gaps show as gaps, not collapsed
+                    slots -- and a single OHLC stream drives the chart (passing a
+                    <span class="mono">series</span> array throws).
+                </p>
+            </div>
+        </div>
+        <div class="card dashboard-card">
+            <div class="chart-area" id="candlestick-chart"></div>
         </div>
     </section>
 
@@ -1883,6 +1984,7 @@
         createRadarChart,
         createScatterChart,
         createHeatmap,
+        createCandlestickChart,
     } from '@zakkster/lite-charts';
     // The virtualized-legend section's windowing adapter. lite-charts itself
     // has ZERO references to lite-virtual (asserted by its test suite) -- the
@@ -1893,6 +1995,13 @@
     // pattern: lite-charts has ZERO references to lite-delaunay -- the
     // consumer imports the factory and passes it as `spatialIndex`.
     import {createSpatialIndex, createCellIndex, createFieldIndex} from '@zakkster/lite-delaunay';
+
+    // The 3D relief panel's renderer. lite-depth is a zero-GC Canvas2D
+    // software-projected pseudo-3D engine -- injected at the consumer exactly
+    // like the delaunay factories above; lite-charts imports nothing from it.
+    // The relief COMPOSES charts (which computes the scalar field grid via
+    // delaunay's sampleField) with lite-depth (which extrudes + projects it).
+    import {createStage, updateCamera, geometry, material} from '@zakkster/lite-depth';
 
     // ---------------------------------------------------------------------
     // Theme toggle. Each chart gets a refreshTheme() call on switch -- colors
@@ -1942,7 +2051,11 @@
         // Let the CSS transition settle one frame before re-resolving so the
         // computed values are the new ones.
         requestAnimationFrame(() => {
-            for (const c of ALL_CHARTS) c.refreshTheme();
+            // Guard: heatmap charts (grid kernel) do not expose refreshTheme, and
+            // the relief hooks in as a duck-typed { refreshTheme } shim -- skip any
+            // entry without it rather than throwing mid-loop (which previously
+            // stopped every chart after the first heatmap from re-resolving).
+            for (const c of ALL_CHARTS) if (typeof c.refreshTheme === 'function') c.refreshTheme();
         });
     };
 
@@ -2799,6 +2912,236 @@
     });
     fieldContourChart.mount(document.getElementById('field-contour-chart'));
     ALL_CHARTS.push(fieldContourChart);
+
+    // ---------------------------------------------------------------------
+    // 3D RELIEF MAP -- charts field grid x @zakkster/lite-depth (NEW)
+    // ---------------------------------------------------------------------
+    //
+    // Composition, not a chart. We reuse the field panel's scattered-station
+    // data and delaunay's sampleField to build a grid of HEIGHTS in DATA
+    // space, then extrude it through a lite-depth stage. lite-depth flat-shades
+    // ONE material per node, so height cannot be a per-vertex colour ramp --
+    // we quantize into BANDS (one flat-shaded mesh each, coloured from the
+    // same blue ramp as the 2D raster), which reads as contours in 3D.
+    (() => {
+        const GW = 32, GH = 24, BANDS = 6;
+        const canvas = document.getElementById('relief-canvas');
+        const status = document.getElementById('relief-status');
+        const defaultStatus = 'drag to orbit -- 32 x 24 heightfield, 6 bands';
+
+        // 1. Sample the field into a data-space grid. The field builder takes
+        //    (pxs, pys, n); we pass DATA x/y -- the relief needs no chart pixels.
+        const n = fieldContourData.length;
+        const xs = new Float64Array(n), ys = new Float64Array(n), zs = new Float64Array(n);
+        for (let i = 0; i < n; i++) { xs[i] = fieldContourData[i].x; ys[i] = fieldContourData[i].y; zs[i] = fieldContourData[i].z; }
+        const fieldIdx = createFieldIndex(n)(xs, ys, n);
+        const grid = new Float64Array(GW * GH);
+        fieldIdx.sampleField(zs, GW, GH, 0, 0, 10, 10, grid);   // row-major; NaN outside the hull
+        fieldIdx.dispose();
+
+        // finite min/max for band edges + height normalisation
+        let vMin = Infinity, vMax = -Infinity;
+        for (let k = 0; k < grid.length; k++) { const v = grid[k]; if (v === v) { if (v < vMin) vMin = v; if (v > vMax) vMax = v; } }
+        const vRange = (vMax - vMin) || 1;
+
+        // 2. World placement: grid spans [-2,2] in x/z, height exaggerated in +y
+        //    so the relief reads (the raw z range is ~0..180 over a 10x10 field).
+        const WX = 4, WZ = 4, WY = 2.6;
+        const wx = (col) => (col / (GW - 1) - 0.5) * WX;
+        const wz = (row) => (row / (GH - 1) - 0.5) * WZ;
+        const wy = (v) => ((v - vMin) / vRange) * WY;
+
+        // One shared vertex array (each band references it; a band's unused
+        // verts only widen a cull radius, harmless). y carries true height.
+        const verts = [];
+        for (let row = 0; row < GH; row++) for (let col = 0; col < GW; col++) {
+            const v = grid[row * GW + col];
+            verts.push(wx(col), (v === v ? wy(v) : 0), wz(row));
+        }
+
+        // 3. Blue ramp -> BANDS discrete rgb triples (matches the 2D field
+        //    ramp #dbeafe -> #1e3a8a). Fixed hues, theme-independent by design
+        //    -- the relief must read over both the light and dark card.
+        const loC = [0xdb, 0xea, 0xfe], hiC = [0x1e, 0x3a, 0x8a];
+        const bandRGB = (k) => {
+            const t = BANDS === 1 ? 0 : k / (BANDS - 1);
+            return { r: Math.round(loC[0] + (hiC[0] - loC[0]) * t), g: Math.round(loC[1] + (hiC[1] - loC[1]) * t), b: Math.round(loC[2] + (hiC[2] - loC[2]) * t) };
+        };
+
+        // 4. Stage. DPR pass-through: the SAME devicePixelRatio the charts use;
+        //    lite-depth owns the backing-buffer scale (setTransform(dpr) + a
+        //    logical-coord clearRect) internally, so drawing stays in CSS px.
+        const dpr = (typeof devicePixelRatio !== 'undefined' ? devicePixelRatio : 1);
+        const cssH = 420;
+        let cssW = canvas.clientWidth || 760;
+        const applySize = () => {
+            cssW = canvas.clientWidth || cssW;
+            canvas.width = Math.round(cssW * dpr);
+            canvas.height = Math.round(cssH * dpr);
+            canvas.style.height = cssH + 'px';
+        };
+        applySize();
+        const ctx = canvas.getContext('2d');
+        const stage = createStage(ctx, {
+            width: cssW, height: cssH, dpr,
+            maxNodes: 16, maxVerts: GW * GH * BANDS * 2, maxDrawFaces: GW * GH * BANDS,
+            camera: { ortho: true, orthoScale: 1.95, theta: 0.82, phi: 1.2, radius: 8, targetY: WY * 0.32 },
+        });
+        stage.light[0] = 0.55; stage.light[1] = 0.68; stage.light[2] = 0.5;
+        stage.dirtyRect = true;   // screen-box lane on, for hover picking
+
+        // 5. One geometry + node per band. A quad is in band k when its mean
+        //    finite corner height falls in the band; a NaN corner -> skip (hole).
+        const step = vRange / BANDS;
+        const bandNodes = [];
+        for (let k = 0; k < BANDS; k++) {
+            const faces = [];
+            const bandLo = vMin + k * step, bandHi = (k === BANDS - 1) ? Infinity : vMin + (k + 1) * step;
+            for (let row = 0; row < GH - 1; row++) for (let col = 0; col < GW - 1; col++) {
+                const a = row * GW + col, b = a + 1, c = a + GW + 1, d = a + GW;
+                const va = grid[a], vb = grid[b], vc = grid[c], vd = grid[d];
+                if (!(va === va && vb === vb && vc === vc && vd === vd)) continue;   // hole
+                const mean = (va + vb + vc + vd) * 0.25;
+                if (mean >= bandLo && mean < bandHi) faces.push([a, b, c, d]);
+            }
+            const rgb = bandRGB(k);
+            const matId = stage.material(material({ r: rgb.r, g: rgb.g, b: rgb.b, steps: 16, ambient: 0.55 }));
+            const geomId = stage.geometry(geometry.custom(verts, faces));
+            const node = stage.addNode(geomId, matId, { x: 0, y: 0, z: 0 });
+            bandNodes.push({ node, k, bandLo, bandHi });
+        }
+
+        // 6. Render on demand (a static relief is fine until you orbit it);
+        //    stage.frame is 0 B/op, so redrawing per drag move stays allocation-free.
+        const render = () => { updateCamera(stage.camera); stage.frame(0); };
+        render();
+
+        // 7. Drag to orbit.
+        let dragging = false, lastX = 0, lastY = 0;
+        canvas.addEventListener('pointerdown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.style.cursor = 'grabbing'; canvas.setPointerCapture(e.pointerId); });
+        canvas.addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            const cam = stage.camera;
+            cam.theta -= (e.clientX - lastX) * 0.01;
+            cam.phi = Math.max(0.2, Math.min(1.4, cam.phi - (e.clientY - lastY) * 0.01));
+            lastX = e.clientX; lastY = e.clientY;
+            render();
+        });
+        const endDrag = (e) => { if (!dragging) return; dragging = false; canvas.style.cursor = 'grab'; if (e.pointerId != null && canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); };
+        canvas.addEventListener('pointerup', endDrag);
+        canvas.addEventListener('pointercancel', endDrag);
+
+        // 8. Hover readout -- which band + its z range (pick uses the screen-box
+        //    lane enabled above; out[0] is a dense node index = band order).
+        const pickOut = new Int32Array(1);
+        canvas.addEventListener('pointermove', (e) => {
+            if (dragging) return;
+            const r = canvas.getBoundingClientRect();
+            const cnt = stage.pick((e.clientX - r.left), (e.clientY - r.top), pickOut);
+            if (cnt > 0 && pickOut[0] >= 0 && pickOut[0] < BANDS) {
+                const bn = bandNodes[pickOut[0]];
+                const hiTxt = bn.bandHi === Infinity ? vMax.toFixed(0) : bn.bandHi.toFixed(0);
+                status.textContent = 'band ' + (pickOut[0] + 1) + '/' + BANDS + ' -- z in [' + bn.bandLo.toFixed(0) + ', ' + hiTxt + ']';
+            } else {
+                status.textContent = defaultStatus;
+            }
+        });
+
+        // 9. Resize: re-fit width (cold), re-render.
+        const ro = new ResizeObserver(() => { applySize(); stage.resize(cssW, cssH, dpr); render(); });
+        ro.observe(canvas);
+
+        // 10. Theme hook (fixed ramp, so just re-render), driven by the existing
+        //     ALL_CHARTS refreshTheme loop via a duck-typed shim.
+        ALL_CHARTS.push({ refreshTheme: render });
+    })();
+
+    // ---------------------------------------------------------------------
+    // ERROR BARS / CONFIDENCE BANDS -- v1.21.0
+    // ---------------------------------------------------------------------
+    //
+    // errorBars normalizes ONCE at construction, so the band-mode toggle
+    // destroys and rebuilds the chart rather than mutating a live config.
+    const ebData = (() => {
+        const out = [];
+        for (let i = 0; i < 24; i++) {
+            const y = 50 + 20 * Math.sin(i / 3) + (Math.random() - 0.5) * 6;
+            const sd = 4 + Math.random() * 5;
+            out.push({ x: i, y, lo: y - sd, hi: y + sd });
+        }
+        return out;
+    })();
+    const ebWidth = responsiveWidth('errorbar-chart', 800);
+    const ebModes = ['both', true, false];
+    const ebModeLabel = (m) => m === 'both' ? 'band: both' : (m === true ? 'band: ribbon' : 'band: whiskers');
+    const ebStatusLabel = (m) => m === 'both' ? 'whiskers + ribbon' : (m === true ? 'ribbon only' : 'whiskers only');
+    let ebBand = 'both';
+    let ebChart = null;
+    const ebEl = document.getElementById('errorbar-chart');
+    const makeEbChart = () => createLineChart({
+        data: ebData,
+        color: '--c-primary',
+        errorBars: { lo: 'lo', hi: 'hi', band: ebBand, capWidth: 4 },
+        width: ebWidth,
+        height: 360,
+        ...SHARED_OPTS,
+    });
+    ebChart = makeEbChart();
+    ebChart.mount(ebEl);
+    ALL_CHARTS.push({ refreshTheme: () => ebChart.refreshTheme() });
+    const ebBtn = document.getElementById('eb-mode-btn');
+    const ebStatus = document.getElementById('eb-status');
+    ebBtn.addEventListener('click', () => {
+        ebBand = ebModes[(ebModes.indexOf(ebBand) + 1) % ebModes.length];
+        ebChart.destroy();
+        ebEl.innerHTML = '';
+        ebChart = makeEbChart();
+        ebChart.mount(ebEl);
+        ebBtn.textContent = ebModeLabel(ebBand);
+        ebStatus.textContent = ebStatusLabel(ebBand);
+    });
+
+    // ---------------------------------------------------------------------
+    // CANDLESTICK / OHLC -- v1.19.0 (tenth chart type)
+    // ---------------------------------------------------------------------
+    //
+    // Business-day bars only (weekends left as GAPS), so the weekend shading
+    // engine -- shared by reference with createTimeLineChart -- fills the
+    // non-trading spans. Candles sit at TRUE time; a single OHLC stream.
+    const candleData = (() => {
+        const rows = [];
+        const DAY = 86400000;
+        let ts = Date.UTC(2026, 0, 5);   // a Monday
+        let price = 100;
+        for (let d = 0; d < 45; d++) {
+            const dow = new Date(ts).getUTCDay();
+            if (dow !== 0 && dow !== 6) {
+                const o = price;
+                const c = o + (Math.random() - 0.48) * 4;
+                const h = Math.max(o, c) + Math.random() * 2;
+                const l = Math.min(o, c) - Math.random() * 2;
+                rows.push({ ts, o, h, l, c });
+                price = c;
+            }
+            ts += DAY;
+        }
+        return rows;
+    })();
+    const candleChart = createCandlestickChart({
+        data: candleData,
+        up: '#22c55e',      // green up / red down is theme-independent -- raw hex
+        down: '#f43f5e',
+        shading: { fill: 'rgba(148,163,184,0.10)' },   // weekend gaps, visible on both themes
+        pan: true,
+        zoom: true,
+        panBounds: 'data',
+        width: responsiveWidth('candlestick-chart', 800),
+        height: 400,
+        ...SHARED_OPTS,
+        tooltip: { background: '--tooltip-bg', border: '--tooltip-border' },
+    });
+    candleChart.mount(document.getElementById('candlestick-chart'));
+    ALL_CHARTS.push(candleChart);
 
     // ---------------------------------------------------------------------
     // MULTI-SERIES BUBBLE -- v1.2.0-alpha.2 (global size domain)

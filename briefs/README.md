@@ -4,7 +4,13 @@ Local working scratch. **Not shipped** -- `briefs/` is absent from
 package.json `files[]`, so nothing here reaches npm. Each brief is a
 self-contained plan for one future `cd LiteCharts && claude` session.
 
-Current state: **v1.20.0 SHIPPED** -- brush v2, brief #17 executed
+Current state: **v1.21.0 SHIPPED** -- error bars / confidence bands, brief
+#18 executed 2026-09-08, released + published + npm-view-verified + card-synced
+2026-09-17 (per-series `errorBars: {lo,hi}|{value}` whiskers and/or ribbon on
+line/area/scatter, `buildErrorBars` overlay on the annotation cold-resolve/
+hot-project 0-B/frame split; 552/552 + torture A27 + 3 reversion proofs,
+reviewer APPROVED zero blockers + 2 nits fixed; release commit a0c72cf, no tag).
+Prior: **v1.20.0** -- brush v2, brief #17 executed
 2026-09-08 (configurable `brushModifier`, per-series commit-time
 `idsBySeries` snapshot, horizontal-bar band multi-select with
 non-contiguous `bands`/hull/pooled run-baked overlay, plus the vertical
@@ -68,7 +74,8 @@ The forward plan in `../ROADMAP.md` points here.
 | 13 | `contour-isolines.md` | feature, v1.17.0 -- SHIPPED 2026-09-05 (npm-view-verified) | M | The v1.16.0 out-of-scope follow-on: iso-value lines over the field raster, computed cold on the same postProject refresh. KEY grounding: exact TIN isolines need ONLY triangleCount+triangleVertices (+ caller edge-lerp over pxs/pys/zs) -- locate/barycentric stay unconsumed; NO delaunay change, does NOT trigger their 1.4.0. Planner owns: TIN sweep vs marching-squares-over-fieldGrid; nested field.contours config; fault-domain placement (C4). Oracle: planar field -> segments exactly on the mapped line. |
 | 10 | `voronoi-cells.md` | feature, v1.14.0 -- EXECUTED 2026-09-03 (SHIPPED, live on npm) | M | Fat hover (`hitTolerance: 'nearest'` -- charts-side ONLY, rides the existing findNearest k=1) + injected Voronoi cell tessellation layer on scatter (`cells: { index }` per the spatialIndex precedent). Carried THE CONSUMER CONTRACT for delaunay's `createCellIndex`; delaunay 1.2.0 published 2026-09-03, charts built + gated against it (463/463, A20, 5 reversion proofs). One as-executed deviation recorded in the brief: postProject seam, not extract-time. |
 | ~~9~~ | ~~`overnight-holidays.md`~~ | **SHIPPED v1.13.0** | S-M | Overnight sessions (midnight-split normalization -- the sweep survived byte-structurally unchanged, planner falsified the brief's synth site into _normalizeSessionSpec) + holiday calendar (UTC-day-skip, gap fusion). qa added the Saturday-wrap rotate fixture the planner fixtures missed; four reversions proven. 453 tests + A19. Kept for reference. |
-| ~~8~~ | ~~`demo-refresh.md`~~ | **DONE 2026-09-02** (demo-only, no release) | M | Demo v1.6.0 -> v1.12.0: annotations, time-series weekend+sessions shading, hbar pan/zoom/brush wired live, 200-series virtualized legend against REAL lite-virtual via a scope-bridge adapter. Found + fixed a README doc bug: the shipped adapter snippet called `mountList(host, opts)` but lite-virtual 1.1.0's real signature is `(host, scope, opts)` with viewport/render keys -- README now ships the working ~25-line bridge (rides the next release). Kept for reference. |
+| 8a | `demo-refresh-1.md` | demo-only, no release -- **SESSION 1 of 2** (written 2026-09-17; the v1.6->v1.12 pass was DONE 2026-09-02, demo then reached v1.19.0 branding but candlestick was never actually paneled) | M | Foundation + marquee: branding -> v1.21.0, importmap adds lite-depth@2.0.0, add the missing `createCandlestickChart` import, then three panels -- the headline **3D relief map** (field-raster grid extruded via @zakkster/lite-depth; DPR pass-through; BANDED ramp = contours-in-3D because depth flat-shades one material/node; inline geometry.custom builder against published depth@2.0.0, swaps to `geometry.heightfield` if the parallel LiteDepth brief ships -- NOT blocked on it), candlestick (v1.19.0), error bars (v1.21.0). delaunay stays 1.3.0 (relief reuses createFieldIndex). Charts.js/d.ts/test UNTOUCHED. |
+| 8b | `demo-refresh-2.md` | demo-only, no release -- **SESSION 2 of 2** (written 2026-09-17) | M | Catch-up panels, independent of 8a after its branding lands: cluster outlines (v1.18.0, REUSES the existing two-cluster dataset :2646-2655, bumps delaunay 1.3.0->1.4.0), brush v2 (v1.20.0, brushModifier + idsBySeries + hbar band multi-select), overnight/holidays + early close (v1.13.0/v1.15.0, extend the time-series section), horizontal legend virtualization (v1.15.0, top/bottom, orientation-exclusive width/itemWidth). Charts.js/d.ts/test UNTOUCHED. |
 
 PLANNED ORDER (2026-09-02, user-confirmed): ~~#7 market-hours -> v1.11.0~~
 SHIPPED; ~~#5 legend-virtualization -> v1.12.0~~ SHIPPED. Both feed the
@@ -85,6 +92,15 @@ candidate (`error-bars.md`, release pending); next up is item 3: axis titles
 region; data labels -- each still needs a brief before its cut.
 Parallel: #15 (the charts-gl 1.0.0 render-core decision -- awaiting the
 user's DECISION record; item 6's fate is decided there).
+Cross-package (2026-09-17): a companion brief lives OUTSIDE this repo at
+`../LiteDepth/briefs/heightfield.md` -- `geometry.heightfield` for
+@zakkster/lite-depth (a grid-surface primitive; win-win raised from the relief
+panel). Independent of the demo: the demo runs against published lite-depth@2.0.0
+with an inline `geometry.custom` builder today; if the heightfield ships, a later
+demo revision swaps it in. See the ROADMAP "3D relief map via lite-depth"
+candidate for the full grounding + shape decision (composition, not a fifth
+injection rung; the one charts-side cut productization would need is a read-only
+field-grid accessor).
 The lite-delaunay dormancy contract CLOSED THE LOOP 2026-09-03: brief #10
 carried the consumer contract, delaunay v1.2.0 shipped `createCellIndex`
 against it (published, verified), and charts consumed the real package
