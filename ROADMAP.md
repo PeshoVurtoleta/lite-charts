@@ -5,7 +5,27 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.22.0 (current)
+## v1.23.0 (current)
+
+Axis titles + tick-format callbacks (brief #20,
+`briefs/axis-titles-tickformat.md`; queue item 3), plus a discovered
+latent fix promoted to Cut 0: the axis kernel's `refreshTheme()` never
+recolored its scene-node chrome -- lite-scene bindings cache at attach and
+re-fire only on a tracked signal read, so mutating the resolved color refs
+and repainting served the stale cache on every axis-kernel chart. Fixed
+with a per-chart `axisThemeVersion` signal (the `annThemeVersion`
+precedent) tracked by the call-site color getters and bumped after the
+refs re-resolve. The cuts: `xTickFormat` / `yTickFormat` at the axis
+rebuild's single cold label site (band axes ignore them; the C0
+no-throw-in-effect idiom carries bad callback returns from the first
+rebuild out through `mount()` with a full unwind, and fail-safes later
+ones); `xTitle` / `yTitle` pooled scene text nodes with a conditional
+18px default-margin bump (explicit margins absolute); `exportSVG()`
+rotated-text fix (CTM emitted as a `matrix()` transform -- corrects
+pie/radar label exports too). 572/572, torture A28, three reversion
+proofs. Secondary y-axis stays deferred with a named trigger.
+
+## v1.22.0
 
 Heatmap `refreshTheme()` (brief #19, `briefs/heatmap-refresh-theme.md`;
 user-reported gap, same-session cut). The grid kernel (`createBaseGridChart`,

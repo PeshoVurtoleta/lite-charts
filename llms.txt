@@ -39,7 +39,22 @@
 > OUT for v1 with a named trigger -- candles sit at TRUE time, weekend/
 > holiday gaps show as gaps (the shading engine's premise); volume panes,
 > comparison overlays, hollow/heikin-ashi variants OUT (see README).
-> v1.22.0 (current): heatmap refreshTheme(). The grid kernel captures its
+> v1.23.0 (current): axis titles + tick-format callbacks + an axis-kernel
+> theme fix. xTickFormat/yTickFormat ((value: number) => string) format the
+> numeric/time tick labels at the cold axis rebuild (time x passes raw epoch
+> ms; band axes ignore them; the horizontal bar's bottom VALUE axis honors
+> xTickFormat). xTitle/yTitle render pooled scene text nodes (yTitle rotated
+> -90deg), each adding 18px to its side's DEFAULT margin only when that
+> margin side is unset. Fail-closed: non-function/junk-title configs throw
+> at construction pre-signal; a bad callback RETURN surfaces from mount()
+> (C0 idiom, full unwind) and is fail-safe (labels hide) on later rebuilds.
+> FIXED: axis-kernel refreshTheme() never recolored the spine/tick/label/
+> gridline scene bindings (they re-fire only on a tracked signal read) --
+> a new axisThemeVersion signal bumped in refreshTheme re-fires them; and
+> exportSVG() now emits rotated text with a matrix() transform (pie/radar
+> labels previously exported horizontal). +14 tests (558->572), 3 reversion
+> proofs, torture A28.
+> v1.22.0: heatmap refreshTheme(). The grid kernel captures its
 > six theme-affected color specs (colors ramp endpoints, labelColor,
 > highlightStroke, rowColumnHighlightFill, valueLabelColor) at
 > construction, BEFORE mount() resolves them in place -- so
@@ -895,6 +910,16 @@ interface LineChartConfig {
     axisColor?: string;
     labelColor?: string;
     font?: string;
+
+    // v1.23.0: axis tick-format callbacks + titles (axis-kernel charts only).
+    // Callbacks run on the cold axis rebuild; a time x-axis passes raw epoch
+    // ms; band (category) axes ignore them. Titles are non-empty strings;
+    // each adds 18px to its side's DEFAULT margin unless that margin side is
+    // set explicitly; yTitle renders rotated -90 degrees.
+    xTickFormat?: (value: number) => string;
+    yTickFormat?: (value: number) => string;
+    xTitle?: string;
+    yTitle?: string;
 
     // Device pixel ratio override. Default: globalThis.devicePixelRatio.
     dpr?: number;

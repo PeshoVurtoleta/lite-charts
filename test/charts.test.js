@@ -12348,3 +12348,236 @@ describe('v1.21.0 -- error bars / confidence bands', () => {
         cW.destroy(); cO.destroy();
     });
 });
+
+// ---------------------------------------------------------------------------
+// v1.23.0 -- axis titles + tick-format callback + axis theme reactivity
+// ---------------------------------------------------------------------------
+//
+// Cut 0 background (AXT11): axis/grid chrome colors flow through lite-scene
+// node BINDINGS, which only re-fire on a tracked signal read -- before
+// v1.23.0, refreshTheme() mutated the plain axisStyleRefs and repainted the
+// STALE cached colors. axisThemeVersion (bumped in refreshTheme) is the fix.
+// Under the sync test scheduler each re-fired binding schedules its own draw,
+// so the calls log DURING refreshTheme mixes old and new frames -- the honest
+// assertion is a cleared-calls redraw() AFTER the refresh (one fresh frame).
+
+describe('v1.23.0 -- axis titles + tick-format callback', () => {
+    const LDATA = [{ x: 0, y: 1 }, { x: 2, y: 5 }, { x: 4, y: 3 }, { x: 6, y: 8 }];
+    const texts = (ctx) => callsOf(ctx, 'fillText').map((c) => c[1][0]);
+    const mk = (factory, cfg) => {
+        const canvas = createMockCanvas(400, 200);
+        const chart = factory({ data: LDATA, width: 400, height: 200, schedule: (fn) => fn(), ...cfg });
+        chart.mount(canvas);
+        return { chart, ctx: canvas.getContext('2d') };
+    };
+    const withTheme = (vars, fn) => {
+        const origGCS = globalThis.getComputedStyle;
+        globalThis.getComputedStyle = () => ({
+            getPropertyValue: (name) => vars[name] || '',
+        });
+        try { fn(); } finally { globalThis.getComputedStyle = origGCS; }
+    };
+
+    it('AXT1: xTickFormat formats every kept bottom tick; values are finite numbers', () => {
+        const seen = [];
+        const { chart, ctx } = mk(createLineChart, {
+            xTickFormat: (v) => { seen.push(v); return 'PX' + v; },
+        });
+        // fillText fires per DRAW frame, the callback per REBUILD -- compare the
+        // painted string SET against the produced set, not raw call counts.
+        const px = texts(ctx).filter((s) => typeof s === 'string' && s.startsWith('PX'));
+        assert.ok(px.length >= 2, 'expected formatted x labels, got: ' + texts(ctx).join(','));
+        const produced = new Set(seen.map((v) => 'PX' + v));
+        for (const s of px) assert.ok(produced.has(s), 'painted label ' + s + ' was never produced by the callback');
+        for (const v of seen) assert.ok(Number.isFinite(v), 'callback received non-finite tick ' + v);
+        // y labels still default-format (no PX prefix on all labels).
+        assert.ok(texts(ctx).some((s) => !s.startsWith('PX')), 'y labels must stay default');
+        chart.destroy();
+    });
+
+    it('AXT2: yTickFormat formats the left axis independently of x', () => {
+        const { chart, ctx } = mk(createLineChart, { yTickFormat: (v) => 'PY' + v });
+        assert.ok(texts(ctx).some((s) => s.startsWith('PY')), 'expected formatted y labels');
+        assert.ok(texts(ctx).some((s) => !s.startsWith('PY')), 'x labels must stay default');
+        chart.destroy();
+    });
+
+    it('AXT3: a time x-axis passes RAW epoch ms to xTickFormat', () => {
+        const T0 = Date.UTC(2026, 0, 5);
+        const seen = [];
+        const data = [0, 1, 2, 3, 4].map((i) => ({ x: T0 + i * 86400000, y: i }));
+        const canvas = createMockCanvas(400, 200);
+        const chart = createTimeLineChart({
+            data, width: 400, height: 200, schedule: (fn) => fn(),
+            xTickFormat: (v) => { seen.push(v); return 't' + v; },
+        });
+        chart.mount(canvas);
+        assert.ok(seen.length > 0, 'callback never called on the time axis');
+        for (const v of seen) {
+            assert.ok(typeof v === 'number' && v > 1e12, 'expected raw epoch ms, got ' + v);
+        }
+        chart.destroy();
+    });
+
+    it('AXT4: non-function xTickFormat/yTickFormat throws at construction, zero node leak', () => {
+        for (const bad of ['nope', 42, {}, []]) {
+            for (const key of ['xTickFormat', 'yTickFormat']) {
+                const before = stats().activeNodes;
+                assert.throws(() => createLineChart({ data: LDATA, [key]: bad }),
+                    new RegExp('lite-charts: ' + key + ' must be a function'),
+                    key + '=' + JSON.stringify(bad));
+                assert.equal(stats().activeNodes - before, 0, 'rejected ' + key + ' leaked a node');
+            }
+        }
+    });
+
+    it('AXT5: non-string return throws from mount() (C0 idiom), destroy unwinds cleanly', () => {
+        const before = stats().activeNodes;
+        const canvas = createMockCanvas(400, 200);
+        const chart = createLineChart({
+            data: LDATA, width: 400, height: 200, schedule: (fn) => fn(),
+            xTickFormat: () => 42,
+        });
+        assert.throws(() => chart.mount(canvas), /xTickFormat must return a string \(got number/);
+        chart.destroy();
+        assert.equal(stats().activeNodes, before, 'failed mount + destroy must not leak signal nodes');
+    });
+
+    it('AXT6: a THROWING callback surfaces from mount() with its message, not from the effect', () => {
+        const before = stats().activeNodes;
+        const canvas = createMockCanvas(400, 200);
+        const chart = createLineChart({
+            data: LDATA, width: 400, height: 200, schedule: (fn) => fn(),
+            yTickFormat: () => { throw new Error('user boom'); },
+        });
+        assert.throws(() => chart.mount(canvas), /yTickFormat threw: user boom/);
+        chart.destroy();
+        assert.equal(stats().activeNodes, before, 'failed mount + destroy must not leak signal nodes');
+    });
+
+    it('AXT7: a callback that goes bad AFTER mount is fail-safe -- labels hide, no throw mid-gesture', () => {
+        let bad = false;
+        const { chart, ctx } = mk(createLineChart, {
+            pan: true,
+            xTickFormat: (v) => (bad ? 42 : 'PX' + v),
+        });
+        assert.ok(texts(ctx).some((s) => typeof s === 'string' && s.startsWith('PX')), 'sane labels at mount');
+        bad = true;
+        // setView bumps scaleVersion -> axis rebuild runs with the bad callback.
+        chart.setView({ xMin: 1, xMax: 5, yMin: 0, yMax: 10 }); // must NOT throw
+        ctx.calls.length = 0;
+        chart.redraw();
+        assert.ok(!texts(ctx).some((s) => typeof s === 'string' && s.startsWith('PX')),
+            'bad-format x labels must be hidden, not painted');
+        chart.destroy();
+    });
+
+    it('AXT8: band (category) axes ignore tickFormat; the value axis honors it', () => {
+        const bdata = [{ x: 'alpha', y: 3 }, { x: 'beta', y: 5 }];
+        // Vertical bar: x is the band -> xTickFormat ignored, categories verbatim;
+        // y is the value axis -> yTickFormat applies.
+        const v = mk(createBarChart, {
+            data: bdata,
+            xTickFormat: () => { throw new Error('band must never format'); },
+            yTickFormat: (n) => 'PY' + n,
+        });
+        assert.ok(texts(v.ctx).includes('alpha') && texts(v.ctx).includes('beta'),
+            'category labels must render verbatim');
+        assert.ok(texts(v.ctx).some((s) => s.startsWith('PY')), 'value axis must format');
+        v.chart.destroy();
+        // Horizontal bar: the bottom axis is the VALUE axis -> xTickFormat
+        // applies (screen-edge semantics); the left band axis ignores yTickFormat.
+        const h = mk(createBarChart, {
+            data: bdata, orientation: 'horizontal',
+            xTickFormat: (n) => 'PX' + n,
+            yTickFormat: () => { throw new Error('band must never format'); },
+        });
+        assert.ok(texts(h.ctx).some((s) => s.startsWith('PX')), 'hbar bottom value axis must format');
+        assert.ok(texts(h.ctx).includes('alpha'), 'hbar band labels verbatim');
+        h.chart.destroy();
+    });
+
+    it('AXT9: xTitle/yTitle render; yTitle is drawn rotated -90deg', () => {
+        const { chart, ctx } = mk(createLineChart, { xTitle: 'Hours', yTitle: 'Load' });
+        assert.ok(texts(ctx).includes('Hours'), 'xTitle must paint');
+        assert.ok(texts(ctx).includes('Load'), 'yTitle must paint');
+        const rots = callsOf(ctx, 'rotate').map((c) => c[1][0]);
+        assert.ok(rots.some((r) => Math.abs(r + Math.PI / 2) < 1e-9),
+            'yTitle must rotate -PI/2, saw: ' + rots.join(','));
+        chart.destroy();
+    });
+
+    it('AXT10: titles bump their side of the DEFAULT margin; an explicit margin is absolute', () => {
+        // Baseline: DEFAULT_MARGIN {top:16,right:24,bottom:32,left:56}, TITLE_MARGIN 18.
+        const plain = mk(createLineChart, {});
+        const pb0 = plain.chart._internal.plotBoundsBox;
+        assert.equal(pb0.x, 56); assert.equal(pb0.y, 16);
+        assert.equal(pb0.h, 200 - 16 - 32);
+        plain.chart.destroy();
+        const titled = mk(createLineChart, { xTitle: 'T', yTitle: 'U' });
+        const pb1 = titled.chart._internal.plotBoundsBox;
+        assert.equal(pb1.x, 56 + 18, 'yTitle bumps the default left margin');
+        assert.equal(pb1.h, 200 - 16 - (32 + 18), 'xTitle bumps the default bottom margin');
+        titled.chart.destroy();
+        const explicit = mk(createLineChart, { xTitle: 'T', yTitle: 'U', margin: { bottom: 40, left: 60 } });
+        const pb2 = explicit.chart._internal.plotBoundsBox;
+        assert.equal(pb2.x, 60, 'explicit margin.left is absolute -- no stacking');
+        assert.equal(pb2.h, 200 - 16 - 40, 'explicit margin.bottom is absolute -- no stacking');
+        explicit.chart.destroy();
+    });
+
+    it('AXT11: refreshTheme recolors axis labels, ticks, and titles (the Cut 0 fix)', () => {
+        const vars = { '--txt': '#111111' };
+        withTheme(vars, () => {
+            const { chart, ctx } = mk(createLineChart, {
+                labelColor: '--txt', axisColor: '--txt', xTitle: 'Hours', yTitle: 'Load',
+            });
+            vars['--txt'] = '#eeeeee';
+            chart.refreshTheme();
+            ctx.calls.length = 0;
+            chart.redraw(); // one fresh frame -- the truth, past sync-schedule noise
+            const fills = callsOf(ctx, 'set:fillStyle').map((c) => c[1][0]);
+            const strokes = callsOf(ctx, 'set:strokeStyle').map((c) => c[1][0]);
+            assert.ok(fills.includes('#eeeeee'), 'labels/titles must paint the new color');
+            assert.ok(!fills.includes('#111111'), 'stale label color must be gone');
+            assert.ok(strokes.includes('#eeeeee'), 'spine/ticks must paint the new color');
+            assert.ok(!strokes.includes('#111111'), 'stale tick color must be gone');
+            chart.destroy();
+        });
+    });
+
+    it('AXT12: exportSVG carries both titles; the rotated yTitle gets a matrix transform', () => {
+        const { chart } = mk(createLineChart, { xTitle: 'Hours', yTitle: 'Load' });
+        const svg = chart.exportSVG();
+        const xt = svg.match(/<text[^>]*>Hours<\/text>/);
+        const yt = svg.match(/<text[^>]*>Load<\/text>/);
+        assert.ok(xt, 'xTitle missing from SVG');
+        assert.ok(yt, 'yTitle missing from SVG');
+        assert.ok(!xt[0].includes('transform='), 'axis-aligned xTitle must not carry a transform');
+        assert.ok(yt[0].includes('transform="matrix('), 'rotated yTitle must carry the CTM matrix');
+        chart.destroy();
+    });
+
+    it('AXT13: junk titles throw at construction (fail closed), zero node leak', () => {
+        for (const bad of ['', 42, {}, [], true]) {
+            for (const key of ['xTitle', 'yTitle']) {
+                const before = stats().activeNodes;
+                assert.throws(() => createLineChart({ data: LDATA, [key]: bad }),
+                    new RegExp('lite-charts: ' + key + ' must be a non-empty string'),
+                    key + '=' + JSON.stringify(bad));
+                assert.equal(stats().activeNodes - before, 0, 'rejected ' + key + ' leaked a node');
+            }
+        }
+    });
+
+    it('AXT14: full-featured chart destroys clean -- signal nodes return to baseline', () => {
+        const before = stats().activeNodes;
+        const { chart } = mk(createLineChart, {
+            xTickFormat: (v) => 'x' + v, yTickFormat: (v) => 'y' + v,
+            xTitle: 'Hours', yTitle: 'Load', pan: true, zoom: true,
+        });
+        chart.setView({ xMin: 1, xMax: 5, yMin: 0, yMax: 10 });
+        chart.destroy();
+        assert.equal(stats().activeNodes, before, 'destroy must detach every signal node');
+    });
+});

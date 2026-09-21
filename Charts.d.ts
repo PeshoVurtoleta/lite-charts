@@ -468,6 +468,15 @@ export interface LineChartConfig extends PanZoomConfig, BrushConfig {
     labelColor?: string;
     font?: string;
 
+    /** Formats bottom-axis tick labels. Receives the raw tick value (epoch ms on a time axis). Must return a string; band (category) axes ignore it. */
+    xTickFormat?: (value: number) => string;
+    /** Formats left-axis tick labels. Must return a string. */
+    yTickFormat?: (value: number) => string;
+    /** Bottom-axis title. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    xTitle?: string;
+    /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
+    yTitle?: string;
+
     /** Path interpolation. Default 'linear'. Per-series override via SeriesConfig.interpolation. */
     interpolation?: InterpolationMode;
     /** Marker dots at each sample point. `true` for defaults, `false` to disable, or an object. */
@@ -916,6 +925,14 @@ export interface BubbleChartConfig extends PanZoomConfig, BrushConfig {
     font?: string;
     labelColor?: string;
     axisColor?: string;
+    /** Formats bottom-axis tick labels. Receives the raw tick value (epoch ms on a time axis). Must return a string; band (category) axes ignore it. */
+    xTickFormat?: (value: number) => string;
+    /** Formats left-axis tick labels. Must return a string. */
+    yTickFormat?: (value: number) => string;
+    /** Bottom-axis title. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    xTitle?: string;
+    /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
+    yTitle?: string;
     background?: string;
     dpr?: number;
     schedule?: (cb: () => void) => unknown;
@@ -1263,6 +1280,14 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
     font?: string;
     labelColor?: string;
     axisColor?: string;
+    /** Formats bottom-axis tick labels. Receives the raw tick value (epoch ms on a time axis). Must return a string; band (category) axes ignore it. */
+    xTickFormat?: (value: number) => string;
+    /** Formats left-axis tick labels. Must return a string. */
+    yTickFormat?: (value: number) => string;
+    /** Bottom-axis title. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    xTitle?: string;
+    /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
+    yTitle?: string;
     background?: string;
     dpr?: number;
     schedule?: (cb: () => void) => unknown;
@@ -1493,6 +1518,14 @@ export interface CandlestickChartConfig extends PanZoomConfig, BrushConfig {
     axisColor?: string;
     labelColor?: string;
     font?: string;
+    /** Formats bottom-axis tick labels. Receives the raw tick value (epoch ms on a time axis). Must return a string; band (category) axes ignore it. */
+    xTickFormat?: (value: number) => string;
+    /** Formats left-axis tick labels. Must return a string. */
+    yTickFormat?: (value: number) => string;
+    /** Bottom-axis title. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    xTitle?: string;
+    /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
+    yTitle?: string;
     dpr?: number;
 
     /** Gridlines through the plot rect at each tick. Default false. */

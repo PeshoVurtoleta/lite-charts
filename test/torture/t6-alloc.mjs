@@ -1368,4 +1368,96 @@ export function run() {
         ctrl.destroy();
         c.destroy();
     }
+
+    // --- A28 (v1.23.0): axis titles + tick-format + theme reactivity ---------
+    // (a) COLD/HOT ISOLATION: tick-format callbacks fire on the axis REBUILD
+    // (scaleVersion/plotBounds change) only -- a pure redraw storm must never
+    // call them. A callback reaching the frame path would show up here as the
+    // spy count climbing across redraws.
+    // (b) Rebuild storm: label strings are transient by design (cold path);
+    // RETAINED growth across a setView storm must stay at the leak floor, and
+    // the signal graph must not grow (axis pools rebind in place).
+    // (c) refreshTheme storm: every bump re-fires the axis/grid/title color
+    // bindings; node count and retained bytes must both stay flat.
+    // (d) Titles ride the same frame: redraw cost with titles stays within
+    // noise of a title-less control.
+    {
+        const N = 120;
+        const rows = [];
+        for (let i = 0; i < N; i++) rows.push({ x: i, y: Math.cos(i * 0.1) * 5 });
+        let fmtCalls = 0;
+        const mkChart = (extras) => {
+            const c = createLineChart({
+                data: rows, zoom: true,
+                width: 800, height: 400, schedule: (fn) => fn(),
+                ...extras,
+            });
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const c = mkChart({
+            xTickFormat: (v) => { fmtCalls++; return 'v' + v; },
+            yTickFormat: (v) => { fmtCalls++; return 'w' + v; },
+            xTitle: 'X title', yTitle: 'Y title',
+        });
+        const ctrl = mkChart({});
+
+        // (a) Pure redraw storm: the callback count is FROZEN.
+        const fmtBefore = fmtCalls;
+        for (let i = 0; i < 500; i++) c.redraw();
+        check(fmtCalls === fmtBefore,
+            () => `A28: tick-format callbacks leaked into the frame path -- ${fmtCalls - fmtBefore} calls across a pure redraw storm (expected 0)`);
+
+        // (b) setView rebuild storm. First-pass numbers on a rebuild storm are
+        // dominated by process-warming noise the gc settle cannot remove (JIT,
+        // IC maps, string tables: measured 18-33 B/op on pass 1 converging to
+        // 0.0-0.2 B/op on pass 2, features and base alike), so pass 1 only
+        // guards the gross-leak ceiling and the STEADY-STATE pass 2 carries
+        // the tight gate. Zero graph growth is checked across both.
+        const vA = { xMin: 10, xMax: 100, yMin: -6, yMax: 6 };
+        const vB = { xMin: 20, xMax: 80, yMin: -4, yMax: 4 };
+        for (let i = 0; i < 8; i++) c.setView(i & 1 ? vA : vB);    // settle (A22 precedent)
+        const before = graphSnapshot();
+        let flip = 0;
+        const stormOp = () => {
+            c.setView((flip++ & 1) ? vA : vB);
+            c.redraw();
+        };
+        const gWarm = runOpsGate(stormOp, { ops: 2000, warmup: 200 });
+        const gSteady = runOpsGate(stormOp, { ops: 2000, warmup: 200 });
+        const after = graphSnapshot();
+        if (!gSteady.report.ok) die(allocFailMsg('A28.rebuild-storm', gSteady.report, gSteady.summary));
+        check(gWarm.bytesPerOp <= 128,
+            () => `A28: rebuild storm pass 1 retains ${gWarm.bytesPerOp.toFixed(3)} B/op (> 128 gross-leak ceiling)`);
+        check(gSteady.bytesPerOp <= 8,
+            () => `A28: steady-state rebuild storm retains ${gSteady.bytesPerOp.toFixed(3)} B/op (> 8 leak floor; label strings must be transient)`);
+        check(after.nodes - before.nodes === 0,
+            () => `A28: ${after.nodes - before.nodes} new signal-graph nodes across the rebuild storms (expected 0 -- axis pools rebind in place)`);
+
+        // (c) refreshTheme storm: binding re-fires, no growth. Two passes for
+        // the same warming reason as (b).
+        const tBefore = graphSnapshot();
+        const gThemeWarm = runOpsGate(() => { c.refreshTheme(); }, { ops: 2000, warmup: 200 });
+        const gTheme = runOpsGate(() => { c.refreshTheme(); }, { ops: 2000, warmup: 200 });
+        const tAfter = graphSnapshot();
+        if (!gTheme.report.ok) die(allocFailMsg('A28.theme-storm', gTheme.report, gTheme.summary));
+        check(gThemeWarm.bytesPerOp <= 128,
+            () => `A28: theme storm pass 1 retains ${gThemeWarm.bytesPerOp.toFixed(3)} B/op (> 128 gross-leak ceiling)`);
+        check(gTheme.bytesPerOp <= 8,
+            () => `A28: steady-state refreshTheme retains ${gTheme.bytesPerOp.toFixed(3)} B/op (> 8 leak floor)`);
+        check(tAfter.nodes - tBefore.nodes === 0,
+            () => `A28: ${tAfter.nodes - tBefore.nodes} new signal-graph nodes across the theme storms (expected 0)`);
+
+        // (d) Titled redraw parity vs the title-less control.
+        const gT = runOpsGate(() => { c.redraw(); }, { ops: 20000, warmup: 1000 });
+        const gC = runOpsGate(() => { ctrl.redraw(); }, { ops: 20000, warmup: 1000 });
+        if (!gT.report.ok) die(allocFailMsg('A28.titled-redraw', gT.report, gT.summary));
+        check(Math.abs(gT.bytesPerOp - gC.bytesPerOp) <= 2.0,
+            () => `A28: titled redraw ${gT.bytesPerOp.toFixed(3)} B/op vs control ${gC.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+
+        ctrl.destroy();
+        c.destroy();
+    }
 }

@@ -1686,7 +1686,8 @@ const buildAxis = (parent, opts) => {
     //   orientation: 'x' | 'y',
     //   scale,
     //   plotBoundsBox, plotBoundsSignal, scaleVersion,
-    //   tickColor, labelColor, font, format ('number'|'time')
+    //   tickColor, labelColor, font, format ('number'|'time'),
+    //   tickFormat (optional (value) => string; overrides format when set)
     // }
 
     const isX = opts.orientation === 'x';
@@ -1732,7 +1733,12 @@ const buildAxis = (parent, opts) => {
         }
     };
 
+    // v1.23.0: tick-format failure is recorded here (never thrown inside the
+    // effect -- C0 idiom); mount() re-throws after the axis disposers register.
+    let _fmtError = null;
+
     const rebuild = () => {
+        _fmtError = null;
         opts.scaleVersion();
         opts.plotBoundsSignal();
         updateSpine();
@@ -1803,21 +1809,40 @@ const buildAxis = (parent, opts) => {
             const isKept = kptPtr < kept && keepBuf[kptPtr] === i;
             if (isKept) {
                 kptPtr++;
-                const labelStr = formatTickValue(tickBuf[i], opts.format, timeUnit);
-                if (isX) {
-                    pair.label.set({
-                        visible: true,
-                        x: px,
-                        y: pb.y + pb.h + 8,
-                        text: labelStr,
-                    });
+                let labelStr = null;
+                if (opts.tickFormat) {
+                    // Fail-closed door, C0 idiom (:7458): never throw inside the
+                    // effect -- record + hide the label; mount() re-throws after
+                    // the disposers are registered. A later re-run that goes bad
+                    // skips labels (fail-safe).
+                    try {
+                        const s = opts.tickFormat(tickBuf[i]);
+                        if (typeof s === 'string') labelStr = s;
+                        else if (_fmtError === null) _fmtError = 'lite-charts: ' + (isX ? 'xTickFormat' : 'yTickFormat') + ' must return a string (got ' + typeof s + ' for tick value ' + tickBuf[i] + ')';
+                    } catch (err) {
+                        if (_fmtError === null) _fmtError = 'lite-charts: ' + (isX ? 'xTickFormat' : 'yTickFormat') + ' threw: ' + (err && err.message ? err.message : String(err));
+                    }
                 } else {
-                    pair.label.set({
-                        visible: true,
-                        x: pb.x - 8,
-                        y: px,
-                        text: labelStr,
-                    });
+                    labelStr = formatTickValue(tickBuf[i], opts.format, timeUnit);
+                }
+                if (labelStr !== null) {
+                    if (isX) {
+                        pair.label.set({
+                            visible: true,
+                            x: px,
+                            y: pb.y + pb.h + 8,
+                            text: labelStr,
+                        });
+                    } else {
+                        pair.label.set({
+                            visible: true,
+                            x: pb.x - 8,
+                            y: px,
+                            text: labelStr,
+                        });
+                    }
+                } else {
+                    pair.label.set({ visible: false });
                 }
             } else {
                 pair.label.set({ visible: false });
@@ -1827,7 +1852,7 @@ const buildAxis = (parent, opts) => {
 
     const dispose = effect(rebuild);
 
-    return { axisGroup, dispose };
+    return { axisGroup, dispose, get formatError() { return _fmtError; } };
 };
 
 // ---------------------------------------------------------------------------
@@ -2295,6 +2320,11 @@ const buildAnnotations = (parent, opts) => {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_MARGIN = { top: 16, right: 24, bottom: 32, left: 56 };
+// v1.23.0: axis-title spacing. TITLE_MARGIN is one 12-13px font line + gap
+// added to the default bottom/left margin when a title is present; TITLE_PAD
+// insets the title from the canvas edge.
+const TITLE_MARGIN = 18;
+const TITLE_PAD = 4;
 const DEFAULT_AXIS_COLOR = '#888888';
 const DEFAULT_LABEL_COLOR = '#444444';
 const DEFAULT_LINE_COLOR = '#3b82f6';
@@ -3820,11 +3850,21 @@ class _SVGRenderingContext2D {
     fillText(text, x, y) { this._emitText(text, x, y, false); }
     strokeText(text, x, y) { this._emitText(text, x, y, true); }
     _emitText(text, x, y, stroke) {
-        const [px, py] = this._t(x, y);
         const [size, family] = this._parseFont(this.font);
         const anchor = this._textAnchor();
         const baseline = this._textBaseline();
-        let attrs = ' x="' + _emitNumber(px) + '" y="' + _emitNumber(py) + '"';
+        let attrs;
+        if (this._axisAligned()) {
+            const [px, py] = this._t(x, y);
+            attrs = ' x="' + _emitNumber(px) + '" y="' + _emitNumber(py) + '"';
+        } else {
+            // Rotated text (axis y-title, pie/radar labels) carries the CTM as a
+            // matrix transform; baking _t into x/y kept the anchor but dropped
+            // the rotation (mirrors the fillRect non-axis-aligned branch).
+            const m = this._ctm;
+            attrs = ' x="' + _emitNumber(x) + '" y="' + _emitNumber(y) + '"';
+            attrs += ' transform="matrix(' + _emitNumber(m[0]) + ' ' + _emitNumber(m[1]) + ' ' + _emitNumber(m[2]) + ' ' + _emitNumber(m[3]) + ' ' + _emitNumber(m[4]) + ' ' + _emitNumber(m[5]) + ')"';
+        }
         attrs += ' font-family="' + _escapeXML(family) + '"';
         attrs += ' font-size="' + size + '"';
         if (stroke) {
@@ -4181,6 +4221,7 @@ const _buildAxisBar = (parent, opts, ctx) => {
             labelColor: opts.labelColor,
             font: opts.font,
             format: 'number',
+            tickFormat: opts.tickFormat,
         });
     }
     return buildBarAxis(parent, {
@@ -6798,17 +6839,49 @@ const createBaseAxisChart = (config, renderer) => {
     }
     const _brushMod = (ev) => !!ev[brushModProp];
 
+    // v1.23.0: axis tick-format callbacks. Applied at the axis rebuild's single
+    // label-format site; a non-function config value is a construction error and
+    // a non-string return is a rebuild error (fail closed, cold path). Hoisted
+    // ABOVE the first `_own(signal(...))` below so junk config throws with ZERO
+    // owned signals allocated (the v1.15.0 legend-hoist discipline).
+    const xTickFormatFn = config.xTickFormat != null ? config.xTickFormat : null;
+    if (xTickFormatFn !== null && typeof xTickFormatFn !== 'function') {
+        throw new Error('lite-charts: xTickFormat must be a function');
+    }
+    const yTickFormatFn = config.yTickFormat != null ? config.yTickFormat : null;
+    if (yTickFormatFn !== null && typeof yTickFormatFn !== 'function') {
+        throw new Error('lite-charts: yTickFormat must be a function');
+    }
+
+    // v1.23.0: axis titles. A title is a non-empty string or absent -- anything
+    // else (including '') is junk config and throws (fail closed). Screen-edge
+    // semantics: xTitle labels the bottom axis, yTitle the left axis, whichever
+    // scale lives there (horizontal bar swaps scales, not titles).
+    const xTitleText = config.xTitle != null ? config.xTitle : null;
+    if (xTitleText !== null && (typeof xTitleText !== 'string' || xTitleText === '')) {
+        throw new Error('lite-charts: xTitle must be a non-empty string');
+    }
+    const yTitleText = config.yTitle != null ? config.yTitle : null;
+    if (yTitleText !== null && (typeof yTitleText !== 'string' || yTitleText === '')) {
+        throw new Error('lite-charts: yTitle must be a non-empty string');
+    }
+
     const widthAutoSig = widthExplicit ? null : _own(signal(800));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthAcc = widthExplicit ? asAccessor(config.width) : widthAutoSig;
     const heightAcc = heightExplicit ? asAccessor(config.height) : heightAutoSig;
 
     // -- Margins --
-    const m = config.margin || DEFAULT_MARGIN;
-    const marginTop = m.top != null ? m.top : DEFAULT_MARGIN.top;
-    const marginRight = m.right != null ? m.right : DEFAULT_MARGIN.right;
-    const marginBottom = m.bottom != null ? m.bottom : DEFAULT_MARGIN.bottom;
-    const marginLeft = m.left != null ? m.left : DEFAULT_MARGIN.left;
+    // v1.23.0: `m` must be null when config.margin is absent -- the old
+    // `config.margin || DEFAULT_MARGIN` fallback made `m.bottom != null`
+    // always-true on default charts, which would dead-branch the title bump.
+    const m = config.margin || null;
+    const marginTop = m && m.top != null ? m.top : DEFAULT_MARGIN.top;
+    const marginRight = m && m.right != null ? m.right : DEFAULT_MARGIN.right;
+    const marginBottom = m && m.bottom != null ? m.bottom
+        : (xTitleText !== null ? DEFAULT_MARGIN.bottom + TITLE_MARGIN : DEFAULT_MARGIN.bottom);
+    const marginLeft = m && m.left != null ? m.left
+        : (yTitleText !== null ? DEFAULT_MARGIN.left + TITLE_MARGIN : DEFAULT_MARGIN.left);
 
     // -- Series state --
     // Tag each state with its position in the array. The multi-series bubble
@@ -6922,6 +6995,12 @@ const createBaseAxisChart = (config, renderer) => {
     rendererCtx.seriesStates = seriesStates;
 
     const scaleVersion = _own(signal(0));
+
+    // v1.23.0: axis/grid chrome colors are consumed via lite-scene node
+    // bindings, which only re-fire on a TRACKED signal read -- this signal is
+    // bumped by refreshTheme() so spine/tick/label/gridline (and axis-title)
+    // colors re-resolve; plain-ref mutation alone repaints the stale cached value.
+    const axisThemeVersion = _own(signal(0));
 
     // -- Plot bounds: a single mutable box + a signal that publishes "the box changed" --
     const plotBoundsBox = { x: 0, y: 0, w: 0, h: 0 };
@@ -7630,7 +7709,7 @@ const createBaseAxisChart = (config, renderer) => {
                 plotBoundsBox,
                 plotBoundsSignal,
                 scaleVersion,
-                color: () => gridColorRef.value,
+                color: () => (axisThemeVersion(), gridColorRef.value),
                 xFormat: resolvedXType === 'time' ? 'time' : 'number',
                 // Renderers that don't want vertical gridlines (e.g. bar:
                 // gridlines on band centers duplicate the tick marks)
@@ -7651,10 +7730,11 @@ const createBaseAxisChart = (config, renderer) => {
             plotBoundsBox,
             plotBoundsSignal,
             scaleVersion,
-            tickColor: () => axisStyleRefs.tickColor.value,
-            labelColor: () => axisStyleRefs.labelColor.value,
+            tickColor: () => (axisThemeVersion(), axisStyleRefs.tickColor.value),
+            labelColor: () => (axisThemeVersion(), axisStyleRefs.labelColor.value),
             font: () => axisStyleRefs.font.value,
             format: resolvedXType === 'time' ? 'time' : 'number',
+            tickFormat: xTickFormatFn,
         }, rendererCtx);
         // v1.5.0: Y-axis via an optional renderer seam. buildAxis ignores the
         // 3rd (ctx) arg, so line/area/scatter/bubble are untouched; the bar
@@ -7666,13 +7746,59 @@ const createBaseAxisChart = (config, renderer) => {
             plotBoundsBox,
             plotBoundsSignal,
             scaleVersion,
-            tickColor: () => axisStyleRefs.tickColor.value,
-            labelColor: () => axisStyleRefs.labelColor.value,
+            tickColor: () => (axisThemeVersion(), axisStyleRefs.tickColor.value),
+            labelColor: () => (axisThemeVersion(), axisStyleRefs.labelColor.value),
             font: () => axisStyleRefs.font.value,
             format: 'number',
+            tickFormat: yTickFormatFn,
         }, rendererCtx);
         disposers.push(xAxis.dispose);
         disposers.push(yAxis.dispose);
+
+        // v1.23.0: a tick-format failure on the first synchronous rebuild surfaces
+        // here, AFTER the axis disposers are registered (the C0 mount idiom) -- the
+        // rebuild effect itself never throws. Unlike the pre-scene _mountError
+        // unwind above, the scene now holds the axis nodes' binding effects, so
+        // the scene must be disposed here too or the rejected mount leaks them.
+        const _axisFmtError = xAxis.formatError || yAxis.formatError;
+        if (_axisFmtError) {
+            for (let i = disposers.length - 1; i >= 0; i--) {
+                try { disposers[i](); } catch (_) { /* best-effort unwind */ }
+            }
+            disposers.length = 0;
+            try { scene.dispose(); } catch (_) { /* best-effort unwind */ }
+            scene = null;
+            throw new Error(_axisFmtError);
+        }
+
+        // v1.23.0: axis titles. Pooled once per mount; position tracks plot
+        // bounds, color tracks the theme via axisThemeVersion (node bindings
+        // only re-fire on a tracked signal read). yTitle rotates -90deg via the
+        // node prop -- with baseline 'top' the ink extends screen-right of x, so
+        // TITLE_PAD insets it from the left canvas edge, reading bottom-to-top.
+        if (xTitleText !== null) {
+            scene.root.add(textNode({
+                text: xTitleText,
+                font: () => axisStyleRefs.font.value,
+                fill: () => (axisThemeVersion(), axisStyleRefs.labelColor.value),
+                align: 'center',
+                baseline: 'bottom',
+                x: () => { plotBoundsSignal(); return plotBoundsBox.x + plotBoundsBox.w / 2; },
+                y: () => { plotBoundsSignal(); return plotBoundsBox.y + plotBoundsBox.h + marginBottom - TITLE_PAD; },
+            }));
+        }
+        if (yTitleText !== null) {
+            scene.root.add(textNode({
+                text: yTitleText,
+                font: () => axisStyleRefs.font.value,
+                fill: () => (axisThemeVersion(), axisStyleRefs.labelColor.value),
+                align: 'center',
+                baseline: 'top',
+                rotation: -Math.PI / 2,
+                x: TITLE_PAD,
+                y: () => { plotBoundsSignal(); return plotBoundsBox.y + plotBoundsBox.h / 2; },
+            }));
+        }
 
         // v1.16.0: field (interpolated raster) layer. One node per chart, added
         // BEFORE the cells node (so it renders UNDER cells, which render under
@@ -8812,6 +8938,10 @@ const createBaseAxisChart = (config, renderer) => {
         axisStyleRefs.tickColor.value = resolveColor(config.axisColor || DEFAULT_AXIS_COLOR, container);
         axisStyleRefs.labelColor.value = resolveColor(config.labelColor || DEFAULT_LABEL_COLOR, container);
         gridColorRef.value = resolveColor(gridColorSpec, container);
+        // v1.23.0: re-fire the axis/grid color bindings AFTER all ref writes so
+        // spine/tick/label/gridline (and axis-title) colors re-resolve to the
+        // new values -- the node bindings only track this signal.
+        axisThemeVersion.update((v) => (v + 1) | 0);
         crosshairColorRef.value = resolveColor(crosshairColorSpec, container);
         tooltipBgRef.value = resolveColor(tooltipBgSpec, container);
         tooltipBorderRef.value = resolveColor(tooltipBorderSpec, container);

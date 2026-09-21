@@ -5,6 +5,60 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] -- 2026-09-21
+
+### Added
+
+- `xTickFormat` / `yTickFormat` on every axis-kernel chart (line, time-line,
+  area, bar, scatter, bubble, candlestick): `(value: number) => string`
+  callbacks applied at the axis rebuild's single label-format site. A time
+  x-axis passes the raw epoch-ms tick value. Band (category) axes ignore the
+  callback -- category labels are data, not formatted ticks; the horizontal
+  bar's bottom VALUE axis honors `xTickFormat` (screen-edge semantics). A
+  non-function config value throws at construction with zero owned signals
+  allocated; a callback that returns a non-string or throws on the FIRST
+  synchronous rebuild surfaces as a `mount()` error after the disposers are
+  registered (full unwind, nothing leaks); on a LATER rebuild it is
+  fail-safe -- the affected labels hide, no throw mid-gesture.
+- `xTitle` / `yTitle` on the same charts: non-empty strings rendered as
+  pooled scene text nodes (`yTitle` rotated -90 degrees via the node
+  `rotation` prop, reading bottom-to-top). A title adds 18px to that side's
+  DEFAULT margin only when `margin.bottom` / `margin.left` is not set -- an
+  explicit per-side margin is absolute. Titles track plot-bounds changes,
+  recolor on `refreshTheme()`, export to SVG, and die with the scene on
+  `destroy()`. `''` and non-strings throw at construction, zero node delta.
+
+### Fixed
+
+- Axis-kernel `refreshTheme()` now actually recolors the axis chrome. The
+  spine, tick lines, tick labels, band labels, and gridlines are lite-scene
+  node bindings, which re-fire only on a TRACKED signal read -- mutating the
+  resolved color refs and repainting (the pre-1.23.0 behavior) painted the
+  stale attach-time colors on every axis-kernel chart. A new per-chart
+  `axisThemeVersion` signal, read by the call-site color getters and bumped
+  by `refreshTheme()` after the refs re-resolve, re-fires the bindings.
+  Draw-time consumers (crosshair, tooltip, series, grid-kernel labels) were
+  never affected.
+- `exportSVG()` now emits rotated text correctly: a non-axis-aligned CTM is
+  carried as a `transform="matrix(a b c d e f)"` attribute with local x/y
+  (previously the transform was baked into x/y, which kept the anchor but
+  dropped the rotation -- pie and radar label exports rendered horizontal).
+  Axis-aligned text output is byte-identical.
+- The per-side margin defaults were unreachable on charts without a `margin`
+  config (`config.margin || DEFAULT_MARGIN` made every `side != null` check
+  true against the default object itself). Resolution is now per-side against
+  a null fallback; every existing config resolves to identical values.
+
+### Coverage
+
+- 14 new boundary tests (AXT1..AXT14; 558 -> 572), three measured reversion
+  proofs (neutered format branch, removed margin bump, removed theme bump --
+  each reddens exactly its named tests), torture A28 (frame-path isolation of
+  the callbacks across a 500-redraw storm; two-pass rebuild + refreshTheme
+  storms gated at a 128 B/op warm ceiling and 8 B/op steady state with zero
+  signal-graph growth; titled-redraw parity within 2 B/op of a title-less
+  control), BREAK control verified failing.
+
 ## [1.22.0] -- 2026-09-17
 
 ### Added
