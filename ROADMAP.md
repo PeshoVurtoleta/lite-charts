@@ -5,7 +5,23 @@ preceded the v1.0.0 publish.
 
 ---
 
-## v1.23.0 (current)
+## v1.24.0 (current)
+
+Chart chrome (brief #21, `briefs/chart-chrome.md`; queue item 4). Chart-level
+`title` / `subtitle` / `caption` on the axis kernel, riding the v1.23.0
+machinery end to end: conditional default-margin bumps (24/16/14px, explicit
+margins absolute), `axisThemeVersion`-driven recolor, pooled scene text
+nodes that die with the scene. The caption owns the bottom-most line and
+pushes a present xTitle up one caption line; without one the v1.23.0 xTitle
+offset is byte-identical (test-pinned). Fonts derive cold from the axis
+font (`_deriveChromeFonts`: title bold +4px / subtitle +1 / caption -1,
+px-less base falls back unchanged). Fail-closed pre-signal doors including
+subtitle-requires-title. Named refusals: per-kernel chrome
+(pie/donut/radar/heatmap), per-element style objects, wrapping. 583/583,
+torture A29, three reversion proofs; coder landed zero-deviation first
+pass, reviewer APPROVED 6/6.
+
+## v1.23.0
 
 Axis titles + tick-format callbacks (brief #20,
 `briefs/axis-titles-tickformat.md`; queue item 3), plus a discovered

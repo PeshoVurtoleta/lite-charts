@@ -476,6 +476,12 @@ export interface LineChartConfig extends PanZoomConfig, BrushConfig {
     xTitle?: string;
     /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
     yTitle?: string;
+    /** Chart headline, centered above the plot. Non-empty string; adds to the default top margin unless margin.top is set. */
+    title?: string;
+    /** Line under the title (requires title). Non-empty string; adds to the default top margin unless margin.top is set. */
+    subtitle?: string;
+    /** Small attribution line at the bottom-right of the plot. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    caption?: string;
 
     /** Path interpolation. Default 'linear'. Per-series override via SeriesConfig.interpolation. */
     interpolation?: InterpolationMode;
@@ -933,6 +939,12 @@ export interface BubbleChartConfig extends PanZoomConfig, BrushConfig {
     xTitle?: string;
     /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
     yTitle?: string;
+    /** Chart headline, centered above the plot. Non-empty string; adds to the default top margin unless margin.top is set. */
+    title?: string;
+    /** Line under the title (requires title). Non-empty string; adds to the default top margin unless margin.top is set. */
+    subtitle?: string;
+    /** Small attribution line at the bottom-right of the plot. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    caption?: string;
     background?: string;
     dpr?: number;
     schedule?: (cb: () => void) => unknown;
@@ -1288,6 +1300,12 @@ export interface ScatterChartConfig extends PanZoomConfig, BrushConfig {
     xTitle?: string;
     /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
     yTitle?: string;
+    /** Chart headline, centered above the plot. Non-empty string; adds to the default top margin unless margin.top is set. */
+    title?: string;
+    /** Line under the title (requires title). Non-empty string; adds to the default top margin unless margin.top is set. */
+    subtitle?: string;
+    /** Small attribution line at the bottom-right of the plot. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    caption?: string;
     background?: string;
     dpr?: number;
     schedule?: (cb: () => void) => unknown;
@@ -1526,6 +1544,12 @@ export interface CandlestickChartConfig extends PanZoomConfig, BrushConfig {
     xTitle?: string;
     /** Left-axis title (rendered rotated). Non-empty string; adds to the default left margin unless margin.left is set. */
     yTitle?: string;
+    /** Chart headline, centered above the plot. Non-empty string; adds to the default top margin unless margin.top is set. */
+    title?: string;
+    /** Line under the title (requires title). Non-empty string; adds to the default top margin unless margin.top is set. */
+    subtitle?: string;
+    /** Small attribution line at the bottom-right of the plot. Non-empty string; adds to the default bottom margin unless margin.bottom is set. */
+    caption?: string;
     dpr?: number;
 
     /** Gridlines through the plot rect at each tick. Default false. */

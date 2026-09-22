@@ -39,7 +39,18 @@
 > OUT for v1 with a named trigger -- candles sit at TRUE time, weekend/
 > holiday gaps show as gaps (the shading engine's premise); volume panes,
 > comparison overlays, hollow/heikin-ashi variants OUT (see README).
-> v1.23.0 (current): axis titles + tick-format callbacks + an axis-kernel
+> v1.24.0 (current): chart chrome on the axis-kernel charts. title/subtitle
+> stack canvas-centered above the plot, caption right-aligns on the
+> bottom-most line; each adds to its side's DEFAULT margin only when that
+> margin side is unset (title 24px / subtitle 16px / caption 14px; explicit
+> margins absolute). A caption pushes the v1.23.0 xTitle up one line;
+> without one the xTitle position is byte-identical (test-pinned). Fonts
+> derive cold from the axis font (title bold +4px / subtitle +1 / caption
+> -1, no-px fallback fail-safe); colors ride labelColor + the v1.23.0
+> axisThemeVersion recolor. Fail-closed pre-signal doors incl. subtitle-
+> requires-title; other kernels ignore the keys (per-kernel chrome is a
+> named future cut). +11 tests (572->583), 3 reversion proofs, torture A29.
+> v1.23.0: axis titles + tick-format callbacks + an axis-kernel
 > theme fix. xTickFormat/yTickFormat ((value: number) => string) format the
 > numeric/time tick labels at the cold axis rebuild (time x passes raw epoch
 > ms; band axes ignore them; the horizontal bar's bottom VALUE axis honors
@@ -920,6 +931,14 @@ interface LineChartConfig {
     yTickFormat?: (value: number) => string;
     xTitle?: string;
     yTitle?: string;
+
+    // v1.24.0: chart chrome (axis-kernel charts only). title/subtitle stack
+    // canvas-centered at the top, caption right-aligns bottom-right; each
+    // bumps its side's DEFAULT margin unless that side is set explicitly.
+    // Non-empty strings; subtitle requires title; fonts derive from `font`.
+    title?: string;
+    subtitle?: string;
+    caption?: string;
 
     // Device pixel ratio override. Default: globalThis.devicePixelRatio.
     dpr?: number;

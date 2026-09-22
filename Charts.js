@@ -2325,6 +2325,14 @@ const DEFAULT_MARGIN = { top: 16, right: 24, bottom: 32, left: 56 };
 // insets the title from the canvas edge.
 const TITLE_MARGIN = 18;
 const TITLE_PAD = 4;
+// v1.24.0: chart chrome spacing. Title/subtitle stack at the top (canvas-
+// centered); the caption takes the bottom-most line, pushing the xTitle up
+// by CAPTION_MARGIN when both are present. Values are one line of the
+// derived font + gap.
+const CHROME_TITLE_MARGIN = 24;
+const CHROME_SUB_MARGIN = 16;
+const CHROME_TITLE_LINE = 20;
+const CAPTION_MARGIN = 14;
 const DEFAULT_AXIS_COLOR = '#888888';
 const DEFAULT_LABEL_COLOR = '#444444';
 const DEFAULT_LINE_COLOR = '#3b82f6';
@@ -2348,6 +2356,21 @@ const DEFAULT_ERRORBAR_BAND_ALPHA = 0.15;
 // `Math.PI * 2` allocations on every mousemove redraw.
 const _EMPTY_DASH = Object.freeze([]);
 const _TWO_PI = Math.PI * 2;
+
+// v1.24.0: chrome fonts derive from the axis font (title bold +4px,
+// subtitle +1px, caption -1px). A base font without a px size falls back
+// to itself unchanged (cosmetic, fail-safe -- never a throw).
+const _deriveChromeFonts = (baseFont) => {
+    const m = baseFont.match(/(\d+(?:\.\d+)?)px\s+(.+)/);
+    if (!m) return { title: baseFont, subtitle: baseFont, caption: baseFont };
+    const size = +m[1];
+    const family = m[2];
+    return {
+        title: 'bold ' + (size + 4) + 'px ' + family,
+        subtitle: (size + 1) + 'px ' + family,
+        caption: (size - 1) + 'px ' + family,
+    };
+};
 
 // ---------------------------------------------------------------------------
 // Error bars / confidence bands (v1.21.0)
@@ -6866,6 +6889,26 @@ const createBaseAxisChart = (config, renderer) => {
         throw new Error('lite-charts: yTitle must be a non-empty string');
     }
 
+    // v1.24.0: chart chrome. Same contract as the axis titles: a non-empty
+    // string or absent, anything else (including '') throws. A subtitle
+    // without a title throws -- it is subordinate by definition (relaxing
+    // later is non-breaking; the reverse is not).
+    const titleText = config.title != null ? config.title : null;
+    if (titleText !== null && (typeof titleText !== 'string' || titleText === '')) {
+        throw new Error('lite-charts: title must be a non-empty string');
+    }
+    const subtitleText = config.subtitle != null ? config.subtitle : null;
+    if (subtitleText !== null && (typeof subtitleText !== 'string' || subtitleText === '')) {
+        throw new Error('lite-charts: subtitle must be a non-empty string');
+    }
+    const captionText = config.caption != null ? config.caption : null;
+    if (captionText !== null && (typeof captionText !== 'string' || captionText === '')) {
+        throw new Error('lite-charts: caption must be a non-empty string');
+    }
+    if (subtitleText !== null && titleText === null) {
+        throw new Error('lite-charts: subtitle requires title');
+    }
+
     const widthAutoSig = widthExplicit ? null : _own(signal(800));
     const heightAutoSig = heightExplicit ? null : _own(signal(400));
     const widthAcc = widthExplicit ? asAccessor(config.width) : widthAutoSig;
@@ -6876,12 +6919,21 @@ const createBaseAxisChart = (config, renderer) => {
     // `config.margin || DEFAULT_MARGIN` fallback made `m.bottom != null`
     // always-true on default charts, which would dead-branch the title bump.
     const m = config.margin || null;
-    const marginTop = m && m.top != null ? m.top : DEFAULT_MARGIN.top;
+    const marginTop = m && m.top != null ? m.top
+        : DEFAULT_MARGIN.top
+            + (titleText !== null ? CHROME_TITLE_MARGIN : 0)
+            + (subtitleText !== null ? CHROME_SUB_MARGIN : 0);
     const marginRight = m && m.right != null ? m.right : DEFAULT_MARGIN.right;
     const marginBottom = m && m.bottom != null ? m.bottom
-        : (xTitleText !== null ? DEFAULT_MARGIN.bottom + TITLE_MARGIN : DEFAULT_MARGIN.bottom);
+        : DEFAULT_MARGIN.bottom
+            + (xTitleText !== null ? TITLE_MARGIN : 0)
+            + (captionText !== null ? CAPTION_MARGIN : 0);
     const marginLeft = m && m.left != null ? m.left
         : (yTitleText !== null ? DEFAULT_MARGIN.left + TITLE_MARGIN : DEFAULT_MARGIN.left);
+    // v1.24.0: a caption occupies the bottom-most line, so the xTitle rises by
+    // CAPTION_MARGIN when a caption is present (byte-identical to TITLE_PAD
+    // otherwise). Precomputed here on the cold path; read by the xTitle node.
+    const _xTitleOffset = TITLE_PAD + (captionText !== null ? CAPTION_MARGIN : 0);
 
     // -- Series state --
     // Tag each state with its position in the array. The multi-series bubble
@@ -7784,7 +7836,7 @@ const createBaseAxisChart = (config, renderer) => {
                 align: 'center',
                 baseline: 'bottom',
                 x: () => { plotBoundsSignal(); return plotBoundsBox.x + plotBoundsBox.w / 2; },
-                y: () => { plotBoundsSignal(); return plotBoundsBox.y + plotBoundsBox.h + marginBottom - TITLE_PAD; },
+                y: () => { plotBoundsSignal(); return plotBoundsBox.y + plotBoundsBox.h + marginBottom - _xTitleOffset; },
             }));
         }
         if (yTitleText !== null) {
@@ -7798,6 +7850,52 @@ const createBaseAxisChart = (config, renderer) => {
                 x: TITLE_PAD,
                 y: () => { plotBoundsSignal(); return plotBoundsBox.y + plotBoundsBox.h / 2; },
             }));
+        }
+
+        // v1.24.0: chart chrome. Title/subtitle stack canvas-centered at the top;
+        // caption right-aligns at the plot's right edge on the bottom-most line.
+        // Colors ride axisThemeVersion like the axis titles; fonts are the cold
+        // _deriveChromeFonts split of the axis font.
+        if (titleText !== null || captionText !== null) {
+            const chromeFonts = _deriveChromeFonts(
+                config.font != null ? config.font : DEFAULT_FONT);
+            const chromeCenterX = () => {
+                plotBoundsSignal();
+                return (marginLeft + plotBoundsBox.w + marginRight) / 2;
+            };
+            if (titleText !== null) {
+                scene.root.add(textNode({
+                    text: titleText,
+                    font: chromeFonts.title,
+                    fill: () => (axisThemeVersion(), axisStyleRefs.labelColor.value),
+                    align: 'center',
+                    baseline: 'top',
+                    x: chromeCenterX,
+                    y: TITLE_PAD,
+                }));
+                if (subtitleText !== null) {
+                    scene.root.add(textNode({
+                        text: subtitleText,
+                        font: chromeFonts.subtitle,
+                        fill: () => (axisThemeVersion(), axisStyleRefs.labelColor.value),
+                        align: 'center',
+                        baseline: 'top',
+                        x: chromeCenterX,
+                        y: TITLE_PAD + CHROME_TITLE_LINE,
+                    }));
+                }
+            }
+            if (captionText !== null) {
+                scene.root.add(textNode({
+                    text: captionText,
+                    font: chromeFonts.caption,
+                    fill: () => (axisThemeVersion(), axisStyleRefs.labelColor.value),
+                    align: 'right',
+                    baseline: 'bottom',
+                    x: () => { plotBoundsSignal(); return plotBoundsBox.x + plotBoundsBox.w; },
+                    y: () => { plotBoundsSignal(); return plotBoundsBox.y + plotBoundsBox.h + marginBottom - TITLE_PAD; },
+                }));
+            }
         }
 
         // v1.16.0: field (interpolated raster) layer. One node per chart, added

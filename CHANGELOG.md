@@ -5,6 +5,44 @@ All notable changes to `@zakkster/lite-charts` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.0] -- 2026-09-22
+
+### Added
+
+- Chart chrome on every axis-kernel chart (line, time-line, area, bar,
+  scatter, bubble, candlestick): `title` and `subtitle` stack centered on
+  the canvas above the plot; `caption` right-aligns at the plot's right
+  edge on the bottom-most line. Each element adds to its side's DEFAULT
+  margin only when that side is not set explicitly (title 24px, subtitle
+  16px, caption 14px; an explicit `margin.top`/`margin.bottom` is
+  absolute). When a caption and an `xTitle` are both present, the xTitle
+  moves up one caption line; without a caption its v1.23.0 position is
+  byte-identical (test-pinned). Fonts derive from the axis `font` at
+  construction (title bold +4px, subtitle +1px, caption -1px; a base font
+  without a px size falls back to itself). Colors ride `labelColor` and
+  re-resolve on `refreshTheme()` via the v1.23.0 `axisThemeVersion`
+  signal. All three export to SVG and die with the scene on `destroy()`.
+
+### Design
+
+- Fail closed at construction, before any owned signal: `''` and
+  non-strings throw for all three keys, and `subtitle` without `title`
+  throws (subordinate by definition -- relaxing later is non-breaking,
+  the reverse is not). Non-axis kernels (pie/donut/radar/heatmap) ignore
+  the keys exactly as they ignore `xTitle`; per-kernel chrome is a named
+  future cut. Per-element `{ text, color, font }` objects and text
+  wrapping are named refusals -- single-line strings, hierarchy carried
+  by size and weight.
+
+### Coverage
+
+- 11 new boundary tests (AXC1..AXC11; 572 -> 583), three measured
+  reversion proofs (neutered chrome block, removed top-margin bump,
+  fixed xTitle offset -- each reddens exactly its named tests), torture
+  A29 (chrome redraw parity within 2 B/op of a chrome-less control;
+  two-pass refreshTheme storm at 8 B/op steady state with zero
+  signal-graph growth), BREAK control verified failing.
+
 ## [1.23.0] -- 2026-09-21
 
 ### Added

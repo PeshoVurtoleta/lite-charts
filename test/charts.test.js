@@ -12581,3 +12581,148 @@ describe('v1.23.0 -- axis titles + tick-format callback', () => {
         assert.equal(stats().activeNodes, before, 'destroy must detach every signal node');
     });
 });
+
+// ---------------------------------------------------------------------------
+// v1.24.0 -- chart chrome: title / subtitle / caption
+// ---------------------------------------------------------------------------
+
+describe('v1.24.0 -- chart chrome (title / subtitle / caption)', () => {
+    const LDATA = [{ x: 0, y: 1 }, { x: 2, y: 5 }, { x: 4, y: 3 }];
+    const texts = (ctx) => callsOf(ctx, 'fillText').map((c) => c[1][0]);
+    const mk = (cfg) => {
+        const canvas = createMockCanvas(400, 220);
+        const chart = createLineChart({ data: LDATA, width: 400, height: 220, schedule: (fn) => fn(), ...cfg });
+        chart.mount(canvas);
+        return { chart, ctx: canvas.getContext('2d') };
+    };
+
+    it('AXC1: title renders centered in a derived bold font one size class up', () => {
+        const { chart, ctx } = mk({ title: 'Chrome Title' });
+        assert.ok(texts(ctx).includes('Chrome Title'), 'title must paint');
+        const fonts = callsOf(ctx, 'set:font').map((c) => c[1][0]);
+        assert.ok(fonts.includes('bold 15px sans-serif'),
+            'default 11px base must derive a bold 15px title font, saw: ' + [...new Set(fonts)].join(' | '));
+        chart.destroy();
+    });
+
+    it('AXC2: subtitle stacks under the title in its own derived font', () => {
+        const { chart, ctx } = mk({ title: 'T', subtitle: 'the subtitle line' });
+        assert.ok(texts(ctx).includes('T') && texts(ctx).includes('the subtitle line'));
+        const fonts = callsOf(ctx, 'set:font').map((c) => c[1][0]);
+        assert.ok(fonts.includes('12px sans-serif'), 'subtitle font must be size+1');
+        chart.destroy();
+    });
+
+    it('AXC3: caption renders right-aligned in the size-1 font', () => {
+        const { chart, ctx } = mk({ caption: 'source: somewhere' });
+        assert.ok(texts(ctx).includes('source: somewhere'), 'caption must paint');
+        const fonts = callsOf(ctx, 'set:font').map((c) => c[1][0]);
+        assert.ok(fonts.includes('10px sans-serif'), 'caption font must be size-1');
+        const aligns = callsOf(ctx, 'set:textAlign').map((c) => c[1][0]);
+        assert.ok(aligns.includes('right'), 'caption must right-align');
+        chart.destroy();
+    });
+
+    it('AXC4: chrome bumps its side of the DEFAULT margin; explicit margins absolute', () => {
+        // Baselines: DEFAULT_MARGIN {16,24,32,56}; bumps: title 24, subtitle 16,
+        // caption 14, xTitle 18 (v1.23.0).
+        const plain = mk({});
+        assert.equal(plain.chart._internal.plotBoundsBox.y, 16);
+        assert.equal(plain.chart._internal.plotBoundsBox.h, 220 - 16 - 32);
+        plain.chart.destroy();
+        const t = mk({ title: 'T' });
+        assert.equal(t.chart._internal.plotBoundsBox.y, 16 + 24, 'title bumps top');
+        t.chart.destroy();
+        const ts = mk({ title: 'T', subtitle: 'S' });
+        assert.equal(ts.chart._internal.plotBoundsBox.y, 16 + 24 + 16, 'title+subtitle stack the top bump');
+        ts.chart.destroy();
+        const full = mk({ title: 'T', xTitle: 'X', caption: 'C' });
+        assert.equal(full.chart._internal.plotBoundsBox.h, 220 - (16 + 24) - (32 + 18 + 14),
+            'caption stacks with the xTitle bottom bump');
+        full.chart.destroy();
+        const abs = mk({ title: 'T', subtitle: 'S', caption: 'C', margin: { top: 30, bottom: 30 } });
+        assert.equal(abs.chart._internal.plotBoundsBox.y, 30, 'explicit margin.top is absolute');
+        assert.equal(abs.chart._internal.plotBoundsBox.h, 220 - 30 - 30, 'explicit margin.bottom is absolute');
+        abs.chart.destroy();
+    });
+
+    it('AXC5: subtitle without title throws at construction, zero node leak', () => {
+        const before = stats().activeNodes;
+        assert.throws(() => createLineChart({ data: LDATA, subtitle: 'orphan' }),
+            /lite-charts: subtitle requires title/);
+        assert.equal(stats().activeNodes - before, 0);
+    });
+
+    it('AXC6: junk chrome values throw at construction (fail closed), zero node leak', () => {
+        for (const bad of ['', 42, {}, [], false]) {
+            for (const key of ['title', 'caption']) {
+                const before = stats().activeNodes;
+                assert.throws(() => createLineChart({ data: LDATA, [key]: bad }),
+                    new RegExp('lite-charts: ' + key + ' must be a non-empty string'),
+                    key + '=' + JSON.stringify(bad));
+                assert.equal(stats().activeNodes - before, 0, 'rejected ' + key + ' leaked a node');
+            }
+            const before = stats().activeNodes;
+            assert.throws(() => createLineChart({ data: LDATA, title: 'T', subtitle: bad }),
+                /lite-charts: subtitle must be a non-empty string/);
+            assert.equal(stats().activeNodes - before, 0);
+        }
+    });
+
+    it('AXC7: refreshTheme recolors the chrome (rides axisThemeVersion)', () => {
+        const vars = { '--txt': '#111111' };
+        const origGCS = globalThis.getComputedStyle;
+        globalThis.getComputedStyle = () => ({ getPropertyValue: (n) => vars[n] || '' });
+        try {
+            const { chart, ctx } = mk({ title: 'T', caption: 'C', labelColor: '--txt' });
+            vars['--txt'] = '#eeeeee';
+            chart.refreshTheme();
+            ctx.calls.length = 0;
+            chart.redraw();
+            const fills = callsOf(ctx, 'set:fillStyle').map((c) => c[1][0]);
+            assert.ok(fills.includes('#eeeeee'), 'chrome must paint the re-resolved color');
+            assert.ok(!fills.includes('#111111'), 'stale chrome color must be gone');
+            chart.destroy();
+        } finally { globalThis.getComputedStyle = origGCS; }
+    });
+
+    it('AXC8: exportSVG carries title, subtitle, and caption', () => {
+        const { chart } = mk({ title: 'Big T', subtitle: 'Sub S', caption: 'Cap C' });
+        const svg = chart.exportSVG();
+        for (const s of ['Big T', 'Sub S', 'Cap C']) {
+            assert.ok(svg.includes('>' + s + '</text>'), s + ' missing from SVG');
+        }
+        chart.destroy();
+    });
+
+    it('AXC9: a caption pushes the xTitle up one line (caption owns the bottom-most line)', () => {
+        const both = mk({ xTitle: 'XT', caption: 'CAP' });
+        const svg = both.chart.exportSVG();
+        const yOf = (s) => +svg.match(new RegExp('<text[^>]*y="([0-9.]+)"[^>]*>' + s + '</text>'))[1];
+        assert.ok(yOf('CAP') > yOf('XT'), 'caption must sit below the xTitle');
+        both.chart.destroy();
+        // Without a caption the v1.23.0 xTitle position is byte-identical:
+        // offset TITLE_PAD (4) from the bottom edge.
+        const solo = mk({ xTitle: 'XT' });
+        const svg2 = solo.chart.exportSVG();
+        const y2 = +svg2.match(/<text[^>]*y="([0-9.]+)"[^>]*>XT<\/text>/)[1];
+        assert.equal(y2, 220 - 4, 'xTitle without caption keeps the v1.23.0 offset');
+        solo.chart.destroy();
+    });
+
+    it('AXC10: a base font without a px size falls back unchanged (fail-safe, no throw)', () => {
+        const { chart, ctx } = mk({ title: 'T', font: 'monospace' });
+        assert.ok(texts(ctx).includes('T'), 'title still paints');
+        const fonts = callsOf(ctx, 'set:font').map((c) => c[1][0]);
+        assert.ok(fonts.includes('monospace'), 'chrome falls back to the base font');
+        assert.ok(!fonts.some((f) => /NaN/.test(f)), 'no NaN-derived font');
+        chart.destroy();
+    });
+
+    it('AXC11: full chrome chart destroys clean -- signal nodes return to baseline', () => {
+        const before = stats().activeNodes;
+        const { chart } = mk({ title: 'T', subtitle: 'S', caption: 'C', xTitle: 'X', yTitle: 'Y' });
+        chart.destroy();
+        assert.equal(stats().activeNodes, before);
+    });
+});

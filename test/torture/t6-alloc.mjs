@@ -1460,4 +1460,50 @@ export function run() {
         ctrl.destroy();
         c.destroy();
     }
+
+    // --- A29 (v1.24.0): chart chrome (title/subtitle/caption) ----------------
+    // Chrome nodes are static text bound at mount; their accessors track only
+    // plotBounds/theme signals. Gates: (a) chrome redraw parity vs a
+    // chrome-less control; (b) refreshTheme storm with full chrome stays flat
+    // (two-pass warming per the A28 lesson); (c) zero graph growth across both.
+    {
+        const rows = [];
+        for (let i = 0; i < 100; i++) rows.push({ x: i, y: Math.sin(i * 0.2) * 8 });
+        const mkChart = (extras) => {
+            const c = createLineChart({
+                data: rows, width: 800, height: 400, schedule: (fn) => fn(),
+                ...extras,
+            });
+            const cv = createEventCanvas(800, 400);
+            c.mount(cv);
+            quietCanvas(cv);
+            return c;
+        };
+        const c = mkChart({
+            title: 'Chrome torture', subtitle: 'A29 subtitle',
+            caption: 'source: A29', xTitle: 'X', yTitle: 'Y',
+        });
+        const ctrl = mkChart({});
+
+        const nBefore = graphSnapshot();
+        const gCh = runOpsGate(() => { c.redraw(); }, { ops: 20000, warmup: 1000 });
+        const gCt = runOpsGate(() => { ctrl.redraw(); }, { ops: 20000, warmup: 1000 });
+        if (!gCh.report.ok) die(allocFailMsg('A29.chrome-redraw', gCh.report, gCh.summary));
+        check(Math.abs(gCh.bytesPerOp - gCt.bytesPerOp) <= 2.0,
+            () => `A29: chrome redraw ${gCh.bytesPerOp.toFixed(3)} B/op vs chrome-less control ${gCt.bytesPerOp.toFixed(3)} B/op (delta > 2)`);
+
+        const gThWarm = runOpsGate(() => { c.refreshTheme(); }, { ops: 2000, warmup: 200 });
+        const gTh = runOpsGate(() => { c.refreshTheme(); }, { ops: 2000, warmup: 200 });
+        const nAfter = graphSnapshot();
+        if (!gTh.report.ok) die(allocFailMsg('A29.theme-storm', gTh.report, gTh.summary));
+        check(gThWarm.bytesPerOp <= 128,
+            () => `A29: theme storm pass 1 retains ${gThWarm.bytesPerOp.toFixed(3)} B/op (> 128 gross-leak ceiling)`);
+        check(gTh.bytesPerOp <= 8,
+            () => `A29: steady-state refreshTheme with full chrome retains ${gTh.bytesPerOp.toFixed(3)} B/op (> 8 leak floor)`);
+        check(nAfter.nodes - nBefore.nodes === 0,
+            () => `A29: ${nAfter.nodes - nBefore.nodes} new signal-graph nodes across the chrome storms (expected 0)`);
+
+        ctrl.destroy();
+        c.destroy();
+    }
 }
